@@ -1,0 +1,22 @@
+# secrets — never commit API keys
+.env
+.env.*
+*.key
+secrets/
+
+# data & artifacts (large; regenerate with the scripts)
+data/
+artifacts/
+*.parquet
+*.pkl
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# misc
+.ipynb_checkpoints/
+.DS_Store
