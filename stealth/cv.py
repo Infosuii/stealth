@@ -202,29 +202,23 @@ def assert_fold_gaps(folds: list[Fold], min_gap: int = 20) -> None:
 
 
 def independent_inner_folds(target: Fold, candidates: list[Fold], *, min_gap: int = 20) -> list[int]:
-    """Indices of ``candidates`` whose INNER VALIDATION eras lie >= ``min_gap`` eras away from ``target.test_eras``.
+    """Sources whose complete fit/feature-selection provenance excludes the scored block.
 
-    The tree count of a scored fold may only be chosen from early-stopping results whose validation eras do not
-    touch that fold's test block (PLAN C8: "the scored fold never influences its own tree count"). With chronological
-    folds the inner_val of every non-last fold sits at the END of the era range, i.e. inside the last fold's (and the
-    forward block's) test eras -- so those folds' counts are excluded for the last fold / the forward block. A fold's
-    own inner split is always eligible (inner_val is a subset of its train eras, which are purged from its test).
+    An early-stopping decision depends on both the fitted model and its validation labels.
+    Feature selection can also use the rest of the source fold's training rows. Checking
+    ``train_eras`` therefore covers every such dependency, not just ``inner_val_eras``.
     """
-    out = []
-    for j, c in enumerate(candidates):
-        if _gap_to_block(c.inner_val_eras, target.test_eras) >= min_gap:
-            out.append(j)
-    return out
+    return [j for j, c in enumerate(candidates) if _gap_to_block(c.train_eras, target.test_eras) >= min_gap]
 
 
 def assert_count_sources(target: Fold, sources: list[Fold], *, min_gap: int = 20) -> None:
-    """Raise ``AssertionError`` unless every source fold's inner_val eras are >= ``min_gap`` from ``target.test_eras``."""
+    """Assert that every count source's full training provenance excludes the scored block."""
     if not sources:
         raise AssertionError(f"{target.name}: no early-stopping source fold is independent of its test block")
     for s in sources:
-        g = _gap_to_block(s.inner_val_eras, target.test_eras)
+        g = _gap_to_block(s.train_eras, target.test_eras)
         if g < min_gap:
-            raise AssertionError(f"{target.name}: count source {s.name} inner_val eras are {g} < {min_gap} from the test block")
+            raise AssertionError(f"{target.name}: count source {s.name} training eras are {g} < {min_gap} from the test block")
 
 
 # --------------------------------------------------------------------------------------------------
@@ -239,10 +233,14 @@ class PairedResult:
     p_pos: float
     ci90: tuple[float, float]
     n_eras: int
+    p_value: float = 1.0
+    n_blocks: int = 0
+    inference_valid: bool = False
 
     def as_dict(self) -> dict:
         return {"diff_mean": self.diff_mean, "diff_se": self.diff_se, "p_pos": self.p_pos,
-                "ci90": [self.ci90[0], self.ci90[1]], "n_eras": self.n_eras}
+                "ci90": [self.ci90[0], self.ci90[1]], "n_eras": self.n_eras,
+                "p_value": self.p_value, "n_blocks": self.n_blocks, "inference_valid": self.inference_valid}
 
 
 def _clean_series(series: pd.Series) -> np.ndarray:
@@ -264,6 +262,8 @@ def block_bootstrap_means(values: np.ndarray, *, block: int = 20, n_boot: int = 
         raise ValueError("empty series")
     if block < 1:
         raise ValueError("block must be >= 1")
+    if n_boot < 2:
+        raise ValueError("n_boot must be >= 2")
     block = min(block, n)
     k = math.ceil(n / block)
     rng = np.random.default_rng(seed)
@@ -285,12 +285,19 @@ def paired_block_bootstrap(
     v = _clean_series(diff)
     means = block_bootstrap_means(v, block=block, n_boot=n_boot, seed=seed)
     lo, hi = np.percentile(means, [5.0, 95.0])
+    n_blocks = len(v) // block
+    valid = n_blocks >= 2
+    # Null-centred one-sided test, separate from the descriptive percentile p_pos.
+    # Add one to numerator/denominator so a finite simulation never reports exact p=0.
+    null_means = means - float(v.mean())
+    p_value = (1.0 + np.count_nonzero(null_means >= float(v.mean()))) / (n_boot + 1.0) if valid else 1.0
     return PairedResult(
         diff_mean=float(v.mean()),
         diff_se=float(means.std(ddof=1)) if n_boot > 1 else float("nan"),
-        p_pos=float((means > 0).mean()),
+        p_pos=float((means > 0).mean()) if valid else 0.5,
         ci90=(float(lo), float(hi)),
         n_eras=int(len(v)),
+        p_value=float(p_value), n_blocks=int(n_blocks), inference_valid=bool(valid),
     )
 
 

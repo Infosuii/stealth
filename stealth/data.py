@@ -257,6 +257,10 @@ def make_client(dotenv_path: Path | None = None):  # type: ignore[no-untyped-def
     key = resolve_api_key(dotenv_path)
     from everestapi import EverestAPI
 
+    # HTTP request logs include signed download URLs. Keep credentials out of CLI
+    # logs; our own download messages already identify the files and their sizes.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     base_url = os.environ.get("EIQ_BASE_URL", DEFAULT_BASE_URL)
     log.info("EverestAPI client -> %s (tournament=futures)", base_url)
     return EverestAPI(api_key=key, base_url=base_url, tournament="futures")

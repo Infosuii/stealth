@@ -519,14 +519,19 @@ def _regime_prepare(z_pred, target, era, direction, core_proxy) -> dict:
     pad = np.isnan(t)
     z = np.where(pad, np.nan, np.nan_to_num(z))  # NaN members already handled upstream -> mid
     d = np.where(pad, np.nan, np.nan_to_num(d))
-    c = np.where(pad, np.nan, np.nan_to_num(c))  # all-missing core rows -> mid (as _runtime does)
+    # Rank the valid raw core values first; missing core rows receive z=0 at runtime.
+    # Filling raw missing values with 0 before ranking makes them the lowest ranks.
+    c_g = rank_gauss_rows(c)
+    c_g = np.where(pad, np.nan, np.nan_to_num(c_g))
     tc = t - _nanmean_rows(t)
     t_s = _standardise_rows(t)
     return {
         "pad": pad, "eras": eras, "n_rows": np.sum(~pad, axis=1), "tc": tc,
         "t_sd": np.sqrt(np.nanmean(tc * tc, axis=1)), "t_s": t_s,
         "d_perp": _orthogonalise_rows(rank_gauss_rows(d), t_s),
-        "c_g": rank_gauss_rows(c), "z_g": rank_gauss_rows(z),
+        # Runtime neutralises the weighted sum of member Gaussian scores directly.
+        # A second rank transform before projection changes the recipe being tested.
+        "c_g": c_g, "z_g": z,
     }
 
 
@@ -766,11 +771,12 @@ def paired_sharpe_bootstrap(a: pd.Series, b: pd.Series, *, block: int = 20, n_bo
     return {
         "dsharpe": sa - sb,
         "se": float(fin.std(ddof=1)) if len(fin) > 1 else float("nan"),
-        "p_pos": float(np.mean(np.nan_to_num(d, nan=0.0) > 0)),
+        "p_pos": float(np.mean(np.nan_to_num(d, nan=0.0) > 0)) if n // block >= 2 else 0.5,
         "ci90": [float(lo), float(hi)],
         "n_eras": n,
         "sharpe_a": sa,
         "sharpe_b": sb,
+        "n_blocks": int(n // block), "inference_valid": bool(n // block >= 2),
     }
 
 
