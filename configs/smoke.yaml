@@ -1,0 +1,73 @@
+# Smoke tier (sandbox, 2 cores, <= 8 min, < 3 GB). Schema: docs/INTERFACES.md "Config YAML".
+name: smoke
+run:
+  seed: 0
+  threads: 2
+  min_era: 5000          # eras >= 5000 only
+  max_era: null
+  min_rows: null         # no n_rows>=80 filter in smoke
+  time_decay: false
+  data_dir: data
+cv:
+  n_folds: 3
+  purge: 20
+  embargo: 20
+  inner_frac: 0.15
+  inner_gap: 20
+  forward:
+    enabled: false
+    train_end: 5925
+    test_start: 5945
+members:
+  - name: lgbm_everest
+    family: lgbm
+    target: target_everest
+    group: everest
+    features: all
+    input: nan
+    params: {num_leaves: 8, learning_rate: 0.03, min_data_in_leaf: 500, feature_fraction: 0.3,
+             lambda_l2: 10, bagging_fraction: 0.7, bagging_freq: 1, max_bin: 16}
+    n_estimators: 200    # fixed count (no inner early stopping)
+    es_cap: null
+  - name: lgbm_tougroute
+    family: lgbm
+    target: target_Tougroute
+    group: aux
+    features: all
+    input: nan
+    params: {num_leaves: 8, learning_rate: 0.03, min_data_in_leaf: 500, feature_fraction: 0.3,
+             lambda_l2: 10, bagging_fraction: 0.7, bagging_freq: 1, max_bin: 16}
+    n_estimators: 200
+    es_cap: null
+  - name: ridge_everest
+    family: ridge
+    target: target_everest
+    group: everest
+    features: all
+    input: linear
+    params: {alpha: 1.0e5}
+    n_estimators: null
+    es_cap: null
+search: {}               # no Optuna in smoke
+blend:
+  everest_weight: 0.5
+  nnls: false
+  p_b: 0.5
+  p_c: 0.25
+  simulation:
+    n_draws: 50
+    p_b_grid: [0.0, 0.25, 0.5, 0.75]
+    bench_fit_means: [0.0, 0.009, 0.02]
+    bench_fit_sd: 0.035
+    seed: 0
+bootstrap:
+  block: 20
+  n_boot: 500
+  seed: 0
+gates:
+  leak_spearman: 0.18
+  suspect_gain_over_baseline: 0.004
+  p_pos_adopt: 0.8
+timing:
+  catboost_max_fit_seconds: 120
+  progress_every_seconds: 60

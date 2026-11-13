@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stealth"
+version = "0.1.0"
+description = "Everesteer Himalayas (futures) prediction bot: purged-CV GBDT ensemble, by-value cloudpickle bundle, daily ops."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "Proprietary" }
+dependencies = [
+  "lightgbm==4.7.0",
+  "xgboost==3.2.0",
+  "scikit-learn==1.9.1",
+  "pandas==3.0.6",
+  "numpy==2.4.6",
+  "scipy==1.17.1",
+  "catboost==1.2.10",
+  "pyarrow==24.0.0",
+  "cloudpickle==3.1.2",
+  "everesteer-api==0.4.1",
+  "optuna",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["stealth", "stealth.models"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

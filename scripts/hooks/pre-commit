@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# stealth pre-commit hook: block secrets and forbidden paths in STAGED content.
+# Activate once per clone:  git config core.hooksPath scripts/hooks
+# Tested by tests/test_hook.py. Scans the index (what will be committed), never the working tree.
+#
+# Blocked paths : data/**, .env and .env.* (except .env.example), *.pkl, artifacts/**
+# Blocked text  : the API-key env var or the API-key header followed by a token-like value, GitHub tokens
+#                 (ghp_/gho_/github_pat_), AWS AKIA keys, PEM private-key headers, tokenised GitHub remote URLs.
+# Allowed       : lines that are exactly a 40- or 64-char hex string (git shas, sha256 files); key/header lines whose
+#                 value is an obvious placeholder (dummy, example, placeholder, redacted, changeme, your-key).
+# Bypass        : only with `git commit --no-verify`, and only when a human has read the offending line.
+set -u
+
+RED=$'\033[31m'; NC=$'\033[0m'
+fail=0
+
+# ---- staged paths -------------------------------------------------------------------------------
+mapfile -d '' staged < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+for path in "${staged[@]}"; do
+  [ -n "$path" ] || continue
+  base="${path##*/}"
+  case "$path" in
+    data/*|*/data/*)      echo "${RED}BLOCKED${NC}: data files are never committed: $path"; fail=1; continue ;;
+    artifacts/*)          echo "${RED}BLOCKED${NC}: artifacts/ is never committed: $path"; fail=1; continue ;;
+    *.pkl)                echo "${RED}BLOCKED${NC}: pickles are never committed (models/*.pkl is gitignored): $path"; fail=1; continue ;;
+  esac
+  case "$base" in
+    .env.example)         : ;;
+    .env|.env.*)          echo "${RED}BLOCKED${NC}: .env files are never committed: $path"; fail=1; continue ;;
+  esac
+done
+
+# ---- staged content -----------------------------------------------------------------------------
+# Patterns are ERE. Key/value patterns need a token-like VALUE (>= 8 chars of [A-Za-z0-9_.-], optionally quoted,
+# starting right after '=' for env vars) and -----BEGIN needs a full PEM header, so that docs / tests that merely
+# MENTION the names (EIQ_API_KEY=, 'X-API-Key: <key>') do not trip the hook.
+kv_patterns=(
+  'EIQ_API_KEY[[:space:]]*=["'"'"']?[A-Za-z0-9_.-]{8,}'
+  'EVEREST_API_KEY[[:space:]]*=["'"'"']?[A-Za-z0-9_.-]{8,}'
+  'X-API-Key[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_.-]{8,}'
+)
+placeholder='dummy|example|placeholder|redacted|changeme|your[-_]?key'
+patterns=(
+  'ghp_[A-Za-z0-9]{20,}'
+  'github_pat_[A-Za-z0-9_]{20,}'
+  'gho_[A-Za-z0-9]{20,}'
+  'AKIA[0-9A-Z]{16}'
+  '-----BEGIN [A-Z0-9 ]+-----'
+  'https://[^/[:space:]]*@github\.com'
+)
+
+for path in "${staged[@]}"; do
+  [ -n "$path" ] || continue
+  # skip binaries: numstat prints "-" for added/deleted lines of binary blobs
+  if git diff --cached --numstat -- "$path" | grep -q $'^-\t-\t'; then
+    continue
+  fi
+  content=$(git show ":$path" 2>/dev/null) || continue
+  # blank (not delete, so line numbers stay right) lines that are exactly 40/64 hex (shas, sha256 files)
+  filtered=$(printf '%s\n' "$content" | sed -E 's/^([0-9a-f]{40}|[0-9a-f]{64})$//')
+  # key/value lines with an obvious placeholder value are allowed
+  filtered_kv=$(printf '%s\n' "$filtered" | sed -E "/$placeholder/I s/.*//")
+  scan() {  # $1 = text, $2 = pattern
+    local hits
+    hits=$(printf '%s\n' "$1" | grep -En -- "$2" | cut -c1-160) || true
+    if [ -n "$hits" ]; then
+      echo "${RED}BLOCKED${NC}: possible secret in staged $path (pattern: $2)"
+      # show line numbers only, never the matched value
+      printf '%s\n' "$hits" | cut -d: -f1 | sed 's/^/    line /'
+      fail=1
+    fi
+  }
+  for pat in "${kv_patterns[@]}"; do scan "$filtered_kv" "$pat"; done
+  for pat in "${patterns[@]}"; do scan "$filtered" "$pat"; done
+done
+
+if [ "$fail" -ne 0 ]; then
+  echo ""
+  echo "pre-commit: refusing to commit. Unstage the file (git restore --staged <path>) or remove the secret."
+  echo "If this is a false positive a HUMAN may bypass with: git commit --no-verify"
+  exit 1
+fi
+exit 0

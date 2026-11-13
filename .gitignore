@@ -1,14 +1,22 @@
 # secrets — never commit API keys
 .env
 .env.*
+!.env.example
 *.key
 secrets/
 
 # data & artifacts (large; regenerate with the scripts)
 data/
 artifacts/
+reports/
 *.parquet
 *.pkl
+models/*.pkl
+*.log
+*.db
+*.sqlite
+*.sqlite3
+optuna*.db
 
 # python
 __pycache__/
@@ -16,6 +24,9 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+build/
+dist/
+.pytest_cache/
 
 # misc
 .ipynb_checkpoints/

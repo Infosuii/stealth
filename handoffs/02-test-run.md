@@ -1,0 +1,125 @@
+# Handoff 02 — test run (`configs/test.yaml`): calibrate the laptop and reproduce the baseline (M1)
+
+## 1. Purpose + success criterion
+
+Run the full validation protocol at test scale: eras ≥ 2800, 5 purged folds (purge 20 + embargo 20) plus the
+forward block (train < 5925, test 5945–6524); 12-cell exhaustive LightGBM grid with top-3 averaging, 3 aux-target
+members, 4 fixed XGBoost configs, **1 timed CatBoost config**, ridge; nested blend + 500-draw regime simulation;
+bundle + portability check. This is milestone **M1**: it must reproduce the honest baseline and record per-fit wall
+times (the CatBoost keep/drop decision). Expected 30–45 min on 16 threads, < 6 GB RAM.
+
+Success = ALL of (read from `handoffs/results/02-metrics.json` → `configs[]`):
+- `lgbm_everest`: `fit_mean` in **[0.022, 0.030]** (0.026 ± 0.004), `forward_fit` **≥ 0.020**, `sharpe` **≥ 0.5**.
+- `blend_*` (the blend row): `fit_mean` ≥ `lgbm_everest.fit_mean` − 0.002 (the blend must not be worse than its
+  best member beyond noise); paired `p_pos` vs `lgbm_everest` is **recorded** (≥ 0.8 = adopt the blend; otherwise
+  tie, which is fine at this stage).
+- `leak_check` = `pass`; no config has `suspect: true` (any `fit_mean` > 0.030 is flagged by `train` and must be
+  reported as suspect, not as a win).
+- `timings.per_member_fit_s.cat_everest_l2_30` is present. **≤ 120 s** → "CatBoost kept"; **> 120 s** →
+  "CatBoost dropped" — write the verdict in the operator notes.
+- `pkl_check` prints `PASS`; `models/test01.manifest.json` exists.
+- `02-results.md`, `02-metrics.json`, `02-log-tail.txt` pushed.
+
+## 2. Preconditions
+
+- Handoffs 00 and 01 reported success (the 01 results file shows `PASS` for `pkl_check`).
+- `git -C "$HOME/stealth" pull`; `.venv` present; `data/` complete; ~3 GB free disk.
+- Laptop on mains power, not expected to sleep for an hour.
+
+## 3. HUMAN STEP
+
+Only if `test -s .env` fails: the human copies `.env.example` to `.env` and pastes `EIQ_API_KEY` (handoff 00).
+This run itself is offline; the key is not used.
+
+## 4. Environment
+
+```bash
+REPO="$HOME/stealth"                    # absolute clone path; change if different
+PY="$REPO/.venv/bin/python"             # absolute venv interpreter used by EVERY command
+cd "$REPO"
+"$PY" -m stealth.selfcheck | tail -3    # expect PINS OK
+nproc                                   # logical cores; see step 1
+```
+
+## 5. Steps
+
+**Step 1 — thread count (seconds; the only permitted edit)**
+`configs/test.yaml` has `run.threads: 16`. If `nproc` printed a smaller number, set `run.threads` to that number
+(this one edit is explicitly allowed by this handoff; do not commit it — `git checkout configs/test.yaml` after
+the run if `git status` shows it modified). Do not change anything else.
+
+**Step 2 — train (30–40 min on 16 threads; resumable — re-run the same command after any interruption)**
+```bash
+"$PY" -m stealth.train --config configs/test.yaml --run-id test01 --resume
+```
+Expected output signature:
+```
+INFO stealth.train: run test01 config=test eras>=2800 n_folds=5 forward=on members=10 search=lgbm_everest(12 cells)
+INFO stealth.train: progress ... elapsed 00:12:00 ... member 6/10
+INFO stealth.train: leak_check pass; metrics -> artifacts/test01/metrics.json; exit 0
+```
+Exit 0 expected. Exit 2 = leak/gate failure; exit 1 = error (traceback in `artifacts/test01/run.log`).
+The log prints a progress line every 60 s; silence > 10 min means a hung process — note the time, kill it with
+Ctrl-C, re-run the same command (it resumes from the member cache / Optuna SQLite).
+
+**Step 3 — nested blend + regime simulation (2–5 min; 500 draws)**
+```bash
+"$PY" -m stealth.blend --run-id test01
+```
+Expected: log shows `rule=ew|nnls`, the paired `NNLS vs EW` line (`diff_mean, diff_se, p_pos`), the regime table,
+and `artifacts/test01/blend.json` written.
+
+**Step 4 — bundle (1–2 min)**
+```bash
+"$PY" -m stealth.bundle --run-id test01 --out models/test01.pkl
+ls -l models/test01.pkl models/test01.pkl.sha256 models/test01.manifest.json
+```
+
+**Step 5 — portability check (1–3 min; reuses `artifacts/pklcheck_venv` from handoff 01)**
+```bash
+"$PY" -m stealth.pkl_check models/test01.pkl
+```
+Expected: checklist of `ok` lines, then `PASS`, exit 0. Note the seconds-per-era figure.
+
+**Step 6 — offline dry run (seconds; nothing submitted)**
+```bash
+"$PY" -m stealth.predict --pkl models/test01.pkl --offline
+```
+Expected: `90 predictions ... in (0,1)`, exit 0. **No `--submit`, no `--upload`.**
+
+## 6. If it fails
+
+- Step 2 `MemoryError` / OOM-killed: re-run with `run.threads` halved (edit permitted as in step 1); it resumes.
+- Step 2 exit 2 (`LEAK`): the run is void; report and stop. Exit 1: report (the reporter copies the traceback).
+- Step 2 wall time > 75 min: let it finish if progress lines keep coming; record the time — the full run is sized
+  from it. If a single CatBoost fit exceeds 10 min, kill, re-run (resume skips completed members) and note
+  "CatBoost dropped (timeout)".
+- Step 3 fails but step 2 succeeded: still run step 7 — the member metrics are the main deliverable.
+- Step 5 `FAIL`: copy the failing lines into the operator notes; do not fix.
+
+## 7. Report back (mandatory, also on failure)
+
+```bash
+"$PY" -m stealth.report --run-id test01 --handoff 02
+```
+Writes `handoffs/results/02-{results.md,metrics.json,log-tail.txt}`, then
+`git add handoffs/results && git commit -m "results: 02 test-run" && git push`. Exit 0 = pushed.
+On **PUSH FAILED — results are saved locally in handoffs/results/; ask the human to run git push**, repeat that to
+the user verbatim and stop.
+
+Then append the operator notes (CatBoost verdict, pkl_check tail, predict summary, total wall time, `nproc`) and push:
+```bash
+printf '\n## Operator notes\n\n```text\n%s\n```\n' "<CatBoost: kept|dropped (NNN s per fit); pkl_check: PASS/FAIL, N s/era; predict --offline: ok; total wall: MM min; nproc: N>" >> handoffs/results/02-results.md
+git add handoffs/results && git commit -m "results: 02 test-run (notes)" && git push
+```
+Also commit the manifest + sha (never the pickle): `git add models/test01.manifest.json models/test01.pkl.sha256 && git commit -m "models: test01 manifest" && git push`.
+Results files carry metrics and config NAMES only; hyperparameter values stay in `artifacts/` (the reporter enforces this).
+
+## 8. Rules for the executing AI
+
+- No code edits. The only permitted config edit is `run.threads` in `configs/test.yaml` (step 1); revert it afterwards.
+- Never `--submit`, never `--upload`, never a diagnostics upload: this handoff has **no USER MUST APPROVE banner**.
+  (The M1 diagnostics upload is a separate, later handoff that will carry one.)
+- Never commit `data/`, `.env`, `*.pkl`, `artifacts/`. Only `handoffs/results/` and `models/*.{manifest.json,sha256}`.
+- Never `cat`/`echo`/`grep` `.env`; never `git remote -v`; never `git config --list`; never print the API key.
+- Stop and write the results file on any judgement call.
