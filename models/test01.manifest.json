@@ -1,0 +1,125 @@
+{
+  "pkl": "test01.pkl",
+  "sha256": "f1fcd85e70e5e61c479f2470dba503d231ec9d7a6d64e1085d99d81e8ef31483",
+  "size_bytes": 1084380,
+  "version": "0.1.0",
+  "git_sha": "acfaf3394247783fc1dff24b8a7849b445e91542",
+  "run_id": "test01",
+  "built_at": "2026-11-13T20:31:20+00:00",
+  "python": "3.11.18",
+  "libs": {
+    "lightgbm": "4.7.0",
+    "xgboost": "3.2.0",
+    "catboost": "1.2.10",
+    "scikit-learn": "1.9.1",
+    "numpy": "2.4.6",
+    "pandas": "3.0.6",
+    "scipy": "1.17.1",
+    "cloudpickle": "3.1.2"
+  },
+  "members": [
+    {
+      "name": "cat_everest_l2_30",
+      "family": "cat",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 1
+    },
+    {
+      "name": "lgbm_everest",
+      "family": "lgbm",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 3
+    },
+    {
+      "name": "lgbm_ghat",
+      "family": "lgbm",
+      "target": "target_Ghat",
+      "group": "aux",
+      "n_blobs": 1
+    },
+    {
+      "name": "lgbm_meltsene",
+      "family": "lgbm",
+      "target": "target_Meltsene",
+      "group": "aux",
+      "n_blobs": 1
+    },
+    {
+      "name": "lgbm_tougroute",
+      "family": "lgbm",
+      "target": "target_Tougroute",
+      "group": "aux",
+      "n_blobs": 1
+    },
+    {
+      "name": "ridge_everest",
+      "family": "ridge",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 1
+    },
+    {
+      "name": "xgb_everest_d3_lr02",
+      "family": "xgb",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 1
+    },
+    {
+      "name": "xgb_everest_d3_lr05",
+      "family": "xgb",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 1
+    },
+    {
+      "name": "xgb_everest_d4_lr05",
+      "family": "xgb",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 1
+    },
+    {
+      "name": "xgb_everest_d6_lr02",
+      "family": "xgb",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 1
+    }
+  ],
+  "weights": {
+    "lgbm_everest": 0.07142857142857144,
+    "xgb_everest_d3_lr05": 0.07142857142857144,
+    "xgb_everest_d4_lr05": 0.07142857142857144,
+    "xgb_everest_d3_lr02": 0.07142857142857144,
+    "xgb_everest_d6_lr02": 0.07142857142857144,
+    "cat_everest_l2_30": 0.07142857142857144,
+    "ridge_everest": 0.07142857142857144,
+    "lgbm_tougroute": 0.16666666666666669,
+    "lgbm_ghat": 0.16666666666666669,
+    "lgbm_meltsene": 0.16666666666666669
+  },
+  "p_b": 0.5,
+  "p_c": 0.25,
+  "core_proxy_cols": [
+    "feature_Agouti",
+    "feature_Tazzarine",
+    "feature_Azzaden",
+    "feature_Tagmat",
+    "feature_Zaouiat",
+    "feature_Ighzer",
+    "feature_Amazigh",
+    "feature_Tafouk",
+    "feature_Zerrouka",
+    "feature_Mrirt"
+  ],
+  "n_features": 178,
+  "pkl_check": {
+    "passed": true,
+    "at": "2026-11-13T20:31:31+00:00"
+  },
+  "sandbox_sha256": null,
+  "upload_id": null
+}

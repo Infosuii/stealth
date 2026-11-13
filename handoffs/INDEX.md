@@ -15,11 +15,11 @@ Status values: `draft` → `ready` → `running` → `reported` → `accepted` |
 
 | NN | slug | purpose | status | waiting on | result sha | verdict |
 |---|---|---|---|---|---|---|
-| 00 | env-setup | venv + pins + hook + data download + pytest on the laptop | accepted | – | b96dd66, ee2afbd | PINS OK, hooksPath set, 6 parquet files, 163 passed |
+| 00 | env-setup | venv + pins + hook + data download + pytest on the laptop | accepted | – | b96dd66, ee2afbd | PINS OK, hooksPath set, 6 parquet files, 163 passed; the 51 MB train file is correct (the 80–90 MB figure was a doc error, fixed) |
 | 01 | smoke | `configs/smoke.yaml` end to end: train → blend → bundle → pkl_check → report | accepted | – | c33bff6, acfaf33 | pkl_check PASSED (0.38 s/era), predict --offline ok, 163 passed |
-| 02 | test-run | `configs/test.yaml` (M1): baseline reproduction, CatBoost timing | accepted | – | 34c722a, 86c1c5c, 88b4e7e | fit 0.0238, fwd 0.0313, sharpe 0.51, Cat 18 s kept, blend 0.0226 (EW; NNLS tie p_pos 0.44), 8.3 min train + 3.5 min simulation; blend-vs-baseline p_pos not recorded (reporter gap, filled in by 03's report) |
-| 03 | diag-upload-1 | **USER MUST APPROVE** — validation-diagnostics upload #1 of 5: the M1 single-LightGBM baseline (`bundle --members lgbm_everest` of test01 -> `models/test01_lgbm.pkl`; the EW blend lost to it in 02) | **ready** | GPT, then the user's `yes, upload` in chat | – | – |
-| 04 | full-run | `configs/full.yaml` (M2–M6): knobs, TPE search + adoption gate, aux, families, ladder, MLP (GPU venv), neutralisation constants from the simulation, `bundle --require-frozen`, diag **file** (no upload) | draft | Claude (finalise from 02: Cat kept, baseline_fit 0.0238, threads 16, timings) | – | – |
+| 02 | test-run | `configs/test.yaml` (M1): baseline reproduction, CatBoost timing | accepted | – | 34c722a, 86c1c5c, 88b4e7e | fit 0.0238, fwd 0.0313, sharpe 0.51 → M1 met; EW blend 0.0226 lost to the single LGBM → baseline kept; NNLS tie (p_pos 0.44); Cat 18 s kept but weak; search a tie; whole run 12.5 min |
+| 03 | diag-upload-1 | **USER MUST APPROVE** — validation-diagnostics upload #1 of 5: the M1 single-LightGBM baseline (`bundle --run-id test01 --members lgbm_everest --p-b 0 --p-c 0` → `models/m1_lgbm.pkl`) | **ready** | GPT, then the user's yes in chat | – | – |
+| 04 | full-run | `configs/full.yaml` (M2–M6): knobs, TPE search + adoption gate, aux, families, ladder, MLP (GPU venv), neutralisation constants from the simulation, `bundle --require-frozen`, diag **file** (no upload) | draft | Claude (finalise after 03's score: compute-budget extras in full.yaml) | – | – |
 | 05 | upload-and-arm | **USER MUST APPROVE** — `predict --upload`, `monitor`, `models/active.json`, cron fallback (M7) | draft | Claude | – | – |
 
 Fill in `result sha` with the commit(s) that added `handoffs/results/NN-*`. Fill in `verdict` with one line from
