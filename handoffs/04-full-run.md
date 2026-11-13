@@ -57,7 +57,7 @@ None, unless `test -s .env` fails (handoff 00). This run is offline apart from t
 ## 4. Environment
 
 ```bash
-REPO="$HOME/stealth"                    # absolute clone path: the SAME clone that ran handoffs 00-03
+REPO="$HOME/Projects/eversteer/stealth" # absolute clone path: the SAME clone that ran handoffs 00-03; change if different
 PY="$REPO/.venv/bin/python"             # train venv: EVERY stealth command
 GPU_PY="$REPO/.venv-gpu/bin/python"     # GPU venv (step 2): the MLP member ONLY
 cd "$REPO"
