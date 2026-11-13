@@ -62,6 +62,33 @@ Claude's own push to `main` was refused by the permission classifier, so **the u
 Finding to tell the user: applied to the laptop's 02 regime table, the staking-aware rule picks **p_b = 0**: worst-case
 score 0.0351 against 0.0274 at p_b = 0.5, because neutralising hurts in benchmark-right rounds.
 
+## Update 23:15 UTC — diagnostics upload #1 scored (M1 baseline, neutralisation off)
+
+Upload `35bfe266-286a-4464-a532-e4dca0d7899b` (results on main: 56819a6). Validation board, 150 models:
+
+| metric | ours | board median | board P75 | models scoring > 0.045 (n = 23, median) |
+|---|---|---|---|---|
+| fit20 | 0.0189 | 0.0193 | 0.0214 | – |
+| unq | 0.0039 | – | – | – |
+| inov | 0.0141 | – | – | – |
+| round score | ~0.0368 (rank 89) | 0.0388 | 0.0423 | – |
+| sharpe | 0.32 | 0.344 | 0.381 | 0.40 |
+| max drawdown | −7.55 (worse than 67%) | −5.98 | −4.40 | −3.76 |
+| feature exposure | 0.685 (higher than 73%) | 0.659 | – | 0.686 |
+
+Takeaways:
+- **The offline framework is calibrated.** The regime simulation at p_b = 0 predicted a score of 0.0383
+  (fit 0.0224 / unq 0.0026 / inov 0.0133); the true figures are 0.0368 (0.0189 / 0.0039 / 0.0141). The INOV proxy
+  is close to the true core set, so M2–M6 selection can trust the offline numbers. Discount OOF FIT by about 0.79 for
+  validation; the forward block (0.0313) was optimistic.
+- **The gap to strong models is FIT, Sharpe and drawdown**, not UNQ/INOV. Long autocorrelated losing stretches
+  (autocorrelation 0.94) cause the drawdown, which matters for staking. M2–M6 levers (knobs incl. recency, admission,
+  family diversity) and the staking-aware W criterion target exactly this. Consider adding drawdown on OOF as a
+  reported metric in the final selection.
+- The #1 board model (0.136, Sharpe 1.33) is an outlier, plausibly exploiting the partly in-sample `v1_sherpa` on
+  validation. Don't chase it.
+- 4 diagnostics uploads remain (M3, M5 ×2, final).
+
 ## Steps
 
 1. Check out this branch. Symlink `data/` and `artifacts/pklcheck_venv` from a checkout that has them, or re-download the data and recreate the venv.
