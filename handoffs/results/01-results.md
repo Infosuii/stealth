@@ -160,3 +160,16 @@
      0.0200 0.7500    mix 0.0091 -0.0023 0.0049 0.0117    1525 1.0000
 2026-11-13 20:17:06,078 INFO stealth.blend: wrote /home/om/Projects/eversteer/stealth/artifacts/smoke01/blend.json and updated metrics.json
 ```
+
+## Operator notes
+
+```text
+pkl_check: PASSED
+python: /home/om/Projects/eversteer/stealth/artifacts/pklcheck_venv/bin/python (3.11.18); size: 0.45 MB; eras: 51; slowest call: 0.3793546550004976s; checker elapsed: 1.7s
+byte scan: torch=0 stealth_total=6 non-runtime stealth refs=0
+note: missing feature column raises (ok)
+predict --offline: predicted exped=exped_8055 n=90 in 0.33s bench_used=True core_used=True unique=90; dry run ok
+wall times: train 22s; pkl_check approximately 55s including clean-venv setup
+pytest: 163 passed in 32.00s
+ridge_everest suspect: true is expected in smoke, as documented in handoff 01; leak_check pass.
+```
