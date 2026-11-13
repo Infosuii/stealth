@@ -32,5 +32,4 @@ packages = ["stealth", "stealth.models"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]

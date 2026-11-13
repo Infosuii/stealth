@@ -300,3 +300,81 @@ def test_monitor_online_checks_with_fake_client(pkl: Path, data_dir: Path, tmp_p
     monitor.log_scores(fake, "m")
     path = monitor.write_alert(["a", "b"], path=tmp_path / "A.md", context={"x": 1})
     assert "USER MUST REVIEW" in path.read_text()
+
+
+# --------------------------------------------------------------------------------------------------
+# contract review follow-ups
+# --------------------------------------------------------------------------------------------------
+def test_predict_refuses_live_round_exped_mismatch(pkl: Path, data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A stale live file (exped != the round's exped) must be a hard stop, not a warning."""
+    fake = FakeClient(data_dir, exped="exped_9999")
+    monkeypatch.setattr(predict.sdata, "make_client", lambda *a, **k: fake)
+    ddir = tmp_path / "data"
+    ddir.mkdir()
+    with pytest.raises(RuntimeError, match="refusing to submit"):
+        predict.predict_live(pkl, data_dir=ddir, offline=False, client=fake, out_dir=tmp_path / "p")
+    assert not any(c[0] == "validate_submission" for c in fake.calls)
+    rc = predict.main(["--pkl", str(pkl), "--data-dir", str(ddir), "--out-dir", str(tmp_path / "p")])
+    assert rc == predict.EXIT_ERROR
+
+
+def test_predict_no_active_round_exits_window_closed(pkl: Path, data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from everestapi.client import EverestError
+
+    class NoRound(FakeClient):
+        def get_current_round(self, tournament="futures"):
+            raise EverestError(404, {"detail": "No active round"})
+
+    fake = NoRound(data_dir)
+    monkeypatch.setattr(predict.sdata, "make_client", lambda *a, **k: fake)
+    rc = predict.main(["--pkl", str(pkl), "--data-dir", str(tmp_path / "d"), "--out-dir", str(tmp_path / "p")])
+    assert rc == predict.EXIT_WINDOW_CLOSED
+    assert not any(c[0] == "download_dataset" for c in fake.calls)
+
+    class Broken(FakeClient):
+        def get_current_round(self, tournament="futures"):
+            raise EverestError(500, "server error")
+
+    monkeypatch.setattr(predict.sdata, "make_client", lambda *a, **k: Broken(data_dir))
+    assert predict.main(["--pkl", str(pkl), "--data-dir", str(tmp_path / "d"), "--out-dir", str(tmp_path / "p")]) == predict.EXIT_ERROR
+
+
+def test_upload_requires_manifest_and_python_311(pkl: Path, data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fake = FakeClient(data_dir)
+    monkeypatch.setattr(predict.time, "sleep", lambda s: None)
+    # a pickle renamed/moved away from its manifest -> refused before any platform call
+    loose = tmp_path / "loose.pkl"
+    shutil.copy(pkl, loose)
+    with pytest.raises(RuntimeError, match="no manifest"):
+        predict.upload(fake, "m", loose, active_path=tmp_path / "a.json")
+    assert not any(c[0] == "upload_model" for c in fake.calls)
+    # manifest built under another python minor -> refused
+    mdir = tmp_path / "models"
+    mdir.mkdir()
+    for f in pkl.parent.iterdir():
+        shutil.copy(f, mdir / f.name)
+    pkl_check.update_manifest(mdir / pkl.name, True)
+    mpath = mdir / bd.manifest_path(pkl).name
+    manifest = json.loads(mpath.read_text())
+    assert manifest["python"].startswith("3.11.")
+    manifest["python"] = "3.12.4"
+    mpath.write_text(json.dumps(manifest))
+    with pytest.raises(RuntimeError, match="Python 3.12.4"):
+        predict.upload(fake, "m", mdir / pkl.name, active_path=tmp_path / "a.json")
+    assert not any(c[0] == "upload_model" for c in fake.calls)
+
+
+def test_monitor_zero_coverage_is_not_full(data_dir: Path):
+    fake = FakeClient(data_dir)
+    late = datetime(2026, 11, 13, 14, 0, tzinfo=timezone.utc)
+    fake.submission_entries = [{"accepted": True, "coverage_pct": 0}]
+    assert any("coverage" in p for p in monitor.check_submission(fake, "m", now=late))
+    fake.submission_entries = [{"accepted": True}]  # field not published -> accepted counts as full
+    assert monitor.check_submission(fake, "m", now=late) == []
+    assert monitor._full_coverage(None) and monitor._full_coverage(100) and not monitor._full_coverage(0) and not monitor._full_coverage("x")
+
+
+def test_bundle_write_pickle_python_guard(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setattr(bd, "PKL_PYTHON", (3, 99))
+    with pytest.raises(RuntimeError, match="Python 3.99"):
+        bd.write_pickle({"feature_cols": [], "members": [], "weights": {}}, tmp_path / "x.pkl")

@@ -32,7 +32,7 @@ import pandas as pd
 from stealth import data as sdata
 from stealth.predict import ENV_DIAG, BANNER, BENCH_SERIES_NAME, approval_gate, load_predict, resolve_model_id, validate_predictions
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("stealth.diag")  # explicit: under `python -m` __name__ is __main__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DIAG_DIR = REPO_ROOT / "artifacts" / "diag"

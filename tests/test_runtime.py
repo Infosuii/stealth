@@ -309,3 +309,22 @@ def test_make_predict_on_live_frame(live_frame: pd.DataFrame, live_bench: pd.Ser
     check_output(out, live_frame.index)
     assert predict.last_info["bench_used"] is True and predict.last_info["core_used"] is True
     pd.testing.assert_frame_equal(predict(live_frame, live_bench), out)
+
+
+def test_coerce_benchmark_multi_column_frame_prefers_named_column():
+    """Contract review item 4: a multi-column frame (e.g. the downloaded ``exped`` + ``v1_sherpa`` file) must not be
+    reduced to its first column blindly; the benchmark column is picked by name, else the first numeric one."""
+    idx = pd.Index([f"id{i}" for i in range(20)], name="id")
+    rng = np.random.default_rng(5)
+    s = pd.Series(rng.random(20), index=idx)
+    frame = pd.DataFrame({"exped": "exped_8055", "v1_sherpa": s})
+    arr = rt.coerce_benchmark(frame, idx)
+    assert arr is not None
+    np.testing.assert_allclose(arr, s.to_numpy())
+    assert rt.select_benchmark_column(frame)[1] == "v1_sherpa"
+    frame2 = pd.DataFrame({"zzz_text": "x", "eiq_minera_model": s, "other": s * 2})
+    assert rt.select_benchmark_column(frame2)[1] == "eiq_minera_model"
+    frame3 = pd.DataFrame({"a_text": "x", "scores": s})
+    assert rt.select_benchmark_column(frame3)[1] == "scores"  # first numeric column
+    assert rt.select_benchmark_column(pd.DataFrame({"only_text": ["x"] * 20}, index=idx)) == (None, None)
+    assert rt.coerce_benchmark(pd.DataFrame(index=idx), idx) is None

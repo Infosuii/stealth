@@ -231,9 +231,33 @@ def predict_member(family: str, model: Any, X: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------------------------------
 # benchmark coercion
 # --------------------------------------------------------------------------------------------------
+BENCH_PREFERRED_COLUMNS = ("eiq_minera_model", "v1_sherpa", "prediction", "benchmark")
+
+
+def select_benchmark_column(frame: pd.DataFrame) -> tuple[pd.Series | None, str | None]:
+    """Pick the benchmark Series out of a DataFrame: a preferred name (``BENCH_PREFERRED_COLUMNS``) if present,
+    else the first column with non-zero finite numeric coverage. Returns ``(series, column_name)`` or ``(None, None)``
+    (an empty frame or one with no numeric column). Never raises."""
+    try:
+        if frame.shape[1] == 0:
+            return None, None
+        cols = [str(c) for c in frame.columns]
+        for name in BENCH_PREFERRED_COLUMNS:
+            if name in cols:
+                return frame.iloc[:, cols.index(name)], name
+        for i, name in enumerate(cols):
+            num = pd.to_numeric(frame.iloc[:, i], errors="coerce")
+            if int(np.isfinite(num.to_numpy(dtype=np.float64)).sum()) > 0:
+                return frame.iloc[:, i], name
+    except Exception:  # noqa: BLE001
+        return None, None
+    return None, None
+
+
 def coerce_benchmark(bench: Any, index: pd.Index, min_coverage: float = DEFAULT_MIN_BENCH_COVERAGE) -> np.ndarray | None:
-    """``live_benchmark_models`` (Series | 1-col DataFrame | None | same-length array) -> float64 array
-    aligned to ``index`` (NaN where absent), or ``None`` when it must be ignored.
+    """``live_benchmark_models`` (Series | DataFrame | None | same-length array) -> float64 array
+    aligned to ``index`` (NaN where absent), or ``None`` when it must be ignored. A DataFrame goes through
+    :func:`select_benchmark_column` (preferred name, else first numeric column) -- never blindly ``iloc[:, 0]``.
 
     ``None`` when: input is None/unusable, finite coverage < ``min_coverage`` of ``index``, or the covered
     values have zero variance. Never raises.
@@ -242,9 +266,9 @@ def coerce_benchmark(bench: Any, index: pd.Index, min_coverage: float = DEFAULT_
         return None
     try:
         if isinstance(bench, pd.DataFrame):
-            if bench.shape[1] == 0:
+            bench, _ = select_benchmark_column(bench)
+            if bench is None:
                 return None
-            bench = bench.iloc[:, 0]
         if isinstance(bench, pd.Series):
             s = bench[~bench.index.duplicated(keep="first")]
             arr = pd.to_numeric(s, errors="coerce").reindex(index).to_numpy(dtype=np.float64)
@@ -361,6 +385,8 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
                 Z[~np.isfinite(s), i] = np.nan
         z = _weighted_blend(Z, w)
         if p_b > 0.0:
+            if isinstance(live_benchmark_models, pd.DataFrame):
+                _, info["bench_column"] = select_benchmark_column(live_benchmark_models)
             b = coerce_benchmark(live_benchmark_models, index, min_cov)
             if b is None:
                 info["bench_reason"] = "skipped" if live_benchmark_models is not None else "none"

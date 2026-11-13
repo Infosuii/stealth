@@ -20,4 +20,10 @@ Unpinned-by-plan, resolved and frozen in `requirements-lock.txt`: optuna 5.0.0, 
 Notes
 - `torch` is deliberately NOT installed in `.venv` (tests assert `find_spec("torch") is None`). The optional MLP (M6) uses a separate GPU venv.
 - `everesteer-api` 0.4.1 `unq20` already applies the zero rule (see docs/INTERFACES.md §0).
-- Recreate: `python3.11 -m venv .venv && .venv/bin/python -m pip install -r requirements-lock.txt -e .`
+- Recreate: `bash scripts/setup.sh` (uses `uv venv .venv --python 3.11 --seed` so pip is present, then
+  `uv pip install --python .venv/bin/python -r requirements-lock.txt -e .`); manual fallback
+  `python3.11 -m venv .venv && .venv/bin/python -m pip install -r requirements-lock.txt -e .`.
+- `pkl_check` builds its throwaway venv from `sys._base_executable` with `python -m venv` + `python -m pip`; it refuses a
+  base interpreter that is not 3.11 (`--venv-python <clean python3.11>` overrides). On a `uv`-managed interpreter the
+  base is `~/.local/share/uv/python/...` (python-build-standalone ships `ensurepip`); unverified on the laptop at M0 —
+  handoff 01 section 6 carries the fallback (`uv venv artifacts/pklcheck_venv --python 3.11 --seed`).

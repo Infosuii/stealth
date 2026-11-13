@@ -5,13 +5,18 @@ Contracts: docs/INTERFACES.md sections 7 (config), 8 (artifacts), 10 (CLI). Prot
 * chronological exped-grouped folds with purge + embargo (``cv.purged_folds``) and the optional strict
   forward block (``cv.forward_block``);
 * tree members with ``n_estimators: null`` pick their count on the INNER split of every training fold
-  (``fit_with_early_stopping``); the MEDIAN inner best-iteration across the CV folds is frozen and every
-  test fold is predicted by a model refit on that fold's full training eras with the frozen count only.
-  The scored fold never influences its own tree count. The forward block and the full-train refit also use
-  the frozen count;
+  (CV folds AND the forward block). Fold ``k`` is then refit on its full training eras with a frozen count =
+  the MEDIAN of the inner best-iterations of the folds whose inner-validation eras lie >= 20 eras away from
+  fold ``k``'s test block (``cv.independent_inner_folds``; with chronological folds every non-last fold's
+  inner_val sits at the end of the era range, i.e. inside the last fold's and the forward block's test eras,
+  so those two use only independent sources -- in practice their own inner split). The scored fold never
+  influences its own tree count. The full-train refit uses the median over all CV folds;
 * searched members (``search.<member>``) evaluate each grid cell with the same protocol; the member's OOF
   score is the equal-weight mean of the ``top_k`` cells, and the full-train refits of those cells are
-  written as ``full_s<k>.bin`` so the bundle averages them;
+  written as ``full_s<k>.bin`` so the bundle averages them. The member's BASE ``params`` cell is always
+  evaluated too and ``search/<member>.gain.json`` records top-k minus base on OOF and on the forward block
+  (winner's-curse check: an OOF gain above ``gates.suspect_gain_over_baseline`` flags the member suspect);
+* the suspect baseline is ``gates.baseline_fit`` (a fixed M1 number) when set, else the in-run ``lgbm_everest``;
 * per member: ``oof_<member>.parquet`` (resume unit), ``members/<member>/{spec.json,fold<k>.bin,forward.bin,
   full_s<seed>.bin}``; at the end ``oof.parquet`` / ``forward.parquet`` (``m__<member>`` raw scores),
   ``features.json`` (feature_cols, missing_cols, core_proxy_cols, surrogate), ``folds.json``, ``metrics.json``.
@@ -55,6 +60,7 @@ _RUN_KEYS = ("seed", "threads", "min_era", "max_era", "min_rows", "time_decay", 
 _CV_KEYS = ("n_folds", "purge", "embargo", "inner_frac", "inner_gap", "forward")
 _MEMBER_KEYS = ("name", "family", "target", "group", "features", "input", "params", "n_estimators", "es_cap")
 EXIT_OK, EXIT_ERROR, EXIT_GATE = 0, 1, 2
+MIN_GAP = 20  # floor on every train/test and early-stopping gap (PLAN: purge + embargo >= 20 eras)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -87,6 +93,10 @@ def load_config(path: Path) -> dict:
         problems.append("cv.forward must be a mapping")
     if cvc.get("n_folds", 2) < 2:
         problems.append("cv.n_folds must be >= 2")
+    if all(k in cvc for k in ("purge", "embargo")) and int(cvc["purge"]) + int(cvc["embargo"]) < MIN_GAP:
+        problems.append(f"cv.purge + cv.embargo must be >= {MIN_GAP} eras (target autocorrelation horizon)")
+    if "inner_gap" in cvc and int(cvc["inner_gap"]) < MIN_GAP:
+        problems.append(f"cv.inner_gap must be >= {MIN_GAP} eras")
     members = cfg.get("members") or []
     if not isinstance(members, list) or not members:
         problems.append("members must be a non-empty list")
@@ -145,6 +155,9 @@ def load_config(path: Path) -> dict:
     for k in ("leak_spearman", "suspect_gain_over_baseline", "p_pos_adopt"):
         if k not in (cfg.get("gates") or {}):
             problems.append(f"gates.{k} missing")
+    bf = (cfg.get("gates") or {}).get("baseline_fit")
+    if bf is not None and not isinstance(bf, (int, float)):
+        problems.append("gates.baseline_fit must be a number (the fixed M1 OOF fit20) or null")
     for k in ("catboost_max_fit_seconds", "progress_every_seconds"):
         if k not in (cfg.get("timing") or {}):
             problems.append(f"timing.{k} missing")
@@ -273,9 +286,17 @@ class RunData:
         # leak-free side products from eras < 2800 (never scored): missing columns, core proxy, surrogate
         bench = data.load_benchmark("train", data_dir)
         early = full.loc[full["era"] < 2800]
-        if len(early) < 1000:  # tiny/filtered data sets: fall back to the first third of the eras
+        if len(early) < 1000:  # tiny/filtered data sets: fall back to the first third of the eras, never past min_era
             cut = int(np.quantile(full["era"].unique(), 0.34))
+            if run.get("min_era") is not None:
+                cut = min(cut, int(run["min_era"]))
             early = full.loc[full["era"] < cut]
+            if len(early) == 0:
+                cut = int(np.quantile(full["era"].unique(), 0.34))
+                early = full.loc[full["era"] < cut]
+            log.warning("fewer than 1000 rows before era 2800: side products (missing cols, core proxy, surrogate) fitted on "
+                        "eras < %d%s -- the leak-free guarantee of the side products is weakened", cut,
+                        "" if run.get("min_era") is not None and cut <= int(run["min_era"]) else " (these eras are also scored)")
         self.missing_cols = data.top_missing_columns(early, self.feature_cols, k=15)
         X_nan_early = data.features_nan(early, self.feature_cols)
         self.core_proxy_cols = features.core_proxy_columns(X_nan_early, bench.reindex(early.index), early["era"])
@@ -296,7 +317,8 @@ class RunData:
         if fw.get("enabled"):
             self.forward = cvmod.forward_block(self.eras, train_end=int(fw["train_end"]), test_start=int(fw["test_start"]),
                                                inner_frac=float(c["inner_frac"]), inner_gap=int(c["inner_gap"]))
-        cvmod.assert_fold_gaps(self.folds + ([self.forward] if self.forward else []), min_gap=min(int(c["purge"]) + int(c["embargo"]), int(c["inner_gap"])))
+        self.min_gap = max(MIN_GAP, min(int(c["purge"]) + int(c["embargo"]), int(c["inner_gap"])))
+        cvmod.assert_fold_gaps(self.folds + ([self.forward] if self.forward else []), min_gap=self.min_gap)
         self.sharpe_cols_cache: dict[tuple[str, str], list[str]] = {}
         bags = cfg.get("feature_bags") or {}
         self.bags = features.random_column_bags(self.feature_cols, n_bags=int(bags.get("n_bags", 4)),
@@ -364,8 +386,12 @@ class ProtocolResult:
         self.forward: pd.Series | None = None      # raw scores on the forward test rows
         self.fold_blobs: list[bytes] = []
         self.forward_blob: bytes | None = None
-        self.inner_iters: list[int] = []
-        self.frozen_n_iter: int | None = None
+        self.inner_iters: list[int] = []               # inner best-iteration per CV fold
+        self.inner_iter_forward: int | None = None     # inner best-iteration of the forward block's own split
+        self.frozen_n_iter: int | None = None          # median over CV folds: used for the FULL-train refit only
+        self.frozen_n_iter_per_fold: list[int] = []    # count actually used to fit each CV fold (independent sources)
+        self.frozen_n_iter_forward: int | None = None  # count used for the forward block
+        self.count_sources: dict[str, list[str]] = {}  # fold name -> names of the folds whose inner ES set its count
         self.fit_seconds: float = 0.0
         self.max_fit_seconds: float = 0.0
         self.feature_cols: dict[str, list[str]] = {}
@@ -407,26 +433,38 @@ def run_protocol(rd: RunData, spec: dict, params: dict, *, seed: int, threads: i
     if rd.forward is not None:
         cols_by_fold["forward"] = rd.resolve_features(spec["features"], rd.forward, spec["target"])
     res.feature_cols = cols_by_fold
+    all_folds = rd.folds + ([rd.forward] if rd.forward is not None else [])
+    counts: dict[str, int | None] = {f.name: None for f in all_folds}
     if _es_needed(spec):
-        for f in rd.folds:
+        es_iters: dict[str, int] = {}
+        for f in all_folds:
             if prog:
                 prog.set(f"{label}: inner early stopping {f.name}")
             t1 = time.perf_counter()
             fm = _fit(rd, spec, params, cols_by_fold[f.name], f.train_eras, None, seed=seed, threads=threads,
                       es=(f.inner_train_eras, f.inner_val_eras))
             res.max_fit_seconds = max(res.max_fit_seconds, time.perf_counter() - t1)
-            res.inner_iters.append(int(fm.n_iter))
+            es_iters[f.name] = int(fm.n_iter)
             log.info("%s %s: inner best_iter=%d (%.1fs)", label, f.name, fm.n_iter, fm.fit_seconds)
-        res.frozen_n_iter = int(round(float(np.median(res.inner_iters))))
-        log.info("%s: frozen n_iter=%d (median of %s)", label, res.frozen_n_iter, res.inner_iters)
+        res.inner_iters = [es_iters[f.name] for f in rd.folds]
+        res.inner_iter_forward = es_iters.get("forward")
+        res.frozen_n_iter = int(round(float(np.median(res.inner_iters))))  # full-train refit only (nothing scored)
+        counts, res.count_sources = frozen_counts(rd, es_iters)
+        res.frozen_n_iter_per_fold = [int(counts[f.name]) for f in rd.folds]
+        res.frozen_n_iter_forward = counts.get("forward")
+        log.info("%s: frozen n_iter per fold=%s forward=%s full-refit=%d (inner iters %s; sources %s)", label,
+                 res.frozen_n_iter_per_fold, res.frozen_n_iter_forward, res.frozen_n_iter, es_iters, res.count_sources)
     elif spec["family"] != "ridge":
         res.frozen_n_iter = int(spec["n_estimators"])
+        counts = {f.name: res.frozen_n_iter for f in all_folds}
+        res.frozen_n_iter_per_fold = [res.frozen_n_iter for _ in rd.folds]
+        res.frozen_n_iter_forward = res.frozen_n_iter if rd.forward is not None else None
     parts, fold_ids = [], []
-    for k, f in enumerate(rd.folds + ([rd.forward] if rd.forward is not None else [])):
+    for k, f in enumerate(all_folds):
         if prog:
-            prog.set(f"{label}: fitting {f.name} with n_iter={res.frozen_n_iter}")
+            prog.set(f"{label}: fitting {f.name} with n_iter={counts[f.name]}")
         t1 = time.perf_counter()
-        fm = _fit(rd, spec, params, cols_by_fold[f.name], f.train_eras, res.frozen_n_iter, seed=seed, threads=threads)
+        fm = _fit(rd, spec, params, cols_by_fold[f.name], f.train_eras, counts[f.name], seed=seed, threads=threads)
         res.max_fit_seconds = max(res.max_fit_seconds, time.perf_counter() - t1)
         pred = _predict_rows(rd, fm, cols_by_fold[f.name], f.test_eras, input_kind)
         if f.name == "forward":
@@ -441,6 +479,32 @@ def run_protocol(rd: RunData, spec: dict, params: dict, *, seed: int, threads: i
     res.oof_fold = pd.concat(fold_ids).astype(np.int8)
     res.fit_seconds = time.perf_counter() - t0
     return res
+
+
+def frozen_counts(rd: RunData, es_iters: dict[str, int]) -> tuple[dict[str, int], dict[str, list[str]]]:
+    """Per-fold frozen tree count from INDEPENDENT early-stopping sources (PLAN C8, leakage review item 1).
+
+    CV fold ``k`` uses the median of the inner best-iterations of the CV folds whose inner_val eras are >= ``rd.min_gap``
+    from fold ``k``'s test block (its own split always qualifies). The forward block uses the median over its own inner
+    split plus the CV folds that are independent of its test block. ``cv.assert_count_sources`` guards every choice.
+    Returns ``({fold_name: count}, {fold_name: [source fold names]})``.
+    """
+    counts: dict[str, int] = {}
+    sources: dict[str, list[str]] = {}
+    for f in rd.folds:
+        idx = cvmod.independent_inner_folds(f, rd.folds, min_gap=rd.min_gap)
+        src = [rd.folds[j] for j in idx]
+        cvmod.assert_count_sources(f, src, min_gap=rd.min_gap)
+        counts[f.name] = int(round(float(np.median([es_iters[x.name] for x in src]))))
+        sources[f.name] = [x.name for x in src]
+    if rd.forward is not None:
+        fw = rd.forward
+        idx = cvmod.independent_inner_folds(fw, rd.folds, min_gap=rd.min_gap)
+        src = [rd.folds[j] for j in idx] + [fw]
+        cvmod.assert_count_sources(fw, src, min_gap=rd.min_gap)
+        counts[fw.name] = int(round(float(np.median([es_iters[x.name] for x in src]))))
+        sources[fw.name] = [x.name for x in src]
+    return counts, sources
 
 
 def refit_full(rd: RunData, spec: dict, params: dict, n_iter: int | None, *, seeds: list[int], threads: int,
@@ -488,7 +552,9 @@ def _save_protocol(d: Path, res: ProtocolResult) -> None:
     if res.forward_blob is not None:
         (d / "forward.bin").write_bytes(res.forward_blob)
     write_json(d / "result.json", {"inner_iters": res.inner_iters, "frozen_n_iter": res.frozen_n_iter, "fit_seconds": res.fit_seconds,
-                                   "max_fit_seconds": res.max_fit_seconds, "feature_cols": res.feature_cols})
+                                   "max_fit_seconds": res.max_fit_seconds, "feature_cols": res.feature_cols,
+                                   "inner_iter_forward": res.inner_iter_forward, "frozen_n_iter_per_fold": res.frozen_n_iter_per_fold,
+                                   "frozen_n_iter_forward": res.frozen_n_iter_forward, "count_sources": res.count_sources})
 
 
 def _load_protocol(d: Path) -> ProtocolResult | None:
@@ -503,6 +569,10 @@ def _load_protocol(d: Path) -> ProtocolResult | None:
     r = json.loads((d / "result.json").read_text())
     res.inner_iters, res.frozen_n_iter = r["inner_iters"], r["frozen_n_iter"]
     res.fit_seconds, res.max_fit_seconds, res.feature_cols = r["fit_seconds"], r["max_fit_seconds"], r["feature_cols"]
+    if "frozen_n_iter_per_fold" not in r:  # cached cell from before the per-fold protocol: do not reuse it
+        return None
+    res.inner_iter_forward, res.frozen_n_iter_per_fold = r.get("inner_iter_forward"), list(r["frozen_n_iter_per_fold"])
+    res.frozen_n_iter_forward, res.count_sources = r.get("frozen_n_iter_forward"), dict(r.get("count_sources") or {})
     res.fold_blobs = [p.read_bytes() for p in sorted(d.glob("fold*.bin"), key=lambda p: int(p.stem[4:]))]
     res.forward_blob = (d / "forward.bin").read_bytes() if (d / "forward.bin").exists() else None
     return res
@@ -566,7 +636,9 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
         sdir = run_dir / "search" / name
         cache: dict[str, ProtocolResult] = {}
 
-        def objective(p: dict) -> float:
+        def objective(cell: dict) -> float:
+            # a grid cell overrides the member's base params; everything not in the grid (bagging, max_bin, ...) stays
+            p = {**params, **cell}
             h = _params_hash(p)
             res = _load_protocol(sdir / h)  # trial cache on disk doubles as the resume unit
             if res is None:
@@ -578,6 +650,8 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
 
         results = searchmod.run_search(name, search_cfg["grid"], objective, n_trials=int(search_cfg["n_trials"]),
                                        storage=run_dir / "optuna.db", seed=seed)
+        # search/<name>.json carries the FULL params (base + cell) so params.best_of dependents inherit everything
+        results = [({**params, **cell}, v) for cell, v in results]
         write_json(run_dir / "search" / f"{name}.json", [{"params": p, "value": v} for p, v in results])
         top = searchmod.top_k_params(results, int(search_cfg["top_k"]))
         runs = []
@@ -591,12 +665,28 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
         res.oof, res.oof_fold, res.forward = oof, base.oof_fold, forward
         res.fold_blobs, res.forward_blob = base.fold_blobs, base.forward_blob
         res.inner_iters, res.frozen_n_iter = base.inner_iters, base.frozen_n_iter
+        res.inner_iter_forward, res.frozen_n_iter_per_fold = base.inner_iter_forward, base.frozen_n_iter_per_fold
+        res.frozen_n_iter_forward, res.count_sources = base.frozen_n_iter_forward, base.count_sources
         res.fit_seconds = sum(r.fit_seconds for r in runs)
         res.max_fit_seconds, res.feature_cols = max(r.max_fit_seconds for r in runs), base.feature_cols
         top_params, frozen_per_cfg = top, [r.frozen_n_iter for r in runs]
+        # winner's-curse check: the BASE params cell is always evaluated; top-k minus base on OOF and forward
+        base_h = _params_hash(params)
+        base_res = cache.get(base_h) or _load_protocol(sdir / base_h)
+        if base_res is None:
+            base_res = run_protocol(rd, mspec, params, seed=seed, threads=threads, prog=prog, label=f"{name}[base]")
+            _save_protocol(sdir / base_h, base_res)
+        search_gain = _search_gain(rd, res, base_res, [_params_hash(p) for p in top], base_h,
+                                   float(cfg["gates"]["suspect_gain_over_baseline"]))
+        write_json(run_dir / "search" / f"{name}.gain.json", search_gain)
+        log.info("%s search gain: top-%d OOF fit %.4f vs base-params cell %.4f (gain %+.4f%s); forward %s vs %s (gain %s)%s", name,
+                 len(top), search_gain["topk_fit"], search_gain["base_params_fit"], search_gain["gain"],
+                 ", SUSPECT" if search_gain["suspect"] else "", search_gain["topk_forward_fit"], search_gain["base_params_forward_fit"],
+                 search_gain["forward_gain"], "" if search_gain["forward_confirms"] in (True, None) else " NOT CONFIRMED on the forward block")
     else:
         res = run_protocol(rd, mspec, params, seed=seed, threads=threads, prog=prog, label=name)
         top_params, frozen_per_cfg = [params], [res.frozen_n_iter]
+        search_gain = None
     # artifacts
     mdir.mkdir(parents=True, exist_ok=True)
     for k, b in enumerate(res.fold_blobs):
@@ -622,13 +712,36 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
     df.to_parquet(oof_path)
     spec = {**mspec, "params": top_params[0], "top_params": top_params, "feature_cols": full_cols, "all_feature_cols": rd.feature_cols,
             "missing_cols": rd.missing_cols, "feature_cols_per_fold": res.feature_cols, "inner_iters": res.inner_iters,
-            "frozen_n_iter": res.frozen_n_iter, "frozen_n_iter_per_config": frozen_per_cfg, "fit_seconds": res.fit_seconds,
+            "inner_iter_forward": res.inner_iter_forward, "frozen_n_iter": res.frozen_n_iter,
+            "frozen_n_iter_per_fold": res.frozen_n_iter_per_fold, "frozen_n_iter_forward": res.frozen_n_iter_forward,
+            "count_sources": res.count_sources, "frozen_n_iter_per_config": frozen_per_cfg, "fit_seconds": res.fit_seconds,
             "max_fit_seconds": res.max_fit_seconds, "member_seconds": time.perf_counter() - t0, "full_blobs": full_files,
-            "corr_with_bench_val": corr, "status": "done"}
+            "corr_with_bench_val": corr, "search_gain": search_gain, "status": "done"}
     write_json(spec_path, spec)
     log.info("member %s done in %.0fs (frozen n_iter=%s, rho_b(val)=%s)", name, spec["member_seconds"], res.frozen_n_iter,
              None if corr is None else round(corr, 4))
     return spec
+
+
+def _search_gain(rd: RunData, topk: ProtocolResult, base: ProtocolResult, top_hashes: list[str], base_hash: str,
+                 margin: float) -> dict:
+    """Top-k-average minus base-params-cell fit20 on OOF (and the forward block); ``suspect`` when the OOF gain > margin.
+
+    Hashes identify grid cells without exposing hyperparameter values (the file lands under artifacts/ anyway).
+    """
+    def _mean_fit(pred: pd.Series | None) -> float | None:
+        if pred is None:
+            return None
+        return float(metrics.per_era_fit(pred, rd.df.loc[pred.index, data.PRIMARY_TARGET], rd.era.loc[pred.index]).mean())
+
+    topk_fit, base_fit = _mean_fit(topk.oof), _mean_fit(base.oof)
+    topk_fwd, base_fwd = _mean_fit(topk.forward), _mean_fit(base.forward)
+    gain = float(topk_fit - base_fit)
+    fwd_gain = None if topk_fwd is None or base_fwd is None else float(topk_fwd - base_fwd)
+    return {"topk_fit": topk_fit, "base_params_fit": base_fit, "gain": gain, "margin": margin, "suspect": bool(gain > margin),
+            "topk_forward_fit": topk_fwd, "base_params_forward_fit": base_fwd, "forward_gain": fwd_gain,
+            "forward_confirms": None if fwd_gain is None else bool(fwd_gain >= 0.0),
+            "topk_cells": top_hashes, "base_cell": base_hash, "base_cell_in_topk": base_hash in top_hashes}
 
 
 # --------------------------------------------------------------------------------------------------
@@ -668,8 +781,22 @@ def assemble_oof(rd: RunData, names: list[str], run_dir: Path) -> tuple[pd.DataF
     return oof, fwd
 
 
+def baseline_fit(cfg: dict, member_fit_means: dict[str, float]) -> tuple[float | None, str]:
+    """``(baseline fit20, label)`` for the suspect flag: ``gates.baseline_fit`` (a FIXED M1 number recorded from an unsearched
+    run) when set, else the in-run :func:`baseline_member`'s OOF mean. Returns ``(None, label)`` when neither exists.
+
+    A searched in-run baseline is itself selected on the scored folds, so the plan's "OOF FIT > M1 + 0.004 -> suspect"
+    banner can never fire against it; ``gates.baseline_fit`` is the honest reference once M1 (handoff 02) is known.
+    """
+    bf = (cfg.get("gates") or {}).get("baseline_fit")
+    if bf is not None:
+        return float(bf), f"gates.baseline_fit={float(bf):.4f}"
+    base = baseline_member(cfg)
+    return member_fit_means.get(base), base
+
+
 def baseline_member(cfg: dict) -> str:
-    """The M1 baseline for the suspect flag: ``lgbm_everest`` if present, else the first everest tree member, else the first."""
+    """The in-run baseline member for the suspect flag: ``lgbm_everest`` if present, else the first everest tree member, else the first."""
     names = [m["name"] for m in cfg["members"]]
     if "lgbm_everest" in names:
         return "lgbm_everest"
@@ -708,15 +835,27 @@ def member_metrics(cfg: dict, oof: pd.DataFrame, fwd: pd.DataFrame | None, specs
                   "suspect": False}
         if spec["family"] == "cat" and spec.get("max_fit_seconds", 0) > float(cfg["timing"]["catboost_max_fit_seconds"]):
             notes.append(f"{n}: catboost fit {spec['max_fit_seconds']:.0f}s > {cfg['timing']['catboost_max_fit_seconds']}s -> drop candidate")
+        sg = spec.get("search_gain")
+        out[n]["search_gain"] = sg
+        if sg:
+            if sg.get("suspect"):
+                out[n]["suspect"] = True
+                notes.append(f"SUSPECT: {n} search top-k OOF fit {sg['topk_fit']:.4f} > base-params cell {sg['base_params_fit']:.4f} "
+                             f"+ {sg['margin']} (winner's curse; forward gain {sg['forward_gain']})")
+            if sg.get("forward_confirms") is False:
+                notes.append(f"{n}: search gain {sg['gain']:+.4f} on OOF is NOT confirmed on the forward block "
+                             f"(forward gain {sg['forward_gain']:+.4f} < 0) -> treat the search as a tie")
     base = baseline_member(cfg)
     margin = float(gates["suspect_gain_over_baseline"])
+    bmean, blabel = baseline_fit(cfg, {n: m["fit"]["mean"] for n, m in out.items()})
     paired: dict[str, dict] = {}
-    if base in out:
-        bmean = out[base]["fit"]["mean"]
+    if bmean is not None:
         for n in out:
-            out[n]["suspect"] = bool(metrics.suspect_gain(out[n]["fit"]["mean"], bmean, margin))
-            if out[n]["suspect"]:
-                notes.append(f"SUSPECT: {n} OOF fit {out[n]['fit']['mean']:.4f} > {base} + {margin}")
+            if metrics.suspect_gain(out[n]["fit"]["mean"], bmean, margin):
+                out[n]["suspect"] = True
+                notes.append(f"SUSPECT: {n} OOF fit {out[n]['fit']['mean']:.4f} > {blabel} + {margin}")
+    if base in out:
+        for n in out:
             if n != base:
                 d = (fits[n] - fits[base]).dropna()
                 paired[f"{n}_vs_{base}"] = cvmod.paired_block_bootstrap(d, block=int(bs["block"]), n_boot=int(bs["n_boot"]), seed=int(bs["seed"])).as_dict()
@@ -768,13 +907,17 @@ def train_run(cfg: dict, run_id: str, *, resume: bool = False, config_path: Path
             members_m, paired, leak, notes = member_metrics(cfg, oof, fwd, specs)
         result.update({"members": members_m, "paired": paired, "leak_check": leak, "notes": notes,
                        "frozen_n_iter": {n: s.get("frozen_n_iter") for n, s in specs.items()},
+                       "frozen_n_iter_per_fold": {n: s.get("frozen_n_iter_per_fold") for n, s in specs.items()},
+                       "frozen_n_iter_forward": {n: s.get("frozen_n_iter_forward") for n, s in specs.items()},
+                       "baseline": {"label": baseline_fit(cfg, {n: m["fit"]["mean"] for n, m in members_m.items()})[1],
+                                    "fit": baseline_fit(cfg, {n: m["fit"]["mean"] for n, m in members_m.items()})[0]},
                        "folds": rd.folds_summary(), "n_rows_oof": int(len(oof)), "n_eras_oof": int(oof["era"].nunique())})
         result["status"] = "ok" if leak == "pass" else "failed"
         code = EXIT_OK if leak == "pass" else EXIT_GATE
         for n, mm in members_m.items():
             f = mm["fit"]
-            log.info("member %-22s fit20 mean=%.4f se=%.4f sharpe=%.3f pct_pos=%.2f forward=%s n_iter=%s%s", n, f["mean"],
-                     (f["std"] / np.sqrt(f["n_eras"])) if f["n_eras"] else float("nan"), f["sharpe"], f["pct_pos"],
+            log.info("member %-22s fit20 mean=%.4f se_block=%.4f sharpe=%.3f pct_pos=%.2f forward=%s n_iter=%s%s", n, f["mean"],
+                     f.get("se_block", float("nan")), f["sharpe"], f["pct_pos"],
                      None if mm["forward_fit"] is None else round(mm["forward_fit"], 4), mm["n_iter"], "  SUSPECT" if mm["suspect"] else "")
     except Exception as exc:  # noqa: BLE001 - CLI boundary: traceback goes to run.log + metrics.json
         log.error("train failed: %s\n%s", exc, traceback.format_exc())

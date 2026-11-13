@@ -6,8 +6,8 @@ CLI contract (docs/INTERFACES.md section 10)::
 
 Prints a table (python, every pin in ``requirements-lock.txt`` vs the installed version with OK/MISMATCH/MISSING,
 OS, CPU, RAM, GPU + driver via ``nvidia-smi`` when present, timezone, ``git config core.hooksPath``, whether
-``EIQ_API_KEY`` is present). Exit code 1 on any pin mismatch, 0 otherwise. The API key VALUE is never read into
-the output; only its presence is reported. Fully offline.
+``EIQ_API_KEY`` is present in the environment OR in ``<repo>/.env``). Exit code 1 on any pin mismatch, 0 otherwise.
+The API key VALUE is never read into the output; only its presence is reported. Fully offline.
 
 ``collect_env`` is reused by ``stealth.report`` for the ``host`` block of the results JSON.
 """
@@ -26,7 +26,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("stealth.selfcheck")  # explicit: under `python -m` __name__ is __main__
 
 REPO = Path(__file__).resolve().parents[1]
 LOCK_FILE = REPO / "requirements-lock.txt"
@@ -171,6 +171,20 @@ def git_sha(repo: Path = REPO) -> str | None:
     return _run(["git", "-C", str(repo), "rev-parse", "HEAD"]) or None
 
 
+def api_key_present(dotenv: Path) -> bool:
+    """True when ``EIQ_API_KEY``/``EVEREST_API_KEY`` is set in the environment OR non-empty in ``dotenv`` (the ``.env``
+    the SDK client actually reads via ``stealth.data.resolve_api_key``). Presence only; the value is never returned."""
+    if os.environ.get("EIQ_API_KEY") or os.environ.get("EVEREST_API_KEY"):
+        return True
+    try:
+        from stealth.data import _read_dotenv
+
+        env = _read_dotenv(Path(dotenv))
+    except Exception:  # noqa: BLE001 - selfcheck must never crash on a malformed .env
+        return False
+    return bool(env.get("EIQ_API_KEY") or env.get("EVEREST_API_KEY"))
+
+
 def collect_env(lock_file: Path = LOCK_FILE, repo: Path = REPO) -> dict[str, Any]:
     """Host + pin picture as one dict (the ``host`` block of results JSON plus ``pins``/``hooks_path``/``api_key``).
 
@@ -192,7 +206,7 @@ def collect_env(lock_file: Path = LOCK_FILE, repo: Path = REPO) -> dict[str, Any
         "tz": _timezone(),
         "hooks_path": hooks_path(repo),
         "git_sha": git_sha(repo),
-        "api_key_present": bool(os.environ.get("EIQ_API_KEY") or os.environ.get("EVEREST_API_KEY")),
+        "api_key_present": api_key_present(repo / ".env"),
         "pins": rows,
         "pins_ok": pins_ok(rows) and bool(rows),
     }
@@ -221,7 +235,8 @@ def render(env: dict[str, Any]) -> str:
         ["timezone", env["tz"]],
         ["git_sha", env["git_sha"] or "-"],
         ["core.hooksPath", env["hooks_path"] or "UNSET  <- run: git config core.hooksPath scripts/hooks"],
-        ["EIQ_API_KEY", "present" if env["api_key_present"] else "ABSENT (copy .env.example to .env; API steps will fail)"],
+        ["EIQ_API_KEY", "present (environment or .env)" if env["api_key_present"]
+         else "ABSENT (copy .env.example to .env and paste the key; API steps will fail)"],
     ]
     out = ["== host ==", _table(host_rows, ["item", "value"]), "", "== pins (requirements-lock.txt) =="]
     if env["pins"]:
@@ -230,7 +245,8 @@ def render(env: dict[str, Any]) -> str:
     else:
         out.append("requirements-lock.txt not found")
     out.append("")
-    out.append("PINS OK" if env["pins_ok"] else "PINS MISMATCH -> run: $PY -m pip install -r requirements-lock.txt")
+    out.append("PINS OK" if env["pins_ok"] else "PINS MISMATCH -> run: bash scripts/setup.sh  "
+               "(or: uv pip install --python $PY -r requirements-lock.txt -e .)")
     if not env["hooks_path"]:
         out.append("WARNING: core.hooksPath unset; the secret-scanning pre-commit hook is not active")
     return "\n".join(out)

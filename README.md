@@ -10,10 +10,10 @@ Python 3.11 with the exact lane pins. Plan: `docs/PLAN.md`; module contracts: `d
 ## Quickstart (Linux)
 
 ```bash
-git clone https://github.com/Infosuii/stealth && cd stealth
-bash scripts/setup.sh                 # python 3.11 venv, exact pins, pre-commit hook, selfcheck; prints PY=...
+git clone https://github.com/Infosuii/stealth "$HOME/stealth" && cd "$HOME/stealth"   # the handoffs assume $HOME/stealth
+bash scripts/setup.sh                 # python 3.11 venv (with pip), exact pins, pre-commit hook, selfcheck; prints PY=...
 cp -n .env.example .env               # paste EIQ_API_KEY (never committed, never printed)
-PY=$PWD/.venv/bin/python
+PY="$HOME/stealth/.venv/bin/python"
 "$PY" -m stealth.data download        # data/ (gitignored)
 "$PY" -m pytest -q
 ```
@@ -35,7 +35,9 @@ Daily: the platform lane runs the uploaded pickle; `scripts/daily_task.sh` (cron
 ## Safety rules
 
 - **Nothing is submitted, uploaded or staked** without a handoff carrying a **USER MUST APPROVE** banner;
-  `predict --submit/--upload` additionally require `--i-have-approval` and `STEALTH_APPROVED=1`.
+  `predict --submit/--upload` additionally require `--i-have-approval` AND an environment variable set to `1`:
+  `STEALTH_CONFIRM_SUBMIT` (submit) / `STEALTH_CONFIRM_UPLOAD` (upload), or `STEALTH_APPROVED` which covers either
+  (the code accepts both spellings; `--help` lists them).
 - `.env`, `data/`, `artifacts/`, `*.pkl` are never committed; `scripts/hooks/pre-commit` (activated by
   `git config core.hooksPath scripts/hooks`) blocks them and any secret-shaped text. Never `cat .env`, never
   `git remote -v`, never `git config --list`.

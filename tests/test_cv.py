@@ -190,3 +190,38 @@ def test_block_bootstrap_ci_and_nan_handling() -> None:
 def test_block_bootstrap_means_shape_and_short_series() -> None:
     m = cv.block_bootstrap_means(np.arange(7, dtype=float), block=20, n_boot=50, seed=0)
     assert m.shape == (50,) and np.all((m >= 0) & (m <= 6))
+
+
+# ---------------------------------------------------------------------------------------------- count sources
+def test_independent_inner_folds_test_layout() -> None:
+    """test.yaml layout: the last fold and the forward block may only take their tree count from independent sources."""
+    eras = ALL_TRAIN_ERAS[ALL_TRAIN_ERAS >= 2800]
+    folds = cv.purged_folds(eras, 5)
+    fw = cv.forward_block(eras)
+    # folds 0..3 have their inner_val at the end of the era range -> inside fold4's AND the forward's test block
+    for k in range(4):
+        assert int(folds[k].inner_val_eras.min()) >= int(folds[4].test_eras.min())
+        assert int(folds[k].inner_val_eras.min()) >= int(fw.test_eras.min())
+    assert cv.independent_inner_folds(folds[4], folds) == [4]
+    assert cv.independent_inner_folds(fw, folds) == [4]
+    # an early fold may use every fold's inner split (all inner_val blocks are >= 20 eras after its test block)
+    assert cv.independent_inner_folds(folds[0], folds) == [0, 1, 2, 3, 4]
+    # every admitted source is >= 20 eras from the target's test block; a contaminated source is rejected
+    for k, f in enumerate(folds):
+        src = [folds[j] for j in cv.independent_inner_folds(f, folds)]
+        assert k in cv.independent_inner_folds(f, folds)  # own split always eligible
+        cv.assert_count_sources(f, src)
+        for s in src:
+            assert cv._gap_to_block(s.inner_val_eras, f.test_eras) >= 20
+    cv.assert_count_sources(fw, [folds[4], fw])
+    with pytest.raises(AssertionError, match="count source"):
+        cv.assert_count_sources(folds[4], [folds[0]])
+    with pytest.raises(AssertionError, match="no early-stopping source"):
+        cv.assert_count_sources(folds[4], [])
+
+
+def test_independent_inner_folds_smoke_layout() -> None:
+    eras = ALL_TRAIN_ERAS[ALL_TRAIN_ERAS >= 5000]
+    folds = cv.purged_folds(eras, 3)
+    assert cv.independent_inner_folds(folds[2], folds) == [2]
+    assert cv.independent_inner_folds(folds[0], folds) == [0, 1, 2]

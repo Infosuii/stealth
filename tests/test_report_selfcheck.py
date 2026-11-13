@@ -129,7 +129,9 @@ def test_write_results_ok(fake_repo: Path) -> None:
     assert doc["status"] == "ok" and doc["git_sha"] == "a" * 40 and doc["host"]["cpu"] == "fake cpu"
     names = {c["name"]: c for c in doc["configs"]}
     assert names["lgbm_everest"]["fit_mean"] == 0.0261 and names["lgbm_everest"]["rho_b_val"] == 0.55
-    assert abs(names["lgbm_everest"]["fit_se"] - 0.045 / 3700**0.5) < 1e-9
+    # block SE, not std/sqrt(n): the synthetic summary has no se_block, so the ci90 half-width / 1.645 is used
+    assert abs(names["lgbm_everest"]["fit_se"] - (0.0327 - 0.0195) / (2 * 1.645)) < 1e-9
+    assert names["lgbm_everest"]["fit_se"] > 2 * 0.045 / 3700**0.5
     assert names["blend_ew"]["paired_vs_baseline"]["p_pos"] == 0.83
     assert names["blend_ew"]["regime"]["bneg"]["unq"] == 0.0
     assert names["blend_ew"]["regime"]["at"] == {"bench_fit_mean": "0.009", "p_b": "p_b=0.5"}

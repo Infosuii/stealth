@@ -5,10 +5,12 @@
 # Logic (all clocks in UTC regardless of the local timezone the scheduler fires in):
 #   0. weekday only; UTC time must be inside 13:05-15:55 (the round is open 13:00-16:00 UTC); else exit 0 quietly
 #   1. $PY -m stealth.monitor          -> exit 0 = accepted submission for today's exped AND lane sha == manifest: done
+#                                         exit 2 = not configured (no EIQ_MODEL_ID / manifest): log + exit 0 (nothing armed yet)
 #   2. otherwise, if STEALTH_DAILY_APPROVED=1 is set in the environment (the user's one-time approval, placed in the
 #      crontab), run  $PY -m stealth.predict --pkl <active pkl> --submit --i-have-approval  (predict itself re-checks
 #      the round is open and the live exped matches; exit 3 = window closed)
-#   3. re-run monitor; if it still fails after 15:25 UTC write an ALERT line (monitor writes handoffs/ALERT.md itself)
+#   3. re-run monitor; if it still fails after 15:25 UTC write an ALERT line (monitor writes handoffs/ALERT.md itself;
+#      whether the ALERT is committed/pushed automatically is decided in handoff 05 -- today it is only written)
 # Logs: artifacts/daily/YYYY-MM-DD.log (gitignored). Never prints secrets; .env is sourced, never echoed.
 #
 # ---- crontab (Europe/London LOCAL time; `crontab -e`) -------------------------------------------------------
@@ -73,8 +75,13 @@ log "start (UTC ${hhmm}); pkl=$PKL approved=${STEALTH_DAILY_APPROVED:-0}"
 
 # ---- 1. is today already covered? --------------------------------------------------------------------
 "$PY" -m stealth.monitor >> "$LOG" 2>&1
-if [ $? -eq 0 ]; then log "monitor OK: accepted submission exists and lane sha matches; done"; exit 0; fi
-log "monitor reported a gap/mismatch"
+mrc=$?
+if [ "$mrc" -eq 0 ]; then log "monitor OK: accepted submission exists and lane sha matches; done"; exit 0; fi
+if [ "$mrc" -eq 2 ]; then
+  log "monitor exit 2: not configured yet (EIQ_MODEL_ID empty or no manifest/active.json) -> nothing to do until handoff 05"
+  exit 0
+fi
+log "monitor reported a gap/mismatch (exit $mrc)"
 
 # ---- 2. fallback submit (user-gated) ------------------------------------------------------------------
 if [ "${STEALTH_DAILY_APPROVED:-0}" != "1" ]; then

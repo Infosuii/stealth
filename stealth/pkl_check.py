@@ -2,7 +2,8 @@
 
 What it proves (docs/PLAN.md "Packaging", Fix C1):
 
-* the pickle loads in an interpreter that has only the lane pins (no ``stealth`` package on sys.path);
+* the pickle loads in an interpreter that has only the lane pins (no ``stealth`` package on sys.path) and whose
+  ``major.minor`` equals the version declared at upload (3.11; ``--expect-python``);
 * after ``predict()`` neither ``stealth`` nor ``torch`` is in ``sys.modules``;
 * the raw bytes contain no ``b"torch"`` and no ``b"stealth."`` reference other than the by-value module
   qualname ``stealth._runtime`` (bare ``b"stealth"`` occurrences are reported, not failed);
@@ -32,7 +33,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("stealth.pkl_check")  # explicit: under `python -m` __name__ is __main__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"
@@ -40,6 +41,7 @@ LOCK_FILE = REPO_ROOT / "requirements-lock.txt"
 DEFAULT_VENV = REPO_ROOT / "artifacts" / "pklcheck_venv"
 LANE_PACKAGES = ("catboost", "cloudpickle", "lightgbm", "numpy", "pandas", "pyarrow", "scikit-learn", "scipy", "xgboost")
 MAX_PKL_MB = 50.0
+EXPECT_PYTHON = "3.11"  # == predict.PKL_PYTHON_VERSION: the interpreter minor declared at upload
 MAX_SECONDS_PER_ERA = 5.0
 
 # --------------------------------------------------------------------------------------------------
@@ -171,14 +173,19 @@ def main():
     ap.add_argument("--eras", type=int, default=50)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", required=True)
+    ap.add_argument("--expect-python", default=None, help="major.minor the pickle was built under; mismatch = problem")
     args = ap.parse_args()
     report = {"passed": False, "problems": [], "notes": [], "stats": {}}
     problems, notes = report["problems"], report["notes"]
     stats = {"rho_bench_with": [], "rho_bench_without": [], "rho_p0_pb": []}
     timings = []
+    report["python_version"] = sys.version
     try:
         if sys.flags.isolated != 1:
             problems.append("checker not running under python -I")
+        running = f"{sys.version_info.major}.{sys.version_info.minor}"
+        if args.expect_python and running != args.expect_python:
+            problems.append(f"checker python {running} != expected {args.expect_python} (build/declare/check under the same minor)")
         raw = open(args.pkl, "rb").read()
         size_mb = len(raw) / 1e6
         report["size_mb"] = size_mb
@@ -323,7 +330,11 @@ def ensure_check_venv(venv_dir: Path = DEFAULT_VENV, lock_file: Path = LOCK_FILE
         shutil.rmtree(venv_dir)
     venv_dir.parent.mkdir(parents=True, exist_ok=True)
     base = base_interpreter()
-    log.info("creating check venv %s from %s", venv_dir, base)
+    ver = subprocess.run([base, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], capture_output=True, text=True,
+                         timeout=30, check=True).stdout.strip()
+    if ver != EXPECT_PYTHON:
+        raise ValueError(f"base interpreter {base} is Python {ver}, not {EXPECT_PYTHON}; pass --venv-python <clean python{EXPECT_PYTHON}>")
+    log.info("creating check venv %s from %s (python %s)", venv_dir, base, ver)
     subprocess.run([base, "-m", "venv", str(venv_dir)], check=True, timeout=120)
     py = venv_python(venv_dir)
     t0 = time.perf_counter()
@@ -346,8 +357,12 @@ def run_check(
     eras: int = 50,
     seed: int = 0,
     timeout: int = 540,
+    expect_python: str | None = EXPECT_PYTHON,
 ) -> dict:
     """Run the standalone checker under ``python -I`` with cwd in a temp dir; returns the report dict.
+
+    ``expect_python`` (default ``"3.11"``, the version declared at upload) is passed to the checker, which records
+    a problem when its own ``major.minor`` differs -- the pickle must be built, checked and declared under one minor.
 
     The report always carries ``passed`` (bool), ``problems`` (list[str]), ``notes``, ``size_mb``, ``byte_scan``,
     ``seconds_per_era_max``, ``stats`` and ``stdout``/``stderr`` tails. Needs ``data/futures_live.parquet``;
@@ -368,6 +383,8 @@ def run_check(
         report_path = tmpdir / "report.json"
         cmd = [str(python), "-I", str(script), "--pkl", str(pkl), "--live", str(live), "--eras", str(eras),
                "--seed", str(seed), "--report", str(report_path)]
+        if expect_python:
+            cmd += ["--expect-python", str(expect_python)]
         if live_bench.exists():
             cmd += ["--live-bench", str(live_bench)]
         if val.exists():
@@ -419,8 +436,9 @@ def update_manifest(pkl: Path, passed: bool) -> Path | None:
 
 def format_report(report: dict) -> str:
     """Human-readable multi-line summary of a checker report."""
+    pyv = str(report.get("python_version") or "?").split()[0]
     lines = [f"pkl_check: {'PASSED' if report.get('passed') else 'FAILED'}",
-             f"  python: {report.get('python')}  size: {report.get('size_mb', float('nan')):.2f} MB  eras: {report.get('n_eras')}"
+             f"  python: {report.get('python')} ({pyv})  size: {report.get('size_mb', float('nan')):.2f} MB  eras: {report.get('n_eras')}"
              f"  slowest call: {report.get('seconds_per_era_max')}s  elapsed: {report.get('elapsed_s', 0):.1f}s"]
     bs = report.get("byte_scan") or {}
     lines.append(f"  byte scan: torch={bs.get('torch')} stealth_total={bs.get('stealth_total')} "

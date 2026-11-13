@@ -12,6 +12,8 @@ Era arithmetic (all eras are ``int32`` era numbers, see ``data.era_int``):
 * forward block: train ``< train_end``, test ``>= test_start`` (gap asserted ``>= 20``).
 
 :func:`assert_fold_gaps` is the single place that checks the gaps; tests call it on every config.
+:func:`independent_inner_folds` / :func:`assert_count_sources` decide which folds' inner early-stopping results may
+set a given fold's frozen tree count (their inner_val eras must be >= 20 from that fold's test block).
 """
 from __future__ import annotations
 
@@ -171,6 +173,32 @@ def assert_fold_gaps(folds: list[Fold], min_gap: int = 20) -> None:
             raise AssertionError(f"{f.name}: inner train/val gap {gi} < {min_gap}")
         if _gap_to_block(f.inner_val_eras, f.test_eras) < min_gap or _gap_to_block(f.inner_train_eras, f.test_eras) < min_gap:
             raise AssertionError(f"{f.name}: inner split touches the test block")
+
+
+def independent_inner_folds(target: Fold, candidates: list[Fold], *, min_gap: int = 20) -> list[int]:
+    """Indices of ``candidates`` whose INNER VALIDATION eras lie >= ``min_gap`` eras away from ``target.test_eras``.
+
+    The tree count of a scored fold may only be chosen from early-stopping results whose validation eras do not
+    touch that fold's test block (PLAN C8: "the scored fold never influences its own tree count"). With chronological
+    folds the inner_val of every non-last fold sits at the END of the era range, i.e. inside the last fold's (and the
+    forward block's) test eras -- so those folds' counts are excluded for the last fold / the forward block. A fold's
+    own inner split is always eligible (inner_val is a subset of its train eras, which are purged from its test).
+    """
+    out = []
+    for j, c in enumerate(candidates):
+        if _gap_to_block(c.inner_val_eras, target.test_eras) >= min_gap:
+            out.append(j)
+    return out
+
+
+def assert_count_sources(target: Fold, sources: list[Fold], *, min_gap: int = 20) -> None:
+    """Raise ``AssertionError`` unless every source fold's inner_val eras are >= ``min_gap`` from ``target.test_eras``."""
+    if not sources:
+        raise AssertionError(f"{target.name}: no early-stopping source fold is independent of its test block")
+    for s in sources:
+        g = _gap_to_block(s.inner_val_eras, target.test_eras)
+        if g < min_gap:
+            raise AssertionError(f"{target.name}: count source {s.name} inner_val eras are {g} < {min_gap} from the test block")
 
 
 # --------------------------------------------------------------------------------------------------

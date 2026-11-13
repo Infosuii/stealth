@@ -34,7 +34,7 @@ from stealth import data as sdata
 from stealth.bundle import manifest_path, sha256_file
 from stealth.predict import ACTIVE_JSON, MODELS_DIR, resolve_model_id
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("stealth.monitor")  # explicit: under `python -m` __name__ is __main__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_PATH = REPO_ROOT / "handoffs" / "ALERT.md"
@@ -142,6 +142,16 @@ def _entries(resp: Any) -> list[dict]:
     return []
 
 
+def _full_coverage(cov: Any) -> bool:
+    """``coverage_pct`` None = field not published (assume full); any number < 100 (incl. 0) = NOT full."""
+    if cov is None:
+        return True
+    try:
+        return float(cov) >= 100.0
+    except (TypeError, ValueError):
+        return False
+
+
 def check_submission(client: Any, model_id: str, *, now: datetime | None = None) -> list[str]:
     """Problems with today's submission (empty = ok or nothing to check yet)."""
     now = now or datetime.now(timezone.utc)
@@ -158,7 +168,7 @@ def check_submission(client: Any, model_id: str, *, now: datetime | None = None)
     resp = client.get_submission_status(tournament="futures", round=exped, model_id=model_id)
     entries = _entries(resp)
     accepted = [e for e in entries if e.get("accepted") or e.get("status") == "accepted"]
-    full = [e for e in accepted if float(e.get("coverage_pct") or 100.0) >= 100.0]
+    full = [e for e in accepted if _full_coverage(e.get("coverage_pct"))]
     if full:
         e = full[0]
         log.info("accepted submission for %s: n=%s coverage=%s at %s", exped, e.get("n_predictions"), e.get("coverage_pct"),

@@ -47,9 +47,9 @@ if [ "$venv_ok" -eq 0 ]; then
     rm -rf "$VENV.old"; mv "$VENV" "$VENV.old"
   fi
   if [ "$have_uv" -eq 1 ]; then
-    say "uv python install 3.11 && uv venv .venv --python 3.11"
+    say "uv python install 3.11 && uv venv .venv --python 3.11 --seed"
     uv python install 3.11
-    uv venv "$VENV" --python 3.11
+    uv venv "$VENV" --python 3.11 --seed      # --seed installs pip into the venv so "$PY -m pip ..." repair steps work
   elif command -v python3.11 >/dev/null 2>&1; then
     say "python3.11 -m venv .venv"
     python3.11 -m venv "$VENV"
@@ -70,10 +70,19 @@ else
   "$PY" -m pip install --quiet -r requirements-lock.txt -e .
 fi
 
+# ---- 3b. pip present? (uv venv without --seed has none; the handoffs' repair commands use "$PY -m pip") ---------
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  say "venv has no pip; adding it (ensurepip, else uv)"
+  "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || { [ "$have_uv" -eq 1 ] && uv pip install --python "$PY" pip >/dev/null 2>&1; } || true
+fi
+
 # ---- 4. hook ----------------------------------------------------------------------------------------
 say "git config core.hooksPath scripts/hooks"
 chmod +x scripts/hooks/pre-commit scripts/daily_task.sh 2>/dev/null || true
 git config core.hooksPath scripts/hooks
+if ! git config --get user.email >/dev/null 2>&1 || ! git config --get user.name >/dev/null 2>&1; then
+  echo "GIT IDENTITY MISSING -> HUMAN STEP: git config user.name \"<name>\" && git config user.email \"<email>\"  (git commit will fail until then)"
+fi
 
 # ---- 5. selfcheck -------------------------------------------------------------------------------------
 say "selfcheck"
@@ -85,7 +94,8 @@ set -e
 # ---- 6. result ------------------------------------------------------------------------------------------
 echo ""
 if [ "$rc" -ne 0 ]; then
-  echo "SETUP INCOMPLETE: selfcheck reported a pin mismatch (exit $rc). Re-run: $PY -m pip install -r requirements-lock.txt"
+  echo "SETUP INCOMPLETE: selfcheck reported a pin mismatch (exit $rc). Re-run: bash scripts/setup.sh"
+  echo "  (manual equivalent: uv pip install --python $PY -r requirements-lock.txt -e .   or   $PY -m pip install -r requirements-lock.txt -e .)"
   exit "$rc"
 fi
 if [ ! -s "$REPO/.env" ]; then

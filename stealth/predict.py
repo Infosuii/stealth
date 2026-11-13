@@ -11,12 +11,16 @@ CLI (docs/INTERFACES.md section 10):
 * ``--submit`` and ``--upload`` are USER-GATED: both refuse unless the ``--i-have-approval`` flag is given AND the
   matching environment variable is ``1`` (``STEALTH_CONFIRM_SUBMIT`` / ``STEALTH_CONFIRM_UPLOAD``; ``STEALTH_APPROVED``
   is accepted for either). A banner is logged before any write.
+* online, the live file's ``exped`` must equal the round's ``exped`` (hard stop otherwise: a stale live file must never
+  be submitted).
 * ``--submit`` sends the literal ``exped`` read from the live file (never "current") and logs ``replaced`` /
   ``late`` / ``scored`` plus the recorded coverage. ``--upload`` uploads the pickle to the model slot with
   ``python_version="3.11"``, polls ``get_upload_status`` until ``sandbox_ready == 1`` (or an ``error_message``), then
-  records ``models/active.json`` and the manifest's ``upload_id``.
+  records ``models/active.json`` and the manifest's ``upload_id``. It refuses without a manifest next to the pickle,
+  without ``manifest.pkl_check.passed``, on a sha mismatch, or when the manifest's ``python`` is not 3.11.x.
 
-Exit codes: 0 ok, 3 submission window closed, 1 error (incl. refused gates, validation failures).
+Exit codes: 0 ok, 3 submission window closed (incl. the SDK's 'no active round' 404), 1 error (incl. refused gates,
+validation failures, live/round exped mismatch).
 Needs ``EIQ_API_KEY`` for anything online (``RuntimeError`` otherwise); ``--offline`` never touches the network.
 """
 from __future__ import annotations
@@ -37,7 +41,7 @@ import pandas as pd
 
 from stealth import data as sdata
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("stealth.predict")  # explicit: under `python -m` __name__ is __main__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PREDICTIONS_DIR = REPO_ROOT / "artifacts" / "predictions"
@@ -151,9 +155,27 @@ def read_live(data_dir: Path) -> tuple[pd.DataFrame, pd.Series | None]:
     return live, bench
 
 
+def _is_no_round_error(exc: Exception) -> bool:
+    """True for the SDK's 'no active round' failure (``EverestError`` 404 / a 'no active round' body)."""
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    return status == 404 or "no active round" in text or "no current round" in text
+
+
 def check_round_open(client: Any) -> dict:
-    """``get_current_round('futures')``; raises ``RuntimeError`` unless ``submission_window == 'open'``."""
-    rnd = client.get_current_round("futures")
+    """``get_current_round('futures')``; raises ``RuntimeError`` unless ``submission_window == 'open'``.
+
+    When no active round exists (weekend / between rounds) the SDK raises ``EverestError`` 404; that is mapped
+    to the same "submission window is not open" ``RuntimeError`` so the CLI exits ``EXIT_WINDOW_CLOSED``.
+    """
+    try:
+        rnd = client.get_current_round("futures")
+    except Exception as exc:  # noqa: BLE001 - only the no-round case is translated; anything else propagates
+        if _is_no_round_error(exc):
+            raise RuntimeError(f"submission window is not open (no active round: {str(exc)[:200]})") from exc
+        raise
+    if not isinstance(rnd, dict):
+        raise RuntimeError(f"submission window is not open (unexpected get_current_round payload: {type(rnd).__name__})")
     window = rnd.get("submission_window") or rnd.get("status")
     log.info("current round: number=%s exped=%s window=%s close=%s", rnd.get("round_number"), rnd.get("exped"),
              window, rnd.get("round_close") or rnd.get("close_at"))
@@ -195,8 +217,11 @@ def predict_live(
         download_live(client, Path(data_dir))
     live, bench = read_live(Path(data_dir))
     exped = live_exped(live)
-    if rnd.get("exped") and rnd["exped"] != exped:
-        log.warning("live file exped %s != round exped %s; submitting under the live file's exped", exped, rnd["exped"])
+    if rnd.get("exped") and str(rnd["exped"]) != exped:
+        # PLAN "Daily operations": proceed only if the live parquet's exped equals the round's exped. A stale or
+        # partially refreshed live file would otherwise yield a late/unscored or 409 submission with no error.
+        raise RuntimeError(f"live exped {exped} != round exped {rnd['exped']}; refusing to submit "
+                           "(stale futures_live.parquet? re-run after the round data is published)")
     predict = load_predict(pkl)
     t0 = time.perf_counter()
     out = predict(live, bench)
@@ -274,15 +299,19 @@ def upload(client: Any, model_id: str, pkl: Path, *, poll_seconds: float = 10.0,
     pkl = Path(pkl)
     sha = sha256_file(pkl)
     mpath = manifest_path(pkl)
-    if mpath.exists():
-        manifest = json.loads(mpath.read_text())
-        if manifest.get("sha256") != sha:
-            raise RuntimeError(f"{pkl.name} sha256 {sha[:12]} != manifest {str(manifest.get('sha256'))[:12]}; rebuild the manifest")
-        if not (manifest.get("pkl_check") or {}).get("passed"):
-            raise RuntimeError("manifest.pkl_check has not passed; run `python -m stealth.pkl_check` first")
-    else:
-        log.warning("no manifest next to %s; uploading without the pkl_check gate record", pkl)
-        manifest = {}
+    if not mpath.exists():
+        # pkl_check is the final gate before any upload (PLAN "Packaging"); no manifest = no gate record.
+        raise RuntimeError(f"no manifest next to {pkl.name} ({mpath.name} missing); run `python -m stealth.bundle` "
+                           "and `python -m stealth.pkl_check` first")
+    manifest = json.loads(mpath.read_text())
+    if manifest.get("sha256") != sha:
+        raise RuntimeError(f"{pkl.name} sha256 {sha[:12]} != manifest {str(manifest.get('sha256'))[:12]}; rebuild the manifest")
+    if not (manifest.get("pkl_check") or {}).get("passed"):
+        raise RuntimeError("manifest.pkl_check has not passed; run `python -m stealth.pkl_check` first")
+    built_py = str(manifest.get("python") or "")
+    if not built_py.startswith(PKL_PYTHON_VERSION + "."):
+        raise RuntimeError(f"manifest says the pickle was built under Python {built_py or '?'}, but the upload declares "
+                           f"python_version={PKL_PYTHON_VERSION}; rebuild the pickle in the 3.11 train venv")
     res = client.upload_model(model_id, str(pkl), python_version=PKL_PYTHON_VERSION)
     upload_id = res.get("upload_id") or res.get("id")
     log.warning("UPLOADED %s (%.2f MB, sha256 %s) to model %s: upload_id=%s", pkl.name, pkl.stat().st_size / 1e6, sha[:12],
@@ -290,10 +319,9 @@ def upload(client: Any, model_id: str, pkl: Path, *, poll_seconds: float = 10.0,
     status = poll_upload_status(client, model_id, poll_seconds=poll_seconds, timeout=timeout)
     upload_id = upload_id or status.get("upload_id") or status.get("id")
     write_active(model_id, upload_id, sha, pkl, active_path)
-    if mpath.exists():
-        manifest["upload_id"] = upload_id
-        manifest["uploaded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        mpath.write_text(json.dumps(manifest, indent=2) + "\n")
+    manifest["upload_id"] = upload_id
+    manifest["uploaded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    mpath.write_text(json.dumps(manifest, indent=2) + "\n")
     log.info("recorded %s (upload_id=%s)", active_path, upload_id)
     return {"upload": res, "status": status, "upload_id": upload_id, "sha256": sha}
 
@@ -308,8 +336,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", type=Path, default=sdata.DATA_DIR)
     p.add_argument("--out-dir", type=Path, default=PREDICTIONS_DIR)
     p.add_argument("--model-id", default=None, help="platform model slot (default: EIQ_MODEL_ID)")
-    p.add_argument("--submit", action="store_true", help=f"USER-GATED: submit predictions (needs --i-have-approval + {ENV_SUBMIT}=1)")
-    p.add_argument("--upload", action="store_true", help=f"USER-GATED: upload the pkl to the model slot (needs --i-have-approval + {ENV_UPLOAD}=1)")
+    p.add_argument("--submit", action="store_true", help=f"USER-GATED: submit predictions (needs --i-have-approval AND {ENV_SUBMIT}=1 or {ENV_ANY}=1 in the environment)")
+    p.add_argument("--upload", action="store_true", help=f"USER-GATED: upload the pkl to the model slot (needs --i-have-approval AND {ENV_UPLOAD}=1 or {ENV_ANY}=1 in the environment)")
     p.add_argument("--i-have-approval", action="store_true", help="assert a USER MUST APPROVE handoff covers this write")
     p.add_argument("--poll-seconds", type=float, default=10.0)
     p.add_argument("--poll-timeout", type=float, default=900.0)

@@ -89,7 +89,8 @@ def per_era_unq(pred, bench, target, era) -> pd.Series                # scoring.
 def per_era_inov(pred, core_frame: pd.DataFrame, target, era) -> pd.Series   # scoring.inov with core_frame = raw int8 cols (−1 ok)
 def per_era_spearman(pred, target, era) -> pd.Series
 def summarise(s: pd.Series, *, block=20, n_boot=2000, seed=0) -> dict
-    # {"mean","std","sharpe","pct_pos","frac_roll20_neg","ci90":[lo,hi],"n_eras"}  (sharpe = mean/std, per era, NOT annualised)
+    # {"mean","std","sharpe","pct_pos","frac_roll20_neg","ci90":[lo,hi],"se_block","n_eras"}  (sharpe = mean/std, per era, NOT
+    # annualised; se_block = std of the 20-era block-bootstrap means = the SE every report prints as fit_se; never std/sqrt(n))
 def leak_check(spearman: pd.Series, threshold: float = 0.18) -> None  # raises RuntimeError("LEAK: ...") if mean > threshold
 def regime_simulation(z_pred: pd.Series, target, era, direction: pd.Series, core_proxy: pd.Series, *,
                       p_b_grid=(0.0,.25,.5,.75), p_c: float, bench_fit_means=(0.0,0.009,0.02), bench_fit_sd=0.035,
@@ -189,10 +190,15 @@ folds.json             # [{name, train_eras:[min,max,n], test_eras:[min,max], in
 oof.parquet            # index 'id'; columns: era int32, fold int8 (-1 = forward), target_everest float32,
                        #   plus one float32 column per member: "m__<member name>" = RAW member score (not gaussianised); NaN where absent
 forward.parquet        # same schema, forward block only (when cv.forward.enabled)
-members/<name>/spec.json      # member spec + feature_cols + missing_cols + per-fold n_iter + frozen_n_iter (median) + fit_seconds
+members/<name>/spec.json      # member spec + feature_cols + missing_cols + inner_iters (per CV fold) + inner_iter_forward
+                              #   + frozen_n_iter_per_fold / frozen_n_iter_forward (count used per scored fold, from INDEPENDENT
+                              #   inner splits only; count_sources names them) + frozen_n_iter (median over CV folds; full refit
+                              #   only) + fit_seconds + search_gain (searched members: top-k minus base-params cell, OOF + forward)
 members/<name>/fold<k>.bin    # bytes from models.to_bytes for fold k (k = 0..n_folds-1), forward.bin for the forward fold
 members/<name>/full_s<seed>.bin   # full-train refit(s) with frozen_n_iter (written by train.py --refit / full tier)
 search/<member>.json          # [{params, value}] sorted desc  (hyperparameter VALUES stay here, never in handoffs/results)
+search/<member>.gain.json     # {topk_fit, base_params_fit, gain, suspect, topk_forward_fit, base_params_forward_fit, forward_gain,
+                              #   forward_confirms, topk_cells (hashes), base_cell}  winner's-curse record of the search
 optuna.db                     # sqlite storage, one study per searched member
 metrics.json                  # see below
 blend.json                    # written by blend.py: {weights:{member: w}, rule: "ew"|"nnls", p_b, p_c, core_proxy_cols:[...],

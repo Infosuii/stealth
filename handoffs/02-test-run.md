@@ -14,15 +14,19 @@ Success = ALL of (read from `handoffs/results/02-metrics.json` → `configs[]`):
   best member beyond noise); paired `p_pos` vs `lgbm_everest` is **recorded** (≥ 0.8 = adopt the blend; otherwise
   tie, which is fine at this stage).
 - `leak_check` = `pass`; no config has `suspect: true` (any `fit_mean` > 0.030 is flagged by `train` and must be
-  reported as suspect, not as a win).
+  reported as suspect, not as a win). `lgbm_everest` is a searched member: `artifacts/test01/search/lgbm_everest.gain.json`
+  records top-3 minus the base-params cell on OOF (`gain`) and on the forward block (`forward_gain`); a `gain` > 0.004 or a
+  negative `forward_gain` is noted by `train` in `metrics.json.notes` — copy such a note into the operator notes verbatim.
+  `fit_se` in the results is the 20-era block-bootstrap SE (expect ≈ 0.003–0.004), not std/sqrt(n).
 - `timings.per_member_fit_s.cat_everest_l2_30` is present. **≤ 120 s** → "CatBoost kept"; **> 120 s** →
   "CatBoost dropped" — write the verdict in the operator notes.
-- `pkl_check` prints `PASS`; `models/test01.manifest.json` exists.
+- `pkl_check` logs `pkl_check: PASSED` and exits 0; `models/test01.manifest.json` exists.
 - `02-results.md`, `02-metrics.json`, `02-log-tail.txt` pushed.
 
 ## 2. Preconditions
 
-- Handoffs 00 and 01 reported success (the 01 results file shows `PASS` for `pkl_check`).
+- Handoffs 00 and 01 reported success: the **Operator notes** section of `handoffs/results/01-results.md` contains
+  `pkl_check: PASSED` (the reporter itself does not record pkl_check; the previous GPT pasted it there).
 - `git -C "$HOME/stealth" pull`; `.venv` present; `data/` complete; ~3 GB free disk.
 - Laptop on mains power, not expected to sleep for an hour.
 
@@ -52,11 +56,20 @@ the run if `git status` shows it modified). Do not change anything else.
 ```bash
 "$PY" -m stealth.train --config configs/test.yaml --run-id test01 --resume
 ```
-Expected output signature:
+Expected output signature (wording from the real smoke run; the numbers will differ):
 ```
-INFO stealth.train: run test01 config=test eras>=2800 n_folds=5 forward=on members=10 search=lgbm_everest(12 cells)
-INFO stealth.train: progress ... elapsed 00:12:00 ... member 6/10
-INFO stealth.train: leak_check pass; metrics -> artifacts/test01/metrics.json; exit 0
+INFO stealth.train: run test01: config test, resume=True, data_dir=.../data
+INFO stealth.train: run data: ... rows, 3725 eras (2800..6524), 5 folds, forward block
+INFO stealth.search: search lgbm_everest: grid=12 cells, target=12 distinct trials, 0 already done (exhaustive)
+INFO stealth.train: lgbm_everest[<hash>] fold0: inner best_iter=...
+INFO stealth.train: lgbm_everest[<hash>] forward: inner best_iter=...
+INFO stealth.train: lgbm_everest[<hash>]: frozen n_iter per fold=[...] forward=... full-refit=... (inner iters {...}; sources {...})
+INFO stealth.train: lgbm_everest search gain: top-3 OOF fit 0.02.. vs base-params cell 0.02.. (gain +0.00..); forward ... (gain ...)
+INFO stealth.train: progress: member 6/10 lgbm_meltsene (elapsed 720s)
+INFO stealth.train: member lgbm_everest done in ...s (frozen n_iter=..., rho_b(val)=0.7...)
+INFO stealth.metrics: leak_check pass: mean OOF Spearman 0.1... <= 0.18
+INFO stealth.train: member lgbm_everest  fit20 mean=0.02.. se_block=0.003. sharpe=0.5.. pct_pos=0.6. forward=0.02.. n_iter=...
+INFO stealth.train: run test01 finished: status=ok exit=0 total=...s
 ```
 Exit 0 expected. Exit 2 = leak/gate failure; exit 1 = error (traceback in `artifacts/test01/run.log`).
 The log prints a progress line every 60 s; silence > 10 min means a hung process — note the time, kill it with
@@ -66,7 +79,8 @@ Ctrl-C, re-run the same command (it resumes from the member cache / Optuna SQLit
 ```bash
 "$PY" -m stealth.blend --run-id test01
 ```
-Expected: log shows `rule=ew|nnls`, the paired `NNLS vs EW` line (`diff_mean, diff_se, p_pos`), the regime table,
+Expected: log shows `nested NNLS: nested weights {...}; eval fold4 diff_mean=... se=... p_pos=...; ... -> ADOPT nnls` (or
+`-> keep equal weights`), then `blend[ew|nnls]: fit20 mean=... sharpe=... pct_pos=... forward=...`, the regime table,
 and `artifacts/test01/blend.json` written.
 
 **Step 4 — bundle (1–2 min)**
@@ -79,13 +93,15 @@ ls -l models/test01.pkl models/test01.pkl.sha256 models/test01.manifest.json
 ```bash
 "$PY" -m stealth.pkl_check models/test01.pkl
 ```
-Expected: checklist of `ok` lines, then `PASS`, exit 0. Note the seconds-per-era figure.
+Expected: `pkl_check: PASSED` plus the `size / eras / slowest call` and `byte scan: torch=0 ... non-runtime stealth refs=0`
+lines, exit 0. Note the `slowest call` seconds figure (must stay < 5 s/era).
 
 **Step 6 — offline dry run (seconds; nothing submitted)**
 ```bash
 "$PY" -m stealth.predict --pkl models/test01.pkl --offline
 ```
-Expected: `90 predictions ... in (0,1)`, exit 0. **No `--submit`, no `--upload`.**
+Expected: `predicted exped=exped_8055 n=90 ... unique=90` then `dry run ok: exped=exped_8055 n=90 -> ...`, exit 0.
+**No `--submit`, no `--upload`.**
 
 ## 6. If it fails
 
@@ -105,11 +121,12 @@ Expected: `90 predictions ... in (0,1)`, exit 0. **No `--submit`, no `--upload`.
 Writes `handoffs/results/02-{results.md,metrics.json,log-tail.txt}`, then
 `git add handoffs/results && git commit -m "results: 02 test-run" && git push`. Exit 0 = pushed.
 On **PUSH FAILED — results are saved locally in handoffs/results/; ask the human to run git push**, repeat that to
-the user verbatim and stop.
+the user verbatim and stop. On **GIT COMMIT FAILED — …** (missing git identity), repeat it verbatim and stop (HUMAN STEP
+in handoff 00 section 3).
 
 Then append the operator notes (CatBoost verdict, pkl_check tail, predict summary, total wall time, `nproc`) and push:
 ```bash
-printf '\n## Operator notes\n\n```text\n%s\n```\n' "<CatBoost: kept|dropped (NNN s per fit); pkl_check: PASS/FAIL, N s/era; predict --offline: ok; total wall: MM min; nproc: N>" >> handoffs/results/02-results.md
+printf '\n## Operator notes\n\n```text\n%s\n```\n' "<CatBoost: kept|dropped (NNN s per fit); pkl_check: PASSED|FAILED, N s/era; predict --offline: ok; total wall: MM min; nproc: N>" >> handoffs/results/02-results.md
 git add handoffs/results && git commit -m "results: 02 test-run (notes)" && git push
 ```
 Also commit the manifest + sha (never the pickle): `git add models/test01.manifest.json models/test01.pkl.sha256 && git commit -m "models: test01 manifest" && git push`.

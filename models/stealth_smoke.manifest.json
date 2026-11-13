@@ -1,0 +1,69 @@
+{
+  "pkl": "stealth_smoke.pkl",
+  "sha256": "034d5f657e372da636d0266cd3123140babf837668807356093a62bcb4cc669e",
+  "size_bytes": 447501,
+  "version": "0.1.0",
+  "git_sha": "bfd002351c469e4cdcf3bb04db353dd6b5a20827",
+  "run_id": "smoke2",
+  "built_at": "2026-11-13T18:54:05+00:00",
+  "python": "3.11.2",
+  "libs": {
+    "lightgbm": "4.7.0",
+    "xgboost": "3.2.0",
+    "catboost": "1.2.10",
+    "scikit-learn": "1.9.1",
+    "numpy": "2.4.6",
+    "pandas": "3.0.6",
+    "scipy": "1.17.1",
+    "cloudpickle": "3.1.2"
+  },
+  "members": [
+    {
+      "name": "lgbm_everest",
+      "family": "lgbm",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 1
+    },
+    {
+      "name": "lgbm_tougroute",
+      "family": "lgbm",
+      "target": "target_Tougroute",
+      "group": "aux",
+      "n_blobs": 1
+    },
+    {
+      "name": "ridge_everest",
+      "family": "ridge",
+      "target": "target_everest",
+      "group": "everest",
+      "n_blobs": 1
+    }
+  ],
+  "weights": {
+    "lgbm_everest": 0.25,
+    "ridge_everest": 0.25,
+    "lgbm_tougroute": 0.5
+  },
+  "p_b": 0.5,
+  "p_c": 0.25,
+  "core_proxy_cols": [
+    "feature_Agouti",
+    "feature_Tazzarine",
+    "feature_Azzaden",
+    "feature_Tagmat",
+    "feature_Zaouiat",
+    "feature_Ighzer",
+    "feature_Amazigh",
+    "feature_Tafouk",
+    "feature_Zerrouka",
+    "feature_Mrirt"
+  ],
+  "n_features": 178,
+  "pkl_check": {
+    "passed": true,
+    "at": "2026-11-13T18:55:03+00:00"
+  },
+  "sandbox_sha256": null,
+  "upload_id": null
+}

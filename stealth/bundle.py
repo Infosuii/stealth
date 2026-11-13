@@ -28,7 +28,7 @@ from pathlib import Path
 from stealth import VERSION
 from stealth._runtime import P_B_CAP, P_C_CAP, DEFAULT_MIN_BENCH_COVERAGE
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("stealth.bundle")  # explicit: under `python -m` __name__ is __main__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_DIR = REPO_ROOT / "artifacts"
@@ -36,6 +36,7 @@ MODELS_DIR = REPO_ROOT / "models"
 DEFAULT_P_B = 0.5
 DEFAULT_P_C = 0.25
 N_FEATURES_EXPECTED = 178
+PKL_PYTHON = (3, 11)  # the python_version declared at upload (predict.PKL_PYTHON_VERSION); write_pickle refuses others
 MANIFEST_LIBS = ("lightgbm", "xgboost", "catboost", "scikit-learn", "numpy", "pandas", "scipy", "cloudpickle")
 _FULL_RE = re.compile(r"^full_s(\d+)\.bin$")
 _FOLD_RE = re.compile(r"^fold(\d+)\.bin$")
@@ -229,14 +230,18 @@ def write_pickle(bundle: dict, out: Path) -> str:
     """cloudpickle ``make_predict(bundle)`` BY VALUE to ``out``; returns the file's sha256 hex digest.
 
     Registers ``stealth._runtime`` and ``stealth`` with ``cloudpickle.register_pickle_by_value`` so the
-    pickle carries the code and never imports ``stealth`` on load. Fails fast if the closure cannot be
-    built or if torch is importable in this interpreter's loaded modules (the lane has no torch).
+    pickle carries the code and never imports ``stealth`` on load. Fails fast if the interpreter is not
+    Python 3.11 (the version declared at upload), if the closure cannot be built, or if torch is loaded in
+    this interpreter (the lane has no torch).
     """
     import cloudpickle
 
     import stealth
     import stealth._runtime as runtime
 
+    if sys.version_info[:2] != PKL_PYTHON:
+        raise RuntimeError(f"pickle must be built under Python {PKL_PYTHON[0]}.{PKL_PYTHON[1]} (the declared lane version); "
+                           f"this interpreter is {platform.python_version()} -- use the train venv")
     if "torch" in sys.modules:
         raise RuntimeError("torch is loaded in this interpreter; build the pickle from the train venv")
     predict = runtime.make_predict(bundle)

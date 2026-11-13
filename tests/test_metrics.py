@@ -126,7 +126,9 @@ def test_summarise_keys_and_values() -> None:
     rng = np.random.default_rng(6)
     s = pd.Series(0.02 + 0.04 * rng.standard_normal(400), index=pd.Index(np.arange(400), name="era"))
     d = M.summarise(s, n_boot=500)
-    assert set(d) == {"mean", "std", "sharpe", "pct_pos", "frac_roll20_neg", "ci90", "n_eras"}
+    assert set(d) == {"mean", "std", "sharpe", "pct_pos", "frac_roll20_neg", "ci90", "se_block", "n_eras"}
+    # the reported SE is the block-bootstrap SE, consistent with ci90 (~ +/- 1.645 se), never the naive std/sqrt(n)
+    assert d["se_block"] == pytest.approx((d["ci90"][1] - d["ci90"][0]) / (2 * 1.645), rel=0.25)
     assert d["n_eras"] == 400 and d["mean"] == pytest.approx(s.mean())
     assert d["std"] == pytest.approx(s.std(ddof=1)) and d["sharpe"] == pytest.approx(d["mean"] / d["std"])
     assert d["pct_pos"] == pytest.approx((s > 0).mean())

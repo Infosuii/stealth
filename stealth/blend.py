@@ -7,11 +7,15 @@ Contracts: docs/INTERFACES.md sections 8 and 10; protocol: docs/PLAN.md "Neutral
 * default rule = equal weight within target group, everest group ``blend.everest_weight`` / aux the rest;
 * NNLS weights (sum to 1, floor 0.02) are computed NESTED: fitted on CV folds ``0..K-2``, evaluated on fold
   ``K-1`` (paired block bootstrap vs equal weight) and on the forward block; adopted only when
-  ``p_pos >= gates.p_pos_adopt`` and the forward difference is ``>= 0``. Otherwise equal weights stay;
+  ``p_pos >= gates.p_pos_adopt`` and the forward difference is ``>= 0``. Otherwise equal weights stay. When NNLS is
+  adopted the bundle gets ``full_weights`` (fitted on all OOF eras) but every REPORTED number (``chosen`` fit20, the
+  SUSPECT and leak checks, the regime simulation) comes from CROSS-FITTED weights: for each fold ``k`` the weights are
+  fitted on folds ``!= k`` and applied to fold ``k`` (``crossfit_nnls``), so the headline stays out-of-sample;
 * the blended OOF ``z`` then goes through ``metrics.regime_simulation`` with the surrogate direction and the
   core-proxy frame recorded by ``train.py`` in ``features.json``;
 * gates: ``metrics.leak_check`` on the blend's per-era Spearman; a "SUSPECT" banner when the blend's OOF fit20
-  exceeds the baseline member's by more than ``gates.suspect_gain_over_baseline``.
+  exceeds the baseline (``gates.baseline_fit`` if set, else the in-run baseline member) by more than
+  ``gates.suspect_gain_over_baseline``.
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ import pandas as pd
 import yaml
 
 from stealth import _runtime, cv, data, features, metrics, surrogate
-from stealth.train import ARTIFACTS, REPO_ROOT, baseline_member, setup_logging, write_json
+from stealth.train import ARTIFACTS, REPO_ROOT, baseline_fit, setup_logging, write_json
 
 log = logging.getLogger("stealth.blend")  # explicit: under `python -m` __name__ is __main__
 
@@ -159,6 +163,21 @@ def nested_nnls(Z: pd.DataFrame, oof: pd.DataFrame, Zf: pd.DataFrame | None, fwd
             "adopt": bool(adopt), "reason": reason, "eval_fold": last}
 
 
+def crossfit_nnls(Z: pd.DataFrame, oof: pd.DataFrame) -> tuple[pd.Series, dict[str, dict[str, float]]]:
+    """Cross-fitted NNLS blend: for every CV fold ``k`` fit the weights on the OOF rows of folds ``!= k`` and apply them to
+    fold ``k``. Returns ``(z, {fold: weights})``; ``z`` is out-of-sample w.r.t. the weights on every row."""
+    y, era, fold = oof[data.PRIMARY_TARGET], oof["era"], oof["fold"]
+    z = pd.Series(np.nan, index=Z.index, name="blend", dtype=np.float64)
+    per_fold: dict[str, dict[str, float]] = {}
+    for k in sorted(int(x) for x in fold.unique()):
+        fit_mask = (fold != k).to_numpy()
+        apply_mask = (fold == k).to_numpy()
+        w = nnls_weights(Z.loc[fit_mask], y.loc[fit_mask], era.loc[fit_mask])
+        z.loc[apply_mask] = blend_scores(Z.loc[apply_mask], w).to_numpy()
+        per_fold[f"fold{k}"] = w
+    return z, per_fold
+
+
 def _fmt_w(w: dict[str, float]) -> str:
     return "{" + ", ".join(f"{k}: {v:.3f}" for k, v in w.items()) + "}"
 
@@ -226,25 +245,37 @@ def blend_run(run_dir: Path) -> tuple[dict, int]:
         out["nnls"], out["paired_vs_ew"] = nn, nn["paired_vs_ew"]
         if nn["adopt"]:
             out["rule"], out["weights"] = "nnls", nn["full_weights"]
-    z = blend_scores(Z, out["weights"])
+    # z used for EVERY reported number: equal weights as is; adopted NNLS -> cross-fitted weights (out-of-sample)
     ew_summary, _, _ = evaluate_blend(blend_scores(Z, ew), oof, cfg)
+    out["chosen_is_crossfit"] = False
+    if out["rule"] == "nnls":
+        z, cf_weights = crossfit_nnls(Z, oof)
+        out["crossfit_weights"] = cf_weights
+        out["chosen_is_crossfit"] = True
+        insample_summary, _, _ = evaluate_blend(blend_scores(Z, out["weights"]), oof, cfg)
+        out["chosen_insample_full_weights"] = insample_summary  # context only: in-sample w.r.t. the K weights
+        log.info("NNLS adopted: reported fit20 uses cross-fitted weights (per fold %s); full-OOF weights (bundle) score %.4f in-sample",
+                 {k: _fmt_w(w) for k, w in cf_weights.items()}, insample_summary["mean"])
+    else:
+        z = blend_scores(Z, out["weights"])
     chosen_summary, fit, sp = evaluate_blend(z, oof, cfg)
     fwd_fit = None
     if Zf is not None and fwd is not None:
         fwd_fit = float(fit_series(blend_scores(Zf, out["weights"]), fwd[data.PRIMARY_TARGET], fwd["era"]).mean())
-    out["blend"] = {"ew": ew_summary, "chosen": chosen_summary, "rule": out["rule"], "forward_fit": fwd_fit, "spearman_mean": float(sp.mean())}
-    log.info("blend[%s]: fit20 mean=%.4f sharpe=%.3f pct_pos=%.2f forward=%s (ew mean=%.4f)", out["rule"], chosen_summary["mean"],
-             chosen_summary["sharpe"], chosen_summary["pct_pos"], None if fwd_fit is None else round(fwd_fit, 4), ew_summary["mean"])
+    out["blend"] = {"ew": ew_summary, "chosen": chosen_summary, "rule": out["rule"], "forward_fit": fwd_fit, "spearman_mean": float(sp.mean()),
+                    "chosen_is_crossfit": out["chosen_is_crossfit"]}
+    log.info("blend[%s]: fit20 mean=%.4f se_block=%.4f sharpe=%.3f pct_pos=%.2f forward=%s (ew mean=%.4f)%s", out["rule"], chosen_summary["mean"],
+             chosen_summary.get("se_block", float("nan")), chosen_summary["sharpe"], chosen_summary["pct_pos"],
+             None if fwd_fit is None else round(fwd_fit, 4), ew_summary["mean"], " [cross-fitted weights]" if out["chosen_is_crossfit"] else "")
     notes: list[str] = []
     code = 0
-    base = baseline_member(cfg)
-    bmean = (run["metrics"].get("members") or {}).get(base, {}).get("fit", {}).get("mean")
+    member_means = {n: (m.get("fit") or {}).get("mean") for n, m in (run["metrics"].get("members") or {}).items()}
+    bmean, base = baseline_fit(cfg, {n: v for n, v in member_means.items() if v is not None})
     margin = float(gates["suspect_gain_over_baseline"])
     out["suspect"] = bool(bmean is not None and metrics.suspect_gain(chosen_summary["mean"], bmean, margin))
     if out["suspect"]:
         banner = SUSPECT_BANNER.format(blend=chosen_summary["mean"], base=base, bmean=bmean, margin=margin)
         log.warning(banner)
-        print(banner, flush=True)
         notes.append(banner)
     try:
         metrics.leak_check(sp, float(gates["leak_spearman"]))

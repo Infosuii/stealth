@@ -39,7 +39,7 @@ import yaml
 
 from stealth import selfcheck
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("stealth.report")  # explicit: under `python -m` __name__ is __main__
 
 REPO = Path(__file__).resolve().parents[1]
 ARTIFACTS = REPO / "artifacts"
@@ -143,11 +143,21 @@ def _fmt(x: Any, nd: int = 4) -> str:
 
 
 def _se(summary: dict[str, Any] | None) -> float | None:
+    """Block-bootstrap SE of the mean: ``se_block`` when the summary carries it, else ``(ci90_hi - ci90_lo) / (2 * 1.645)``.
+
+    Never the naive ``std / sqrt(n_eras)``: with a 20-day target the eras are autocorrelated and that figure is
+    ~3x too small (PLAN noise floor 0.0033 per config).
+    """
     if not summary:
         return None
-    std, n = summary.get("std"), summary.get("n_eras")
-    if isinstance(std, (int, float)) and isinstance(n, (int, float)) and n > 0:
-        return float(std) / math.sqrt(float(n))
+    se = summary.get("se_block")
+    if isinstance(se, (int, float)) and math.isfinite(float(se)):
+        return float(se)
+    ci = summary.get("ci90")
+    if isinstance(ci, (list, tuple)) and len(ci) == 2 and all(isinstance(x, (int, float)) for x in ci):
+        lo, hi = float(ci[0]), float(ci[1])
+        if math.isfinite(lo) and math.isfinite(hi) and hi >= lo:
+            return (hi - lo) / (2.0 * 1.645)
     return None
 
 
@@ -406,7 +416,7 @@ def render_markdown(doc: dict[str, Any], env: dict[str, Any], blend: dict[str, A
     suspects = [c["name"] for c in doc["configs"] if c.get("suspect")]
     if suspects:
         banner += ("\n> **SUSPECT — winner's curse or leak:** " + ", ".join(suspects)
-                   + " exceed the baseline by more than the suspect gain; do not celebrate.\n")
+                   + " exceed(s) the baseline by more than the suspect gain; do not celebrate.\n")
     if doc.get("leak_check") and str(doc["leak_check"]).upper() == "FAIL":
         banner += "\n> **LEAK CHECK FAILED** (OOF Spearman above the gate). The run is void.\n"
     parts = [
@@ -420,7 +430,7 @@ def render_markdown(doc: dict[str, Any], env: dict[str, Any], blend: dict[str, A
         "",
         _env_section(doc, env),
         "",
-        "## Metrics (per-era fit20 on OOF; config names only, no hyperparameter values)",
+        "## Metrics (per-era fit20 on OOF; fit_se = 20-era block-bootstrap SE; config names only, no hyperparameter values)",
         "",
         _metrics_section(doc),
         "",

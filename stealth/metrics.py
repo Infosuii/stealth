@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from stealth.cv import block_bootstrap_ci
+from stealth.cv import block_bootstrap_means
 
 log = logging.getLogger(__name__)
 
@@ -212,22 +212,29 @@ def per_era_corr(a: pd.Series, b: pd.Series, era: pd.Series) -> pd.Series:
 # summaries and gates
 # --------------------------------------------------------------------------------------------------
 def summarise(s: pd.Series, *, block: int = 20, n_boot: int = 2000, seed: int = 0) -> dict:
-    """``{"mean","std","sharpe","pct_pos","frac_roll20_neg","ci90":[lo,hi],"n_eras"}`` of a per-era series.
+    """``{"mean","std","sharpe","pct_pos","frac_roll20_neg","ci90":[lo,hi],"se_block","n_eras"}`` of a per-era series.
 
     ``sharpe`` = mean/std per era (NOT annualised); ``frac_roll20_neg`` = fraction of 20-era rolling means
-    below zero (the payout unit); ``ci90`` = unpaired block-bootstrap interval of the mean.
+    below zero (the payout unit); ``ci90`` = unpaired block-bootstrap interval of the mean; ``se_block`` = the
+    standard deviation of the ``block``-era block-bootstrap means -- the SE of the mean that respects the ~20-era
+    autocorrelation of a 20-day target. The naive ``std/sqrt(n_eras)`` is NOT reported anywhere (it is ~3x too small).
     """
     v = pd.Series(s).dropna().sort_index()
     n = int(len(v))
     if n == 0:
         return {"mean": float("nan"), "std": float("nan"), "sharpe": float("nan"), "pct_pos": float("nan"),
-                "frac_roll20_neg": float("nan"), "ci90": [float("nan"), float("nan")], "n_eras": 0}
+                "frac_roll20_neg": float("nan"), "ci90": [float("nan"), float("nan")], "se_block": float("nan"), "n_eras": 0}
     mean = float(v.mean())
     std = float(v.std(ddof=1)) if n > 1 else float("nan")
     sharpe = mean / std if std and std > 0 else float("nan")
     roll = v.rolling(20, min_periods=20).mean().dropna()
     frac_neg = float((roll < 0).mean()) if len(roll) else float("nan")
-    lo, hi = block_bootstrap_ci(v, block=block, n_boot=n_boot, seed=seed, level=0.90) if n > 1 else (mean, mean)
+    if n > 1 and n_boot > 1:
+        means = block_bootstrap_means(v.to_numpy(dtype=np.float64), block=block, n_boot=n_boot, seed=seed)
+        lo, hi = np.percentile(means, [5.0, 95.0])
+        se_block = float(means.std(ddof=1))
+    else:
+        lo, hi, se_block = mean, mean, float("nan")
     return {
         "mean": mean,
         "std": std,
@@ -235,6 +242,7 @@ def summarise(s: pd.Series, *, block: int = 20, n_boot: int = 2000, seed: int = 
         "pct_pos": float((v > 0).mean()),
         "frac_roll20_neg": frac_neg,
         "ci90": [float(lo), float(hi)],
+        "se_block": se_block,
         "n_eras": n,
     }
 
@@ -339,8 +347,12 @@ def _orthogonalise_rows(a: np.ndarray, *refs: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------------------------------
 # regime simulation
 # --------------------------------------------------------------------------------------------------
+_REGIME_SE_BLOCK, _REGIME_SE_BOOT = 20, 300
+
+
 def _regime_stats(values: np.ndarray, mask: np.ndarray) -> dict:
-    """Mean over all (draw, era) cells in ``mask`` plus an across-era SE of the draw-averaged values."""
+    """Mean over all (draw, era) cells in ``mask`` plus a 20-era block-bootstrap SE of the draw-averaged per-era values
+    (the eras are kept in time order so the blocks respect the target's ~20-era autocorrelation)."""
     m = mask.astype(np.float64)
     cnt = m.sum()
     out: dict[str, float] = {}
@@ -351,7 +363,11 @@ def _regime_stats(values: np.ndarray, mask: np.ndarray) -> dict:
     ok = ~np.isnan(per_era)
     n_eras = int(ok.sum())
     out["mean"] = float((values * m).sum() / cnt)
-    out["se"] = float(np.std(per_era[ok], ddof=1) / np.sqrt(n_eras)) if n_eras > 1 else float("nan")
+    if n_eras > 1:
+        means = block_bootstrap_means(per_era[ok], block=_REGIME_SE_BLOCK, n_boot=_REGIME_SE_BOOT, seed=0)
+        out["se"] = float(means.std(ddof=1))
+    else:
+        out["se"] = float("nan")
     out["n_eras"] = n_eras
     return out
 
@@ -396,7 +412,8 @@ def regime_simulation(
 
     Returns ``{"<mean>": {"p_b=<x>": {"bpos": {...}, "bneg": {...}, "mix": {...}}}, "meta": {...}}``;
     ``bpos``/``bneg`` split (draw, era) cells by the sign of the realised benchmark FIT. Each regime block
-    holds ``fit/unq/inov/score`` means, ``*_se`` (across-era SE of draw-averaged values), ``n_eras``, ``frac``.
+    holds ``fit/unq/inov/score`` means, ``*_se`` (20-era block-bootstrap SE of the draw-averaged per-era values),
+    ``n_eras``, ``frac``.
     """
     if not 0.0 <= p_c <= 0.5:
         raise ValueError(f"p_c must be in [0, 0.5], got {p_c}")

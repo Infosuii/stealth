@@ -99,6 +99,11 @@ def test_member_metrics_sane(smoke_run: dict) -> None:
     spec = json.loads((smoke_run["run_dir"] / "members" / "lgbm_everest" / "spec.json").read_text())
     assert len(spec["inner_iters"]) == 2 and spec["frozen_n_iter"] == int(round(float(np.median(spec["inner_iters"]))))
     assert len(spec["top_params"]) == 2 and len(spec["full_blobs"]) == 2
+    # a grid cell overrides, never replaces, the member's base params (bagging etc. must survive the search)
+    for p in spec["top_params"]:
+        assert p["num_leaves"] in (4, 8) and p["bagging_fraction"] == 0.7 and p["max_bin"] == 16, p
+    search_json = json.loads((smoke_run["run_dir"] / "search" / "lgbm_everest.json").read_text())
+    assert all("bagging_fraction" in r["params"] for r in search_json)
     assert m["frozen_n_iter"]["lgbm_tougroute"] == 50
     assert m["frozen_n_iter"]["ridge_everest"] is None
     assert "lgbm_tougroute_vs_lgbm_everest" in m["paired"]
@@ -147,3 +152,82 @@ def test_load_config_rejects_bad(tmp_path: Path, repo_root: Path) -> None:
     assert "family" in str(exc.value) and "bootstrap" in str(exc.value)
     for name in ("smoke", "test", "full"):
         trainmod.load_config(repo_root / "configs" / f"{name}.yaml")
+
+
+def test_per_fold_frozen_counts_use_independent_sources(smoke_run: dict) -> None:
+    """Leakage review item 1: fold k's tree count comes only from inner splits >= 20 eras from its test block."""
+    from stealth import cv
+
+    run_dir = smoke_run["run_dir"]
+    spec = json.loads((run_dir / "members" / "lgbm_everest" / "spec.json").read_text())
+    folds = json.loads((run_dir / "folds.json").read_text())
+    by_name = {f["name"]: f for f in folds}
+    assert len(spec["frozen_n_iter_per_fold"]) == 2 and spec["frozen_n_iter_forward"] is not None
+    assert spec["inner_iter_forward"] is not None and 1 <= spec["inner_iter_forward"] <= 60
+    sources = spec["count_sources"]
+    assert set(sources) == {"fold0", "fold1", "forward"}
+    for name, srcs in sources.items():
+        lo, hi = by_name[name]["test_eras"]
+        assert name in srcs or name == "forward"
+        for src in srcs:
+            vlo, vhi = by_name[src]["inner_val_eras"]
+            # inner_val block of every source is >= 20 eras away from the target's test block
+            assert vhi < lo - 19 or vlo > hi + 19, (name, src)
+    # last CV fold and the forward block: non-last folds' inner_val sits inside their test block -> excluded
+    assert sources["fold1"] == ["fold1"]
+    assert "fold0" not in sources["forward"] and "forward" in sources["forward"]
+    # per-fold counts are medians of their sources' inner iterations
+    inner = dict(zip(["fold0", "fold1"], spec["inner_iters"])) | {"forward": spec["inner_iter_forward"]}
+    for name, srcs in sources.items():
+        expect = int(round(float(np.median([inner[s] for s in srcs]))))
+        got = spec["frozen_n_iter_forward"] if name == "forward" else spec["frozen_n_iter_per_fold"][int(name[-1])]
+        assert got == expect, (name, got, expect)
+    m = smoke_run["metrics"]
+    assert m["frozen_n_iter_per_fold"]["lgbm_tougroute"] == [50, 50] and m["frozen_n_iter_forward"]["lgbm_tougroute"] == 50
+    assert m["frozen_n_iter_per_fold"]["ridge_everest"] == []
+    cv.assert_fold_gaps([], min_gap=20)  # smoke: the helper is importable and the module-level floor is 20
+    assert trainmod.MIN_GAP == 20
+
+
+def test_search_gain_recorded(smoke_run: dict) -> None:
+    """Leakage review items 2 + 8: the base-params cell is always evaluated and top-k minus base is recorded."""
+    run_dir = smoke_run["run_dir"]
+    gain_path = run_dir / "search" / "lgbm_everest.gain.json"
+    assert gain_path.exists()
+    gain = json.loads(gain_path.read_text())
+    for k in ("topk_fit", "base_params_fit", "gain", "topk_forward_fit", "base_params_forward_fit", "forward_gain"):
+        assert _finite(gain[k]), k
+    assert gain["gain"] == pytest.approx(gain["topk_fit"] - gain["base_params_fit"])
+    assert gain["forward_gain"] == pytest.approx(gain["topk_forward_fit"] - gain["base_params_forward_fit"])
+    assert gain["margin"] == 0.004 and isinstance(gain["suspect"], bool) and isinstance(gain["forward_confirms"], bool)
+    assert gain["base_cell_in_topk"] is True and gain["base_cell"] in gain["topk_cells"]  # grid {4, 8} contains the base cell (8)
+    # no hyperparameter values in the gain file (cells are identified by hash only)
+    text = gain_path.read_text()
+    assert "num_leaves" not in text and "learning_rate" not in text
+    m = smoke_run["metrics"]
+    assert m["members"]["lgbm_everest"]["search_gain"]["gain"] == pytest.approx(gain["gain"])
+    assert m["members"]["ridge_everest"]["search_gain"] is None
+    assert m["baseline"]["label"] == "lgbm_everest" and _finite(m["baseline"]["fit"])
+    for mm in m["members"].values():
+        assert "se_block" in mm["fit"] and _finite(mm["fit"]["se_block"])
+        # block SE is far above the naive std/sqrt(n) for an autocorrelated 20-day target (or at least not below it)
+        assert mm["fit"]["se_block"] >= 0.8 * mm["fit"]["std"] / np.sqrt(mm["fit"]["n_eras"])
+
+
+def test_baseline_fit_gate_and_gap_floor(repo_root: Path, tmp_path: Path) -> None:
+    import yaml
+
+    cfg = trainmod.load_config(repo_root / "configs" / "smoke.yaml")
+    assert trainmod.baseline_fit(cfg, {"lgbm_everest": 0.02, "ridge_everest": 0.03}) == (0.02, "lgbm_everest")
+    cfg["gates"]["baseline_fit"] = 0.026
+    bf, label = trainmod.baseline_fit(cfg, {"lgbm_everest": 0.02})
+    assert bf == 0.026 and label.startswith("gates.baseline_fit=0.0260")
+    # configs with too-small gaps are rejected at load time
+    bad = yaml.safe_load((repo_root / "configs" / "smoke.yaml").read_text())
+    bad["cv"]["purge"], bad["cv"]["embargo"], bad["cv"]["inner_gap"] = 5, 5, 5
+    bad["gates"]["baseline_fit"] = "x"
+    p = tmp_path / "bad.yaml"
+    p.write_text(yaml.safe_dump(bad))
+    with pytest.raises(ValueError) as exc:
+        trainmod.load_config(p)
+    assert "purge + cv.embargo" in str(exc.value) and "inner_gap" in str(exc.value) and "baseline_fit" in str(exc.value)

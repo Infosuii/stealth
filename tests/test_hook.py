@@ -142,3 +142,22 @@ def test_binary_blob_is_skipped(repo: Path) -> None:
 def test_nothing_staged_passes(repo: Path) -> None:
     out = _run_hook(repo)
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_core_hooks_path_makes_git_commit_refuse_a_fake_key(repo: Path) -> None:
+    """The real activation path: ``git config core.hooksPath scripts/hooks`` must make ``git commit`` itself refuse."""
+    assert _git(repo, "config", "core.hooksPath", "scripts/hooks").returncode == 0
+    _stage(repo, "README.md", "clean\n")
+    ok = _git(repo, "commit", "-q", "-m", "clean")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _stage(repo, "notes.md", "EIQ_API_KEY=" + "sk" + "x" * 30 + "\n")
+    blocked = _git(repo, "commit", "-q", "-m", "leak")
+    assert blocked.returncode != 0
+    assert "BLOCKED" in blocked.stdout + blocked.stderr
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head, "a commit was created despite the hook"
+    # sha256 + manifest files still commit under the hook
+    _unstage_all(repo)
+    _stage(repo, "models/stealth_v1.pkl.sha256", SHA64 + "  stealth_v1.pkl\n")
+    _stage(repo, "models/stealth_v1.manifest.json", '{"sha256": "%s"}\n' % SHA64)
+    assert _git(repo, "commit", "-q", "-m", "manifest").returncode == 0
