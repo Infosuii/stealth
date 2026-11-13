@@ -110,6 +110,22 @@ def test_member_metrics_sane(smoke_run: dict) -> None:
     assert 0.0 <= m["paired"]["lgbm_tougroute_vs_lgbm_everest"]["p_pos"] <= 1.0
 
 
+def test_bundle_members_subset(smoke_run: dict) -> None:
+    from stealth import bundle as bundlemod
+
+    run_dir = smoke_run["run_dir"]
+    b = bundlemod.build_bundle(run_dir, p_b=0.0, p_c=0.0, members_subset=["lgbm_everest"])
+    assert [m["name"] for m in b["members"]] == ["lgbm_everest"]
+    assert b["weights"] == {"lgbm_everest": 1.0}
+    assert b["p_b"] == 0.0 and b["p_c"] == 0.0
+    full = bundlemod.build_bundle(run_dir)
+    assert len(full["members"]) == 3
+    with pytest.raises(ValueError, match="--members"):
+        bundlemod.build_bundle(run_dir, members_subset=["no_such_member"])
+    with pytest.raises(ValueError, match="empty"):
+        bundlemod.build_bundle(run_dir, members_subset=[])
+
+
 def test_blend_outputs(smoke_run: dict) -> None:
     b = smoke_run["blend"]
     w = b["weights"]

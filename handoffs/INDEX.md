@@ -11,10 +11,10 @@ Status values: `draft` → `ready` → `running` → `reported` → `accepted` |
 
 | NN | slug | purpose | status | waiting on | result sha | verdict |
 |---|---|---|---|---|---|---|
-| 00 | env-setup | venv + pins + hook + data download + pytest on the laptop | ready | GPT | – | – |
-| 01 | smoke | `configs/smoke.yaml` end to end: train → blend → bundle → pkl_check → report (~10 min) | ready (after 00) | GPT | – | – |
-| 02 | test-run | `configs/test.yaml` (M1): OOF fit 0.026 ± 0.004, forward ≥ 0.020, Sharpe ≥ 0.5, CatBoost timing | ready (after 01) | GPT | – | – |
-| 03 | diag-upload-1 | **USER MUST APPROVE** — first of 5 validation-diagnostics uploads (M1 baseline) | draft | Claude | – | – |
+| 00 | env-setup | venv + pins + hook + data download + pytest on the laptop | accepted | – | b96dd66, ee2afbd | pins OK; the 51 MB train file is correct (the handoff's 80–90 MB figure was a doc error, now fixed) |
+| 01 | smoke | `configs/smoke.yaml` end to end: train → blend → bundle → pkl_check → report (~10 min) | accepted | – | c33bff6, acfaf33 | pipeline + pkl_check pass on the laptop |
+| 02 | test-run | `configs/test.yaml` (M1): OOF fit 0.026 ± 0.004, forward ≥ 0.020, Sharpe ≥ 0.5, CatBoost timing | accepted | – | 34c722a, 86c1c5c | lgbm 0.0238 / fwd 0.0313 / Sharpe 0.51 → M1 met; EW blend of all 10 members worse (0.0226) → baseline kept; Cat 18 s but weak; search a tie; whole run 12.5 min |
+| 03 | diag-upload-1 | **USER MUST APPROVE** — diagnostics upload 1 of 5: the single-LGBM M1 baseline from `test01`, neutralisation off | ready | GPT (+ human approval at step 4) | – | – |
 | 04 | full-run | `configs/full.yaml` (M2–M5): grid + knobs + aux + families + neutralisation constants (2.5–3.5 h) | draft | Claude | – | – |
 | 05 | upload-and-arm | **USER MUST APPROVE** — `predict --upload`, `monitor`, `models/active.json`, cron fallback (M7) | draft | Claude | – | – |
 

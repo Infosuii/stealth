@@ -83,7 +83,9 @@ Expected: a `== host ==` table (python 3.11.x, os, cpu, ram_gb, gpu or `none`, t
 "$PY" -m stealth.data download
 ls -l data/
 ```
-Expected: 6 files in `data/`; `futures_train.parquet` ≈ 80–90 MB. The log prints each file path once.
+Expected: 6 files in `data/`; `futures_train.parquet` ≈ 51 MB on disk (50,886,382 bytes for the current dataset
+version; the ~83 MB figure in docs/PLAN.md is the in-memory size, not the file size). Row counts are the real check:
+468,236 / 125,931 / 90 for train / validation / live. The log prints each file path once.
 
 **Step 5 — test suite (1–3 min on the laptop, 65 s on the 2-core sandbox; offline; prints only dots until the end)**
 ```bash

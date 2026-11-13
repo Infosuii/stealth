@@ -158,12 +158,17 @@ def _resolve_feature_cols(run_dir: Path, members: list[dict]) -> tuple[list[str]
 # --------------------------------------------------------------------------------------------------
 # bundle
 # --------------------------------------------------------------------------------------------------
-def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None = None, version: str = VERSION) -> dict:
+def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None = None, version: str = VERSION,
+                 members_subset: list[str] | None = None) -> dict:
     """Assemble the bundle dict ``stealth._runtime.make_predict`` consumes from ``artifacts/<run_id>``.
 
     Reads ``blend.json`` (``weights``, ``p_b``, ``p_c``, ``core_proxy_cols``) and each positively weighted
     member's ``spec.json`` + bytes. ``p_b`` / ``p_c`` arguments override blend.json; both are capped
     (0.75 / 0.5). Weights are renormalised to sum to 1 over the members actually bundled.
+
+    ``members_subset`` (CLI ``--members a b``) bundles exactly those members with EQUAL weights, ignoring the
+    blend.json weights -- e.g. the single-LGBM M1 baseline for a diagnostics upload. Every named member must
+    exist under ``members/<name>/spec.json``.
     """
     run_dir = Path(run_dir)
     blend_path = run_dir / "blend.json"
@@ -171,6 +176,15 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
         raise FileNotFoundError(f"{blend_path} missing; run `python -m stealth.blend --run-id {run_dir.name}` first")
     blend = json.loads(blend_path.read_text())
     weights_in: dict[str, float] = {str(k): float(v) for k, v in blend.get("weights", {}).items()}
+    if members_subset is not None:
+        subset = list(dict.fromkeys(str(m) for m in members_subset))
+        if not subset:
+            raise ValueError("--members: empty member list")
+        absent = [m for m in subset if not (run_dir / "members" / m / "spec.json").exists()]
+        if absent:
+            raise ValueError(f"--members: no members/<m>/spec.json for {absent} in {run_dir}")
+        log.info("--members %s: bundling this subset with equal weights (blend.json weights ignored)", subset)
+        weights_in = {m: 1.0 for m in subset}
     kept = {k: v for k, v in weights_in.items() if v > 0.0}
     if not kept:
         raise ValueError(f"{blend_path}: no member with positive weight")
@@ -308,26 +322,31 @@ def write_manifest(out_pkl: Path, bundle: dict, sha256: str) -> Path:
     return mpath
 
 
-def build_and_write(run_dir: Path, out: Path, *, p_b: float | None = None, p_c: float | None = None) -> tuple[dict, str, Path]:
+def build_and_write(run_dir: Path, out: Path, *, p_b: float | None = None, p_c: float | None = None,
+                    members_subset: list[str] | None = None) -> tuple[dict, str, Path]:
     """build_bundle -> write_pickle -> write_manifest; returns (bundle, sha256, manifest_path)."""
-    bundle = build_bundle(run_dir, p_b=p_b, p_c=p_c)
+    bundle = build_bundle(run_dir, p_b=p_b, p_c=p_c, members_subset=members_subset)
     sha = write_pickle(bundle, out)
     mpath = write_manifest(out, bundle, sha)
     return bundle, sha, mpath
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m stealth.bundle --run-id ID --out models/stealth_v1.pkl [--p-b x] [--p-c y] [--artifacts-dir D]``."""
+    """``python -m stealth.bundle --run-id ID --out models/stealth_v1.pkl [--p-b x] [--p-c y] [--members m1 ...]
+    [--artifacts-dir D]``."""
     parser = argparse.ArgumentParser(prog="python -m stealth.bundle", description=__doc__.splitlines()[0])
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--out", type=Path, required=True, help="output .pkl path (e.g. models/stealth_v1.pkl)")
     parser.add_argument("--p-b", type=float, default=None, help="benchmark neutralisation strength (cap 0.75)")
     parser.add_argument("--p-c", type=float, default=None, help="core-proxy neutralisation strength (cap 0.5)")
+    parser.add_argument("--members", nargs="+", default=None,
+                        help="bundle exactly these members with equal weights (e.g. --members lgbm_everest)")
     parser.add_argument("--artifacts-dir", type=Path, default=ARTIFACTS_DIR)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
-        bundle, sha, mpath = build_and_write(args.artifacts_dir / args.run_id, args.out, p_b=args.p_b, p_c=args.p_c)
+        bundle, sha, mpath = build_and_write(args.artifacts_dir / args.run_id, args.out, p_b=args.p_b, p_c=args.p_c,
+                                             members_subset=args.members)
     except (FileNotFoundError, ValueError, KeyError) as exc:
         log.error("bundle failed: %s", exc)
         return 1
