@@ -1,0 +1,10 @@
+# OPTIONAL GPU venv (.venv-gpu) for the MLP member ONLY -- docs/INTERFACES.md section 19.
+# Never install this into the train venv (.venv) and never build the pickle from .venv-gpu.
+# torch is NOT listed here: scripts/setup_gpu.sh installs it first from the CUDA 12.8 wheel index
+#   https://download.pytorch.org/whl/cu128   (Blackwell / RTX 50xx = sm_120 needs CUDA >= 12.8 wheels)
+# then these lane-pinned libraries (same versions as requirements-lock.txt), then `pip install --no-deps -e .`.
+numpy==2.4.6
+pandas==3.0.6
+pyarrow==24.0.0
+PyYAML==6.0.3
+scipy==1.17.1

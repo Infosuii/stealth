@@ -203,3 +203,196 @@ def test_scrub() -> None:
     out = report.scrub(s)
     assert "abcdefgh" not in out and "zzzz" not in out and "A" * 30 not in out and "u:p@" not in out
     assert "fine=ok" in out
+
+
+# --------------------------------------------------------------------------------------------- M2-M6 report sections
+
+_HASH = "c0ffee" * 6  # a search-cell hash: must never reach the results files
+
+
+def _make_m2_run(repo: Path, run_id: str) -> Path:
+    """A fake full/minifull-style run: knobs, search adoption, ladder, correlation, neutralisation, final, drops."""
+    run = _make_run(repo, run_id)
+    (run / "config.yaml").write_text("name: minifull\nmembers:\n  - {name: lgbm_everest, params: {learning_rate: 0.03}}\n")
+    summ = {"mean": 0.0261, "std": 0.045, "sharpe": 0.58, "pct_pos": 0.71, "ci90": [0.0195, 0.0327], "n_eras": 3700,
+            "se_block": 0.0033}
+    metrics = json.loads((run / "metrics.json").read_text())
+    metrics["config_name"] = "minifull"
+    metrics["paired"] = {"ridge_everest_vs_lgbm_everest": {"diff_mean": -0.002, "diff_se": 0.001, "p_pos": 0.02}}
+    metrics["members"]["lgbm_everest"].update({"arm": "lgbm", "search_gain": {
+        "topk_fit": 0.0262, "base_params_fit": 0.0255, "gain": 0.0007, "margin": 0.004, "suspect": False,
+        "topk_forward_fit": 0.020, "base_params_forward_fit": 0.021, "forward_gain": -0.001, "forward_confirms": False,
+        "topk_cells": [_HASH], "base_cell": _HASH, "base_cell_in_topk": False, "n_trials": 3,
+        "paired_cv": {"diff_mean": 0.0007, "diff_se": 0.0006, "p_pos": 0.86, "ci90": [-0.0002, 0.0017], "n_eras": 3700},
+        "adopted": False, "adopt_reason": "forward gain -0.0010 < 0 -> base cell", "universe": "e5000-none-d0"}})
+    metrics["members"]["ridge_everest"]["arm"] = "ridge"
+    metrics["universe"] = {"key": "e5000-filter80-d0", "era_start": 5000, "rows_rule": "filter80", "time_decay": False,
+                           "rows_low_weight": 0.5}
+    metrics["knobs"] = {"status": "done", "member": "lgbm_everest", "alpha_total": 0.2, "default": "e5000-none-d0",
+                        "chosen": "e5000-filter80-d0", "winners": {"rows_rule": "e5000-filter80-d0"}, "candidates": [
+                            {"key": "e5000-none-d0", "dimension": None, "fit_cv": 0.025, "fit_fwd": 0.020, "pass": None},
+                            {"key": "e5000-filter80-d0", "dimension": "rows_rule", "fit_cv": 0.026, "fit_fwd": 0.023,
+                             "diff_fwd": 0.003, "diff_se_fwd": 0.001, "p_pos_fwd": 0.97, "diff_cv_indep": 0.001,
+                             "holm_rank": 1, "holm_threshold": 0.04, "pass": True}]}
+    metrics["dropped"] = [{"member": "cat_everest_tiny", "status": "dropped_timing", "first_fit_seconds": 150.0},
+                          {"member": "mlp_everest", "status": "pending_external", "reason": "spec.json missing"}]
+    metrics["blend"] = {"ew": {**summ, "mean": 0.0270}, "chosen": {**summ, "mean": 0.0280}, "rule": "nnls",
+                        "forward_fit": 0.022, "chosen_is_crossfit": True, "suspect": False}
+    (run / "metrics.json").write_text(json.dumps(metrics))
+    blend = json.loads((run / "blend.json").read_text())
+    table = [{"p_b": pb, "p_c": pc, "fit": 0.026 - pb / 100, "score": 0.04 + pb / 100, "score_sharpe": 0.5 + pb / 10,
+              "W": 0.03, "eligible": pb <= 0.5, "in_tie_set": pb == 0.5} for pb in (0.0, 0.25, 0.5, 0.75) for pc in (0.0, 0.25)]
+    blend.update({
+        "rule": "nnls", "chosen_is_crossfit": True, "p_b": 0.5, "p_c": 0.0, "p_source": "simulation",
+        "weights": {"lgbm_everest": 0.7, "ridge_everest": 0.3, "xgb_everest": 0.0},
+        "admitted": ["lgbm_everest", "ridge_everest"],
+        "ladder": [{"arm": "xgb", "members": ["xgb_everest"], "admitted": False, "reason": "REJECT: p_pos 0.40 < 0.8",
+                    "diff_mean": -0.0001, "diff_se": 0.0004, "p_pos": 0.40, "fwd_diff": 0.001, "dsharpe": 0.01,
+                    "p_pos_sharpe": 0.6, "corr_with_incumbent": 0.96, "dropped_redundant": []},
+                   {"arm": "ridge", "members": ["ridge_everest"], "admitted": True, "reason": "ADMIT: sharpe route",
+                    "diff_mean": 0.0004, "diff_se": 0.0005, "p_pos": 0.7, "fwd_diff": 0.0005, "dsharpe": 0.06,
+                    "p_pos_sharpe": 0.85, "corr_with_incumbent": 0.80, "dropped_redundant": ["lgbm_everest_bag1"]}],
+        "redundant": {"lgbm_everest_bag1": {"other": "lgbm_everest", "corr": 0.97}},
+        "member_corr": {"names": ["lgbm_everest", "ridge_everest", "xgb_everest"],
+                        "matrix": [[1.0, 0.81, 0.962], [0.81, 1.0, 0.79], [0.962, 0.79, 1.0]]},
+        "neutralisation": {"p_b": 0.5, "p_c": 0.0, "p_source": "simulation", "z_source": "crossfit", "criterion": "rule text",
+                           "reason": "7/8 eligible -> simplest", "table": table},
+        "final": {"admitted_arms": ["lgbm", "ridge"], "rule": "nnls", "p_b": 0.5, "p_c": 0.0, "p_source": "simulation",
+                  "oof": {**summ, "mean": 0.0280}, "forward_fit": 0.022, "score_mix_central": 0.041,
+                  "score_sharpe_central": 0.55, "W": 0.03}})
+    (run / "blend.json").write_text(json.dumps(blend))
+    (run / "search").mkdir()
+    (run / "search" / "lgbm_everest.json").write_text(json.dumps([{"params": {"learning_rate": 0.03}, "value": 0.02}]))
+    (run / "search" / "xgb_everest.gain.json").write_text(json.dumps(
+        {"gain": 0.0002, "forward_gain": 0.0001, "topk_cells": [_HASH], "adopted": True, "adopt_reason": "gate passed",
+         "paired_cv": {"diff_mean": 0.0002, "diff_se": 0.0001, "p_pos": 0.9}}))
+    return run
+
+
+def test_write_results_m2_sections_and_diag(fake_repo: Path) -> None:
+    _make_m2_run(fake_repo, "m2")
+    diag_dir = fake_repo / "artifacts" / "diag"
+    diag_dir.mkdir(parents=True)
+    (diag_dir / "m2_validation.parquet.upload.json").write_text(json.dumps({
+        "model_id": "slot-x", "upload_id": "up-9", "file": "m2_validation.parquet", "rows": 125931, "uploaded_at": "t",
+        "attached_pkl": False, "accept": {"presigned": "https://u:p" + "@example.invalid/x"},
+        "result": {"status": "done", "fit20": 0.021, "unq": 0.004, "inov": 0.015, "sharpe_ratio": 0.45}}))
+    res = report.write_results("m2", "04", repo=fake_repo, diag_json=Path("artifacts/diag/m2_validation.parquet.upload.json"))
+    md, js, _ = res["paths"]
+    text, jtext = md.read_text(), js.read_text()
+    doc = json.loads(jtext)
+    names = {c["name"]: c for c in doc["configs"]}
+    assert names["blend_nnls"]["fit_mean"] == 0.0280 and names["blend_nnls"]["chosen_is_crossfit"] is True
+    assert names["blend_ew"]["kind"] == "blend_context" and names["blend_ew"]["fit_mean"] == 0.0270
+    assert names["lgbm_everest"]["arm"] == "lgbm" and names["lgbm_everest"]["admitted"] is True
+    assert names["lgbm_everest"]["weight"] == 0.7
+    assert doc["universe"]["key"] == "e5000-filter80-d0"
+    assert doc["knobs"]["chosen"] == "e5000-filter80-d0" and doc["knobs"]["candidates"][1]["pass"] is True
+    search = {r["member"]: r for r in doc["search"]}
+    assert search["lgbm_everest"]["adopted"] is False and search["lgbm_everest"]["paired_cv"]["p_pos"] == 0.86
+    assert search["xgb_everest"]["adopted"] is True  # from search/xgb_everest.gain.json
+    assert [r["arm"] for r in doc["ladder"]] == ["xgb", "ridge"]
+    mp = doc["member_corr_max_pair"]["max_pair"]
+    assert (mp["a"], mp["b"]) == ("lgbm_everest", "xgb_everest") and abs(mp["corr"] - 0.962) < 1e-12
+    assert doc["member_corr"]["names"][0] == "lgbm_everest"
+    assert doc["neutralisation"]["p_source"] == "simulation" and len(doc["neutralisation"]["table"]) == 8
+    assert doc["blend"]["p_source"] == "simulation"
+    assert doc["final"]["admitted_arms"] == ["lgbm", "ridge"] and doc["final"]["oof"]["fit_se"] == 0.0033
+    dropped = {d["member"]: d["status"] for d in doc["dropped"]}
+    assert dropped == {"cat_everest_tiny": "dropped_timing", "mlp_everest": "pending_external",
+                       "lgbm_everest_bag1": "redundant", "xgb_everest": "not_admitted"}
+    d = doc["diag"]
+    assert d["present"] and d["upload_id"] == "up-9" and d["panel"]["fit20"] == 0.021 and d["panel"]["sharpe"] == 0.45
+    assert abs(d["ratio_diag_vs_oof"] - 0.021 / 0.0280) < 1e-12 and abs(d["ratio_diag_vs_forward"] - 0.021 / 0.022) < 1e-12
+    for title in ("## Validation diagnostics", "## Training universe", "## Search adoption", "## Admission ladder",
+                  "## Member correlation", "## Neutralisation constants", "## Final selection", "## Dropped members"):
+        assert title in text, title
+    assert "p_source = **simulation**" in text and "lgbm_everest / xgb_everest corr 0.962" in text
+    assert "(cross-fitted)" in text
+    # never: hyperparameter values, cell hashes, server presigned URLs / credentials
+    for bad in ("learning_rate", "num_leaves", _HASH, "u:p@"):
+        assert bad not in text and bad not in jtext, bad
+    assert "presigned" not in jtext  # only the allow-listed upload fields are copied
+
+
+def test_m1_report_has_no_m2_sections_and_missing_diag_json(fake_repo: Path) -> None:
+    _make_run(fake_repo, "r1")
+    res = report.write_results("r1", "03", repo=fake_repo, diag_json=fake_repo / "artifacts" / "diag" / "nope.upload.json")
+    text = res["paths"][0].read_text()
+    for title in ("## Training universe", "## Search adoption", "## Admission ladder", "## Neutralisation constants"):
+        assert title not in text
+    assert res["doc"]["diag"]["present"] is False and "no upload recorded" in text
+
+
+def _write_synthetic_oof(run: Path, n_eras: int = 80, n_rows: int = 40) -> None:
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    era = np.repeat(np.arange(5000, 5000 + n_eras), n_rows).astype("int32")
+    y = rng.integers(0, 5, size=era.size) / 4.0
+    a = y + rng.normal(0, 3.0, size=era.size)
+    b = y + rng.normal(0, 3.0, size=era.size)
+    idx = pd.Index([f"id{i}" for i in range(era.size)], name="id")
+    df = pd.DataFrame({"era": era, "fold": (np.arange(era.size) * 3 // era.size).astype("int8"),
+                       "target_everest": y.astype("float32"), "m__a": a.astype("float32"), "m__b": b.astype("float32")},
+                      index=idx)
+    df.to_parquet(run / "oof.parquet")
+    df.assign(fold=np.int8(-1)).iloc[: 20 * n_rows].to_parquet(run / "forward.parquet")
+
+
+def test_blend_vs_baseline_recomputed_when_missing(fake_repo: Path) -> None:
+    run = fake_repo / "artifacts" / "rb"
+    run.mkdir(parents=True)
+    summ = {"mean": 0.02, "std": 0.04, "sharpe": 0.5, "pct_pos": 0.7, "ci90": [0.01, 0.03], "n_eras": 80}
+    (run / "metrics.json").write_text(json.dumps({
+        "run_id": "rb", "config_name": "test", "status": "ok",
+        "members": {"a": {"fit": summ}, "b": {"fit": summ}},
+        "paired": {"b_vs_a": {"diff_mean": 0.0, "diff_se": 0.001, "p_pos": 0.5}, "blend_nnls_vs_ew": {"p_pos": 0.4}},
+        "blend": {"ew": summ, "forward_fit": 0.02}}))
+    (run / "blend.json").write_text(json.dumps({"rule": "ew", "weights": {"a": 0.5, "b": 0.5}, "p_b": 0.5, "p_c": 0.25}))
+    _write_synthetic_oof(run)
+    doc = report.write_results("rb", "02", repo=fake_repo)["doc"]
+    row = doc["paired"]["blend_vs_a"]
+    assert row["n_eras"] == 80 and 0.0 <= row["p_pos"] <= 1.0 and row["fwd_diff"] is not None
+    assert "recomputed from oof.parquet" in row["source"]
+    blend_row = next(c for c in doc["configs"] if c["kind"] == "blend")
+    assert blend_row["paired_vs_baseline"]["baseline"] == "a" and blend_row["paired_vs_baseline"]["p_pos"] == row["p_pos"]
+    assert any("blend_vs_a" in n for n in doc["notes"])
+    # the blend of two noisy copies beats one of them on average
+    assert row["diff_mean"] > 0
+    # opt-out, and an existing blend_vs_* row is never overwritten
+    assert "blend_vs_a" not in report.write_results("rb", "02", repo=fake_repo, recompute=False)["doc"]["paired"]
+    m = json.loads((run / "metrics.json").read_text())
+    m["paired"]["blend_vs_a"] = {"diff_mean": 9.0, "diff_se": 1.0, "p_pos": 1.0}
+    (run / "metrics.json").write_text(json.dumps(m))
+    assert report.write_results("rb", "02", repo=fake_repo)["doc"]["paired"]["blend_vs_a"]["diff_mean"] == 9.0
+
+
+def test_main_diag_json_flag(fake_repo: Path) -> None:
+    _make_run(fake_repo, "r1")
+    up = fake_repo / "x.upload.json"
+    up.write_text(json.dumps({"upload_id": "u1", "panel": {"status": "done", "fit20": 0.02}}))
+    assert report.main(["--run-id", "r1", "--handoff", "03", "--no-git", "--repo", str(fake_repo), "--diag-json", str(up)]) == 0
+    doc = json.loads((fake_repo / "handoffs" / "results" / "03-metrics.json").read_text())
+    assert doc["diag"]["upload_id"] == "u1" and abs(doc["diag"]["ratio_diag_vs_oof"] - 0.02 / 0.0275) < 1e-12
+
+
+def test_diag_ratio_uses_the_uploaded_single_member(fake_repo: Path) -> None:
+    """A diag upload of a ``bundle --members lgbm_everest`` pickle is compared with that member, not the blend row."""
+    _make_run(fake_repo, "r1")
+    (fake_repo / "models").mkdir(exist_ok=True)
+    sha = "ab" * 32
+    (fake_repo / "models" / "r1_lgbm.manifest.json").write_text(json.dumps({"sha256": sha, "members": [{"name": "lgbm_everest"}]}))
+    up = fake_repo / "artifacts" / "diag" / "r1_lgbm_validation.parquet.upload.json"
+    up.parent.mkdir(parents=True, exist_ok=True)
+    up.write_text(json.dumps({"upload_id": "u2", "built_from_pkl_sha256": sha, "panel": {"status": "done", "fit20": 0.02}}))
+    doc = report.write_results("r1", "03", repo=fake_repo, diag_json=up)["doc"]
+    member_fit = json.loads((fake_repo / "artifacts" / "r1" / "metrics.json").read_text())["members"]["lgbm_everest"]["fit"]["mean"]
+    assert doc["diag"]["oof_reference"].startswith("member lgbm_everest")
+    assert abs(doc["diag"]["ratio_diag_vs_oof"] - 0.02 / member_fit) < 1e-12
+    # an unknown pickle sha keeps the blend row as the reference
+    up.write_text(json.dumps({"upload_id": "u2", "built_from_pkl_sha256": "cd" * 32, "panel": {"status": "done", "fit20": 0.02}}))
+    doc = report.write_results("r1", "03", repo=fake_repo, diag_json=up)["doc"]
+    assert doc["diag"]["oof_reference"] == "blend row" and abs(doc["diag"]["ratio_diag_vs_oof"] - 0.02 / 0.0275) < 1e-12
+

@@ -72,12 +72,23 @@ class FakeClient:
         return {"sandbox_ready": ready, "error_message": None, "status": "pending", "upload_id": "up-123",
                 "lane_active": True, **self.upload_status_extra}
 
-    def submit_validation_diagnostics(self, model_id, predictions, tournament="futures", target="target_everest", wait=False):
-        self._rec("submit_validation_diagnostics", model_id, Path(predictions).name, tournament, target)
+    diag_statuses: list[str] = ["done"]  # successive get_diagnostics_result statuses (last one repeats)
+    diag_error: Exception | None = None  # raised by submit_validation_diagnostics when set
+
+    def submit_validation_diagnostics(self, model_id, predictions, tournament="futures", target="target_everest", wait=False,
+                                      **kwargs):
+        self._rec("submit_validation_diagnostics", model_id, Path(predictions).name, tournament, target, **kwargs)
+        if self.diag_error is not None:
+            raise self.diag_error
         return {"upload_id": "diag-1", "status": "pending"}
 
     def get_diagnostics_result(self, upload_id):
         self._rec("get_diagnostics_result", upload_id)
+        statuses = list(self.diag_statuses)
+        st = statuses.pop(0) if len(statuses) > 1 else statuses[0]
+        self.diag_statuses = statuses
+        if st != "done":
+            return {"status": st, "queue_position": 1, "elapsed_seconds": 3, "estimate_seconds": 30}
         return {"status": "done", "metrics": {"fit20": 0.02, "unq": 0.01, "inov": 0.01, "sharpe_ratio": 0.5}}
 
     def get_scores(self, model_id, days=30):
@@ -240,6 +251,149 @@ def test_diag_cli_gate_and_upload(pkl: Path, data_dir: Path, tmp_path: Path, mon
     res = diag.upload_diagnostics(fake, "m", out, wait=True)
     assert res["upload_id"] == "diag-1" and res["result"]["status"] == "done"
     assert (out.with_name(out.name + ".upload.json")).exists()
+    rec = json.loads(out.with_name(out.name + ".upload.json").read_text())
+    assert rec["panel"]["fit20"] == 0.02 and rec["panel"]["sharpe"] == 0.5 and rec["result_at"]
+
+
+@pytest.fixture()
+def small_val_dir(data_dir: Path, tmp_path: Path) -> Path:
+    """A data dir whose validation split is the first 3 validation eras (so 'full coverage' is cheap)."""
+    d = tmp_path / "small_data"
+    d.mkdir()
+    val = pd.read_parquet(data_dir / "futures_validation.parquet")
+    keep = sorted(val["exped"].unique())[:3]
+    val = val[val["exped"].isin(keep)]
+    val.to_parquet(d / "futures_validation.parquet")
+    bench = pd.read_parquet(data_dir / "futures_validation_benchmark_models.parquet")
+    bench.reindex(val.index).to_parquet(d / "futures_validation_benchmark_models.parquet")
+    return d
+
+
+@pytest.fixture()
+def checked_pkl(pkl: Path, tmp_path: Path) -> Path:
+    """A copy of the fixture pickle whose manifest records a passed pkl_check (as handoff 02 left test01)."""
+    d = tmp_path / "models"
+    d.mkdir()
+    out = d / "m01.pkl"
+    shutil.copy(pkl, out)
+    man = json.loads(pkl.with_name(f"{pkl.stem}.manifest.json").read_text())
+    man.update({"pkl": out.name, "pkl_check": {"passed": True, "at": "2026-11-13T20:31:31+00:00"}})
+    out.with_name("m01.manifest.json").write_text(json.dumps(man))
+    return out
+
+
+def test_diag_meta_file_status_and_preflight(checked_pkl: Path, small_val_dir: Path, tmp_path: Path,
+                                             capsys: pytest.CaptureFixture[str]):
+    out = tmp_path / "diag" / "m01_validation.parquet"
+    diag.make_validation_predictions(checked_pkl, data_dir=small_val_dir, out=out, eras=2)
+    meta = json.loads(diag.meta_path(out).read_text())
+    assert meta["eras"] == 2 and meta["validation_eras"] == 3 and meta["eras_limit"] == 2
+    ready, reason, _ = diag.file_status(out, checked_pkl)
+    assert not ready and "partial coverage" in reason
+    df = diag.make_validation_predictions(checked_pkl, data_dir=small_val_dir, out=out)
+    meta = json.loads(diag.meta_path(out).read_text())
+    assert meta["rows"] == meta["validation_rows"] == len(df) and meta["eras"] == 3 and meta["bench_used_eras"] == 3
+    assert diag.file_status(out, checked_pkl)[0]
+    ok, lines = diag.preflight(checked_pkl, out, "slot-x")
+    assert ok, lines
+    text = "\n".join(lines)
+    assert "slot-x" in text and "manifest match" in text and "pkl_check passed" in text and "PREFLIGHT OK" in text
+    assert diag.main(["--pkl", str(checked_pkl), "--out", str(out), "--preflight", "--model-id", "slot-x"]) == 0
+    assert "PREFLIGHT OK" in capsys.readouterr().out
+    # a different pickle -> the file is not reusable; a changed file -> not reusable
+    other = checked_pkl.with_name("other.pkl")
+    other.write_bytes(checked_pkl.read_bytes() + b"\0")
+    assert "different pickle" in diag.file_status(out, other)[1]
+    assert not diag.preflight(other, out, "slot-x")[0]  # no manifest next to other.pkl either
+    # an earlier upload of the same file blocks the preflight
+    diag.upload_json_path(out).write_text(json.dumps({"upload_id": "u-old", "uploaded_at": "x"}))
+    ok, lines = diag.preflight(checked_pkl, out, "slot-x")
+    assert not ok and any("ALREADY UPLOADED upload_id=u-old" in ln for ln in lines)
+
+
+def test_diag_preflight_missing_model_id(checked_pkl: Path, small_val_dir: Path, tmp_path: Path,
+                                         monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("EIQ_MODEL_ID", raising=False)
+    monkeypatch.setattr(predict.sdata, "DOTENV_PATH", tmp_path / "no.env")
+    out = tmp_path / "v.parquet"
+    diag.make_validation_predictions(checked_pkl, data_dir=small_val_dir, out=out)
+    ok, lines = diag.preflight(checked_pkl, out, None)
+    assert not ok and any("MISSING" in ln and "HUMAN STEP" in ln for ln in lines)
+
+
+def test_diag_upload_reuses_file_guards_budget_and_fetches(checked_pkl: Path, small_val_dir: Path, tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch):
+    out = tmp_path / "diag" / "m01_validation.parquet"
+    base = ["--pkl", str(checked_pkl), "--data-dir", str(small_val_dir), "--out", str(out)]
+    assert diag.main(base) == 0
+    built = json.loads(diag.meta_path(out).read_text())["created_at"]
+    fake = FakeClient(small_val_dir)
+    monkeypatch.setattr(diag.sdata, "make_client", lambda *a, **k: fake)
+    assert diag.main([*base, "--upload", "--i-have-approval", "--model-id", "m"]) == 1  # env gate missing
+    assert not fake.calls
+    monkeypatch.setenv(predict.ENV_DIAG, "1")
+    assert diag.main([*base, "--upload", "--i-have-approval", "--model-id", "m", "--wait"]) == 0
+    assert json.loads(diag.meta_path(out).read_text())["created_at"] == built  # reused, not rebuilt
+    subs = [c for c in fake.calls if c[0] == "submit_validation_diagnostics"]
+    assert len(subs) == 1 and "model_pkl" not in subs[0][2]  # --attach-pkl is opt-in
+    rec = json.loads(diag.upload_json_path(out).read_text())
+    assert rec["upload_id"] == "diag-1" and rec["panel"]["fit20"] == 0.02 and rec["attached_pkl"] is False
+    assert rec["built_from_pkl_sha256"] == diag.sha256_file(checked_pkl)
+    # a second upload of the same file is refused (budget guard) and sends nothing
+    assert diag.main([*base, "--upload", "--i-have-approval", "--model-id", "m", "--wait"]) == 1
+    assert len([c for c in fake.calls if c[0] == "submit_validation_diagnostics"]) == 1
+    # read-only re-poll needs no approval and no pickle
+    monkeypatch.delenv(predict.ENV_DIAG)
+    n_reads = len([c for c in fake.calls if c[0] == "get_diagnostics_result"])
+    assert diag.main(["--out", str(out), "--fetch-result"]) == 0
+    assert len([c for c in fake.calls if c[0] == "get_diagnostics_result"]) == n_reads + 1
+
+
+def test_diag_upload_pending_then_fetch(checked_pkl: Path, small_val_dir: Path, tmp_path: Path,
+                                        monkeypatch: pytest.MonkeyPatch):
+    out = tmp_path / "v.parquet"
+    fake = FakeClient(small_val_dir)
+    fake.diag_statuses = ["running", "running", "done"]
+    monkeypatch.setattr(diag.sdata, "make_client", lambda *a, **k: fake)
+    monkeypatch.setenv(predict.ENV_DIAG, "1")
+    args = ["--pkl", str(checked_pkl), "--data-dir", str(small_val_dir), "--out", str(out), "--upload",
+            "--i-have-approval", "--model-id", "m", "--wait", "--wait-timeout", "0"]
+    assert diag.main(args) == 2  # uploaded, scoring not finished: never re-upload
+    rec = json.loads(diag.upload_json_path(out).read_text())
+    assert rec["upload_id"] == "diag-1" and rec["panel"]["status"] == "running" and rec["panel"]["fit20"] is None
+    assert diag.main(["--out", str(out), "--fetch-result"]) == 2
+    assert diag.main(["--out", str(out), "--fetch-result"]) == 0
+    assert json.loads(diag.upload_json_path(out).read_text())["panel"]["fit20"] == 0.02
+    assert diag.main(["--out", str(tmp_path / "never.parquet"), "--fetch-result"]) == 1
+
+
+def test_diag_pkl_required_and_attach(checked_pkl: Path, small_val_dir: Path, tmp_path: Path,
+                                      monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    out = tmp_path / "v.parquet"
+    fake = FakeClient(small_val_dir)
+    fake.diag_error = RuntimeError("400: A model .pkl file is required for hackathon submissions.")
+    monkeypatch.setattr(diag.sdata, "make_client", lambda *a, **k: fake)
+    monkeypatch.setenv(predict.ENV_DIAG, "1")
+    args = ["--pkl", str(checked_pkl), "--data-dir", str(small_val_dir), "--out", str(out), "--upload",
+            "--i-have-approval", "--model-id", "m"]
+    with caplog.at_level("ERROR"):
+        assert diag.main(args) == 1
+    assert "MODEL PKL REQUIRED" in caplog.text
+    assert not diag.upload_json_path(out).exists()
+    fake.diag_error = None
+    assert diag.main([*args, "--attach-pkl"]) == 0
+    kw = [c for c in fake.calls if c[0] == "submit_validation_diagnostics"][-1][2]
+    assert kw == {"model_pkl": str(checked_pkl), "model_pkl_python_version": "3.11"}
+    rec = json.loads(diag.upload_json_path(out).read_text())
+    assert rec["attached_pkl"] is True and rec["pkl_sha256"] == diag.sha256_file(checked_pkl)
+
+
+def test_diag_panel_from_result_aliases():
+    p = diag.panel_from_result({"status": "done", "corr20": 0.03, "aimc": 0.004, "fnc": 0.01, "sharpe_ratio": 0.6,
+                                "max_drawdown": -0.2, "secret_field": "x"})
+    assert p == {"status": "done", "fit20": 0.03, "unq": 0.004, "inov": 0.01, "sharpe": 0.6, "std_dev": None,
+                 "max_drawdown": -0.2, "autocorrelation": None, "feature_exposure": None, "example_preds_corr": None}
+    assert diag.panel_from_result(None)["fit20"] is None
 
 
 # --------------------------------------------------------------------------------------------------

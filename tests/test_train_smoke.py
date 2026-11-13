@@ -26,7 +26,8 @@ def _tiny_config(repo_root: Path) -> dict:
     cfg["members"][0]["n_estimators"] = None
     cfg["members"][0]["es_cap"] = 60
     cfg["members"][1]["n_estimators"] = 50
-    cfg["search"] = {"lgbm_everest": {"grid": {"num_leaves": [4, 8]}, "n_trials": 2, "top_k": 2}}
+    # adopt_gate false = the M1 top-k behaviour; the gate's fallback to the base cell is covered in test_train_m2.py
+    cfg["search"] = {"lgbm_everest": {"grid": {"num_leaves": [4, 8]}, "n_trials": 2, "top_k": 2, "adopt_gate": False}}
     cfg["blend"]["nnls"] = True
     cfg["blend"]["simulation"]["n_draws"] = 10
     cfg["bootstrap"]["n_boot"] = 200

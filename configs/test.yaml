@@ -67,6 +67,7 @@ search:
       lambda_l2: [10]
     n_trials: 12         # == grid size -> exhaustive
     top_k: 3
+    adopt_gate: false    # M1 behaviour (top-k always averaged); the M2 adoption gate is on in full/minifull
 blend:
   everest_weight: 0.5
   nnls: true             # computed nested; adopted only if paired gate passes vs equal weight

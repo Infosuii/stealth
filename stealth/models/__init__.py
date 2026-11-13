@@ -1,9 +1,12 @@
-"""Member families (lgbm, xgb, cat, ridge): one uniform fit / to_bytes / from_bytes / predict contract.
+"""Member families (lgbm, xgb, cat, ridge, mlp): one uniform fit / to_bytes / from_bytes / predict contract.
 
 Dispatch on ``family`` (docs/INTERFACES.md section 5). Every family module exposes
 ``fit_with_early_stopping``, ``fit_fixed``, ``to_bytes``, ``from_bytes``, ``predict``. The ``Member`` class
 is a thin object wrapper over the same functions (``fit(X, y, w, X_es, y_es) -> self``, ``predict``,
 ``to_bytes`` / ``from_bytes``) for callers that prefer an object.
+
+``mlp`` is an EXTERNAL family: it is trained by ``scripts/mlp_train.py`` in the optional GPU venv and only
+serialised / predicted here (numpy forward in ``stealth._runtime``); its fit functions raise NotImplementedError.
 """
 from __future__ import annotations
 
@@ -19,10 +22,12 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-Family = Literal["lgbm", "xgb", "cat", "ridge"]
-FAMILIES: tuple[str, ...] = ("lgbm", "xgb", "cat", "ridge")
-_MODULES = {"lgbm": "stealth.models.lgbm", "xgb": "stealth.models.xgb", "cat": "stealth.models.cat", "ridge": "stealth.models.linear"}
-_EXT = {"lgbm": "lgbm.txt", "xgb": "ubj", "cat": "cbm", "ridge": "npz"}
+Family = Literal["lgbm", "xgb", "cat", "ridge", "mlp"]
+FAMILIES: tuple[str, ...] = ("lgbm", "xgb", "cat", "ridge", "mlp")
+EXTERNAL_FAMILIES: tuple[str, ...] = ("mlp",)  # trained outside this package (scripts/mlp_train.py)
+_MODULES = {"lgbm": "stealth.models.lgbm", "xgb": "stealth.models.xgb", "cat": "stealth.models.cat", "ridge": "stealth.models.linear",
+            "mlp": "stealth.models.mlp"}
+_EXT = {"lgbm": "lgbm.txt", "xgb": "ubj", "cat": "cbm", "ridge": "npz", "mlp": "npz"}
 
 
 def family_module(family: str) -> ModuleType:
@@ -76,6 +81,8 @@ def fit_member(
     params = dict(spec.get("params") or {})
     n_est = spec.get("n_estimators")
     t0 = time.perf_counter()
+    if family in EXTERNAL_FAMILIES:
+        raise NotImplementedError(f"member {spec.get('name')}: family {family} is trained externally by scripts/mlp_train.py")
     if family == "ridge" or n_est is not None:
         n_iter = int(n_est) if n_est is not None else None
         model = mod.fit_fixed(params, X_tr, y_tr, w_tr, n_iter=n_iter, seed=seed, threads=threads)
@@ -170,6 +177,6 @@ class Member:
 
 
 __all__ = [
-    "FAMILIES", "Family", "FittedMember", "Member", "family_extension", "family_module", "fit_member",
+    "EXTERNAL_FAMILIES", "FAMILIES", "Family", "FittedMember", "Member", "family_extension", "family_module", "fit_member",
     "member_from_bytes", "member_to_bytes", "predict_member",
 ]

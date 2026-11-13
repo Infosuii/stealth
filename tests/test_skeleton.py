@@ -10,11 +10,12 @@ import yaml
 MODULES = [
     "stealth", "stealth.data", "stealth.cv", "stealth.metrics", "stealth.features", "stealth.surrogate",
     "stealth.models", "stealth.models.lgbm", "stealth.models.xgb", "stealth.models.cat", "stealth.models.linear",
-    "stealth.search", "stealth.train", "stealth.blend", "stealth._runtime", "stealth.bundle",
+    "stealth.search", "stealth.knobs", "stealth.models.mlp", "stealth.train", "stealth.blend", "stealth._runtime", "stealth.bundle",
     "stealth.pkl_check", "stealth.predict", "stealth.diag", "stealth.monitor", "stealth.report", "stealth.selfcheck",
 ]
 REQUIRED_TOP_KEYS = {"name", "run", "cv", "members", "search", "blend", "bootstrap", "gates", "timing"}
 MEMBER_KEYS = {"name", "family", "target", "group", "features", "input", "params", "n_estimators", "es_cap"}
+OPTIONAL_MEMBER_KEYS = {"arm", "seeds"}  # INTERFACES section 11
 
 
 @pytest.mark.parametrize("mod", MODULES)
@@ -33,7 +34,7 @@ def test_no_torch_in_train_venv() -> None:
     assert importlib.util.find_spec("torch") is None
 
 
-@pytest.mark.parametrize("name", ["smoke", "test", "full"])
+@pytest.mark.parametrize("name", ["smoke", "test", "full", "minifull"])
 def test_config_schema(repo_root: Path, name: str) -> None:
     cfg = yaml.safe_load((repo_root / "configs" / f"{name}.yaml").read_text())
     assert REQUIRED_TOP_KEYS <= set(cfg), set(cfg) ^ REQUIRED_TOP_KEYS
@@ -42,17 +43,22 @@ def test_config_schema(repo_root: Path, name: str) -> None:
     names = [m["name"] for m in cfg["members"]]
     assert len(names) == len(set(names)), "member names must be unique"
     for m in cfg["members"]:
-        assert set(m) == MEMBER_KEYS, (m["name"], set(m) ^ MEMBER_KEYS)
-        assert m["family"] in {"lgbm", "xgb", "cat", "ridge"}
+        assert MEMBER_KEYS <= set(m) <= MEMBER_KEYS | OPTIONAL_MEMBER_KEYS, (m["name"], set(m) ^ MEMBER_KEYS)
+        assert m["family"] in {"lgbm", "xgb", "cat", "ridge", "mlp"}
         assert m["group"] in {"everest", "aux"}
         assert m["input"] in {"nan", "linear"}
         assert m["target"].startswith("target_")
+        if m["family"] == "mlp":  # external member (scripts/mlp_train.py)
+            assert m["input"] == "linear" and m["seeds"] and m["n_estimators"] is None
+    if name in ("smoke", "test"):  # M1 configs are unchanged: no arms, no knobs, no external members
+        assert all(set(m) == MEMBER_KEYS for m in cfg["members"]) and "knobs" not in cfg
     for key, spec in cfg["search"].items():
         assert key in names
         grid_size = 1
         for values in spec["grid"].values():
             grid_size *= len(values)
         assert spec["n_trials"] <= grid_size and spec["top_k"] <= spec["n_trials"]
+        assert spec["n_trials"] <= cfg["gates"].get("max_search_trials", 25) <= 25
 
 
 def test_train_slice_fixture(train_slice) -> None:

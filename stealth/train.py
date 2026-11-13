@@ -21,6 +21,17 @@ Contracts: docs/INTERFACES.md sections 7 (config), 8 (artifacts), 10 (CLI). Prot
   full_s<seed>.bin}``; at the end ``oof.parquet`` / ``forward.parquet`` (``m__<member>`` raw scores),
   ``features.json`` (feature_cols, missing_cols, core_proxy_cols, surrogate), ``folds.json``, ``metrics.json``.
 
+M2-M6 additions (docs/INTERFACES.md sections 11-15):
+
+* two universes: ``run.min_era`` = SCORING eras (test blocks, unchanged); the TRAINING pool reaches down to
+  ``min(knobs.era_start)`` and joins train/inner_train via ``cv.extend_train``. ``stealth.knobs.select_universe`` decides
+  the training universe ONCE on the forward block (``knobs.json``) before any member trains; ``_fit_rows`` / sample
+  weights / full refits apply it, cache keys (``cell_hash``, sharpe cache, ``spec.json["universe"]``) include it;
+* the search adoption gate: the top-k average is adopted iff paired CV ``p_pos >= gates.p_pos_adopt`` AND the forward gain
+  is ``>= 0``; otherwise the member is its base cell (``search/<m>.adopted.json``; ``best_of`` resolves through it);
+* ``folds_eras.json`` for ``scripts/mlp_train.py``; ``family: mlp`` members are EXTERNAL (loaded when finished, else
+  pending with a WARNING; exit code unchanged); CatBoost ``dropped_timing`` on a slow first fit; ``rho_c`` on validation.
+
 Hyperparameter VALUES stay under ``artifacts/`` (never in handoff results).
 """
 from __future__ import annotations
@@ -46,19 +57,26 @@ import yaml
 
 from stealth import cv as cvmod
 from stealth import data, features, metrics, models, surrogate
+from stealth import knobs as knobsmod
 from stealth.cv import Fold
 
 log = logging.getLogger("stealth.train")  # explicit: under `python -m` __name__ is __main__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = REPO_ROOT / "artifacts"
-_FAMILIES = ("lgbm", "xgb", "cat", "ridge")
+_FAMILIES = ("lgbm", "xgb", "cat", "ridge", "mlp")  # mlp = EXTERNAL member (scripts/mlp_train.py), never fitted here
+EXTERNAL_FAMILIES = ("mlp",)
 _GROUPS = ("everest", "aux")
 _INPUTS = ("nan", "linear")
 _REQUIRED_TOP = ("name", "run", "cv", "members", "search", "blend", "bootstrap", "gates", "timing")
 _RUN_KEYS = ("seed", "threads", "min_era", "max_era", "min_rows", "time_decay", "data_dir")
 _CV_KEYS = ("n_folds", "purge", "embargo", "inner_frac", "inner_gap", "forward")
 _MEMBER_KEYS = ("name", "family", "target", "group", "features", "input", "params", "n_estimators", "es_cap")
+_MEMBER_OPTIONAL = ("arm", "seeds")
+_KNOB_KEYS = ("member", "era_start", "rows_rule", "rows_low_weight", "time_decay", "alpha_total")
+_NEUTRAL_KEYS = ("select", "central_mean", "pessimistic_mean", "fit_cost_max", "sharpe_tol", "worst_tol")
+DEFAULT_MAX_SEARCH_TRIALS = 25
+P_B_CAP, P_C_CAP = 0.75, 0.5
 EXIT_OK, EXIT_ERROR, EXIT_GATE = 0, 1, 2
 MIN_GAP = 20  # floor on every train/test and early-stopping gap (PLAN: purge + embargo >= 20 eras)
 
@@ -161,11 +179,173 @@ def load_config(path: Path) -> dict:
     for k in ("catboost_max_fit_seconds", "progress_every_seconds"):
         if k not in (cfg.get("timing") or {}):
             problems.append(f"timing.{k} missing")
+    _validate_m2(cfg, problems)
     if problems:
         raise ValueError(f"{path}: invalid config:\n  - " + "\n  - ".join(problems))
     cfg.setdefault("refit", {"seeds": [0]})
     cfg.setdefault("knobs", {})
+    cfg["gates"].setdefault("max_search_trials", DEFAULT_MAX_SEARCH_TRIALS)
     return cfg
+
+
+def arm_of(m: dict) -> str:
+    """Member arm (INTERFACES section 11): ``arm`` key, else ``"aux"`` for the aux group, else the member name."""
+    return str(m.get("arm") or ("aux" if m.get("group") == "aux" else m.get("name")))
+
+
+def _num(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _validate_members_m2(cfg: dict, problems: list[str]) -> None:
+    members = [m for m in (cfg.get("members") or []) if isinstance(m, dict)]
+    by_name = {str(m.get("name")): m for m in members}
+    for i, m in enumerate(members):
+        extra = sorted(set(m) - set(_MEMBER_KEYS) - set(_MEMBER_OPTIONAL))
+        if extra:
+            problems.append(f"members[{i}]: unknown keys {extra} (optional keys: {list(_MEMBER_OPTIONAL)})")
+        if "arm" in m and (not isinstance(m["arm"], str) or not m["arm"]):
+            problems.append(f"members[{i}].arm must be a non-empty string")
+        if "seeds" in m and (not isinstance(m["seeds"], list) or not m["seeds"] or not all(isinstance(s, int) for s in m["seeds"])):
+            problems.append(f"members[{i}].seeds must be a non-empty list of ints")
+        if m.get("family") == "mlp":
+            if "seeds" not in m:
+                problems.append(f"members[{i}]: family mlp (external member) needs seeds")
+            if m.get("input") != "linear":
+                problems.append(f"members[{i}]: family mlp needs input: linear")
+            if m.get("n_estimators") is not None:
+                problems.append(f"members[{i}]: family mlp takes its epochs from inner early stopping (n_estimators: null)")
+            if "best_of" in (m.get("params") or {}):
+                problems.append(f"members[{i}]: family mlp cannot use params.best_of")
+        dep = (m.get("params") or {}).get("best_of") if isinstance(m.get("params"), dict) else None
+        if dep in by_name and by_name[dep].get("family") in EXTERNAL_FAMILIES:
+            problems.append(f"members[{i}].params.best_of names an external (mlp) member")
+    for k, s in (cfg.get("search") or {}).items():
+        if k in by_name and by_name[k].get("family") in EXTERNAL_FAMILIES:
+            problems.append(f"search.{k}: external (mlp) members are not searched by train.py")
+        if isinstance(s, dict) and "adopt_gate" in s and not isinstance(s["adopt_gate"], bool):
+            problems.append(f"search.{k}.adopt_gate must be true/false")
+
+
+def _validate_knobs(cfg: dict, problems: list[str]) -> None:
+    kn = cfg.get("knobs")
+    if kn is None or kn == {}:
+        return
+    if not isinstance(kn, dict):
+        problems.append("knobs must be a mapping")
+        return
+    run = cfg.get("run") or {}
+    if "min_rows" in kn:
+        problems.append("knobs.min_rows is not supported: use knobs.rows_rule (none | filter<N> | weight<N>)")
+    for k in sorted(set(kn) - set(_KNOB_KEYS) - {"min_rows"}):
+        problems.append(f"knobs.{k}: unknown key (allowed: {list(_KNOB_KEYS)})")
+    if run.get("min_rows") is not None:
+        problems.append("run.min_rows must be null when knobs are set (it filters the SCORING eras; use knobs.rows_rule)")
+    if run.get("min_era") is None:
+        problems.append("knobs need a numeric run.min_era (the scoring universe)")
+    if not ((cfg.get("cv") or {}).get("forward") or {}).get("enabled"):
+        problems.append("knobs need cv.forward.enabled: true (the decision is made on the forward block)")
+    es = kn.get("era_start", [run.get("min_era")])
+    if not isinstance(es, list) or not es or not all(isinstance(v, int) and not isinstance(v, bool) for v in es):
+        problems.append("knobs.era_start must be a non-empty list of ints")
+    elif run.get("min_era") is not None and int(run["min_era"]) not in es:
+        problems.append("knobs.era_start must contain run.min_era (the default)")
+    rr = kn.get("rows_rule", ["none"])
+    if not isinstance(rr, list) or not rr:
+        problems.append("knobs.rows_rule must be a non-empty list")
+    else:
+        for v in rr:
+            if not isinstance(v, str) or not knobsmod.ROWS_RULE_RE.match(v):
+                problems.append(f"knobs.rows_rule entry {v!r} must be none | filter<N> | weight<N>")
+        if "none" not in rr:
+            problems.append("knobs.rows_rule must contain 'none' (the default)")
+    if "rows_low_weight" in kn and (not _num(kn["rows_low_weight"]) or not 0.0 < float(kn["rows_low_weight"]) <= 1.0):
+        problems.append("knobs.rows_low_weight must be in (0, 1]")
+    td = kn.get("time_decay", [bool(run.get("time_decay"))])
+    if not isinstance(td, list) or not td or not all(isinstance(v, bool) for v in td):
+        problems.append("knobs.time_decay must be a non-empty list of booleans")
+    elif bool(run.get("time_decay")) not in td:
+        problems.append("knobs.time_decay must contain run.time_decay (the default)")
+    if "alpha_total" in kn and (not _num(kn["alpha_total"]) or not 0.0 < float(kn["alpha_total"]) < 1.0):
+        problems.append("knobs.alpha_total must be in (0, 1)")
+    members = {str(m.get("name")): m for m in (cfg.get("members") or []) if isinstance(m, dict)}
+    km = kn.get("member")
+    if km is not None:
+        if km not in members:
+            problems.append(f"knobs.member {km!r} does not name a member")
+        elif members[km].get("family") in EXTERNAL_FAMILIES or "best_of" in (members[km].get("params") or {}):
+            problems.append("knobs.member must be a member trained here with explicit params (no best_of, not mlp)")
+
+
+def _validate_blend_gates(cfg: dict, problems: list[str]) -> None:
+    blend = cfg.get("blend") or {}
+    sim = blend.get("simulation") or {}
+    for v in sim.get("p_b_grid") or []:
+        if not _num(v) or not 0.0 <= float(v) <= P_B_CAP:
+            problems.append(f"blend.simulation.p_b_grid value {v!r} outside [0, {P_B_CAP}]")
+    if "p_c_grid" in sim:
+        if not isinstance(sim["p_c_grid"], list) or not sim["p_c_grid"]:
+            problems.append("blend.simulation.p_c_grid must be a non-empty list")
+        else:
+            for v in sim["p_c_grid"]:
+                if not _num(v) or not 0.0 <= float(v) <= P_C_CAP:
+                    problems.append(f"blend.simulation.p_c_grid value {v!r} outside [0, {P_C_CAP}]")
+    neu = blend.get("neutralisation")
+    if neu is not None:
+        if not isinstance(neu, dict):
+            problems.append("blend.neutralisation must be a mapping")
+        else:
+            for k in sorted(set(neu) - set(_NEUTRAL_KEYS)):
+                problems.append(f"blend.neutralisation.{k}: unknown key (allowed: {list(_NEUTRAL_KEYS)})")
+            if not isinstance(neu.get("select", False), bool):
+                problems.append("blend.neutralisation.select must be true/false")
+            means = [float(x) for x in sim.get("bench_fit_means") or [] if _num(x)]
+            for k in ("central_mean", "pessimistic_mean"):
+                if k in neu and (not _num(neu[k]) or not any(abs(float(neu[k]) - m) < 1e-12 for m in means)):
+                    problems.append(f"blend.neutralisation.{k} must be one of blend.simulation.bench_fit_means {means}")
+            for k in ("fit_cost_max", "sharpe_tol", "worst_tol"):
+                if k in neu and (not _num(neu[k]) or float(neu[k]) < 0.0):
+                    problems.append(f"blend.neutralisation.{k} must be a number >= 0")
+            if neu.get("select"):
+                for k in ("central_mean", "pessimistic_mean"):
+                    if k not in neu:
+                        problems.append(f"blend.neutralisation.select needs {k}")
+                if "p_c_grid" not in sim:
+                    problems.append("blend.neutralisation.select needs blend.simulation.p_c_grid")
+                for g in ("p_b_grid", "p_c_grid"):  # the (p_b=0, p_c=0) reference cell of select_neutralisation
+                    if g in sim and isinstance(sim[g], list) and not any(_num(v) and float(v) == 0.0 for v in sim[g]):
+                        problems.append(f"blend.neutralisation.select needs 0.0 in blend.simulation.{g} (the reference cell)")
+    adm = blend.get("admission")
+    if adm is not None:
+        if not isinstance(adm, dict):
+            problems.append("blend.admission must be a mapping")
+        else:
+            for k in ("base", "order"):
+                if not isinstance(adm.get(k), list) or not all(isinstance(a, str) for a in adm.get(k) or []):
+                    problems.append(f"blend.admission.{k} must be a list of arm names")
+            if "sharpe_gain" in adm and (not _num(adm["sharpe_gain"]) or float(adm["sharpe_gain"]) < 0.0):
+                problems.append("blend.admission.sharpe_gain must be a number >= 0")
+            arms = {arm_of(m) for m in (cfg.get("members") or []) if isinstance(m, dict)}
+            for a in list(adm.get("base") or []) + list(adm.get("order") or []):
+                if isinstance(a, str) and a not in arms:
+                    log.warning("blend.admission names arm %r that no member of this config has: it is skipped", a)
+    gates = cfg.get("gates") or {}
+    if "member_corr_max" in gates and (not _num(gates["member_corr_max"]) or not 0.0 < float(gates["member_corr_max"]) <= 1.0):
+        problems.append("gates.member_corr_max must be in (0, 1]")
+    mst = gates.get("max_search_trials", DEFAULT_MAX_SEARCH_TRIALS)
+    if not isinstance(mst, int) or isinstance(mst, bool) or mst < 1:
+        problems.append("gates.max_search_trials must be an int >= 1")
+    else:
+        for k, s in (cfg.get("search") or {}).items():
+            if isinstance(s, dict) and isinstance(s.get("n_trials"), int) and s["n_trials"] > mst:
+                problems.append(f"search.{k}.n_trials {s['n_trials']} > gates.max_search_trials {mst} (PLAN C6: <= 25 trials)")
+
+
+def _validate_m2(cfg: dict, problems: list[str]) -> None:
+    """INTERFACES section 11 additions (knobs, arms, external mlp members, admission, neutralisation, trial cap)."""
+    _validate_members_m2(cfg, problems)
+    _validate_knobs(cfg, problems)
+    _validate_blend_gates(cfg, problems)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -305,11 +485,26 @@ class RunData:
         self.surrogate = surrogate.fit_surrogate(X_lin_early, bench.reindex(early.index), early["era"],
                                                  max_era=int(early["era"].max()) + 1)
         del X_lin_early, early, bench
-        self.df = data.filter_eras(full, min_era=run.get("min_era"), max_era=run.get("max_era"), min_rows=run.get("min_rows"))
+        # two universes (INTERFACES section 12): SCORING eras >= run.min_era (CV + forward test blocks, unchanged) and the
+        # TRAINING pool >= min(run.min_era, knobs.era_start); a Universe masks/weights training rows inside the pool only
+        self.has_knobs = bool(cfg.get("knobs"))
+        if self.has_knobs:
+            pool_min = knobsmod.pool_min_era(cfg)
+            self.df = data.filter_eras(full, min_era=pool_min, max_era=run.get("max_era"))
+        else:  # M1 configs: exactly the old frame (run.min_rows still filters the scoring eras there)
+            self.df = data.filter_eras(full, min_era=run.get("min_era"), max_era=run.get("max_era"), min_rows=run.get("min_rows"))
         del full
         self.era = self.df["era"]
-        self.eras = np.unique(self.era.to_numpy()).astype(np.int32)
+        counts = data.era_counts(self.df)
+        self.era_n_rows = counts.reindex(self.era.to_numpy()).to_numpy(dtype=np.int64)  # n_rows of each row's era
+        self.n_rows_by_era = counts
+        self.pool_eras = np.unique(self.era.to_numpy()).astype(np.int32)
+        min_era = run.get("min_era")
+        self.eras = self.pool_eras[self.pool_eras >= int(min_era)] if min_era is not None else self.pool_eras
+        self.scoring_min_era = int(self.eras.min())
+        extra = self.pool_eras[self.pool_eras < self.scoring_min_era]
         c = cfg["cv"]
+        gap = int(c["purge"]) + int(c["embargo"])
         self.folds: list[Fold] = cvmod.purged_folds(self.eras, int(c["n_folds"]), purge=int(c["purge"]), embargo=int(c["embargo"]),
                                                    inner_frac=float(c["inner_frac"]), inner_gap=int(c["inner_gap"]))
         self.forward: Fold | None = None
@@ -317,14 +512,20 @@ class RunData:
         if fw.get("enabled"):
             self.forward = cvmod.forward_block(self.eras, train_end=int(fw["train_end"]), test_start=int(fw["test_start"]),
                                                inner_frac=float(c["inner_frac"]), inner_gap=int(c["inner_gap"]))
-        self.min_gap = max(MIN_GAP, min(int(c["purge"]) + int(c["embargo"]), int(c["inner_gap"])))
+        if extra.size:  # pool eras below the scoring universe join train + inner_train (purge gap > purge + embargo)
+            self.folds = [cvmod.extend_train(f, extra, gap=gap) for f in self.folds]
+            if self.forward is not None:
+                self.forward = cvmod.extend_train(self.forward, extra, gap=gap)
+        self.min_gap = max(MIN_GAP, min(gap, int(c["inner_gap"])))
         cvmod.assert_fold_gaps(self.folds + ([self.forward] if self.forward else []), min_gap=self.min_gap)
-        self.sharpe_cols_cache: dict[tuple[str, str], list[str]] = {}
+        self.universe: knobsmod.Universe = knobsmod.default_universe(cfg)
+        self.sharpe_cols_cache: dict[tuple[str, str, str], list[str]] = {}
         bags = cfg.get("feature_bags") or {}
         self.bags = features.random_column_bags(self.feature_cols, n_bags=int(bags.get("n_bags", 4)),
                                                 fraction=float(bags.get("fraction", 0.5)), seed=int(bags.get("seed", 0)))
-        log.info("run data: %d rows, %d eras (%d..%d), %d folds%s", len(self.df), len(self.eras), self.eras.min(), self.eras.max(),
-                 len(self.folds), ", forward block" if self.forward else "")
+        log.info("run data: %d rows, %d scoring eras (%d..%d), training pool %d eras from %d, %d folds%s", len(self.df), len(self.eras),
+                 self.eras.min(), self.eras.max(), len(self.pool_eras), self.pool_eras.min(), len(self.folds),
+                 ", forward block" if self.forward else "")
 
     # -- rows -------------------------------------------------------------------------------------------
     def rows(self, eras: np.ndarray) -> np.ndarray:
@@ -341,19 +542,23 @@ class RunData:
     def target(self, name: str, mask: np.ndarray) -> np.ndarray:
         return self.df.loc[mask, name].to_numpy(dtype=np.float32)
 
+    def train_mask(self) -> np.ndarray:
+        """Per-row training mask of the current universe (TRAINING rows only; never applied to test/prediction rows)."""
+        return self.universe.train_mask(self.era.to_numpy(), self.era_n_rows)
+
     def weights(self, mask: np.ndarray) -> np.ndarray | None:
-        if not self.cfg["run"].get("time_decay"):
-            return None
-        return data.time_decay_weights(self.era.loc[mask], True)
+        """Sample weights of the fit rows in ``mask`` under the current universe (None = unweighted, the M1 default)."""
+        return self.universe.weights(self.era.to_numpy()[mask], self.era_n_rows[mask])
 
     def resolve_features(self, spec: str | list[str], fold: Fold | None, target: str) -> list[str]:
-        """Concrete feature list; ``sharpe_subset`` is computed on the fold's TRAINING eras only (cached)."""
+        """Concrete feature list; ``sharpe_subset`` is computed on the fold's universe-masked TRAINING rows only (cached
+        per fold, target and universe key)."""
         sharpe_cols = None
         if spec == "sharpe_subset":
-            key = (fold.name if fold else "full", target)
+            key = (fold.name if fold else "full", target, self.universe.key())
             if key not in self.sharpe_cols_cache:
                 thr = float((self.cfg.get("sharpe_subset") or {}).get("threshold", 0.1))
-                mask = self.rows(fold.train_eras) if fold else np.ones(len(self.df), dtype=bool)
+                mask = (self.rows(fold.train_eras) if fold else self.rows(self.pool_eras)) & self.train_mask()
                 X = self.matrix(mask, self.feature_cols, "nan")
                 y = self.df.loc[mask, target]
                 ok = y.notna().to_numpy()
@@ -368,9 +573,12 @@ class RunData:
 
 
 def _fit_rows(rd: RunData, eras: np.ndarray, target: str) -> np.ndarray:
-    """Training mask: rows in ``eras`` whose ``target`` is not NaN."""
+    """Training mask: rows in ``eras`` whose ``target`` is not NaN, restricted by the current universe's train mask."""
     mask = rd.rows(eras)
     mask &= rd.df[target].notna().to_numpy()
+    mask &= rd.train_mask()
+    if not mask.any():
+        raise ValueError(f"universe {rd.universe.key()} leaves no training rows for {target} in eras {int(np.min(eras))}..{int(np.max(eras))}")
     return mask
 
 
@@ -423,11 +631,30 @@ def _predict_rows(rd: RunData, fm: models.FittedMember, cols: list[str], eras: n
     return pd.Series(models.predict_member(fm, X), index=X.index, dtype=np.float64)
 
 
+class TimingDrop(Exception):
+    """A member's FIRST fit exceeded its wall-time cap (``timing.catboost_max_fit_seconds`` for CatBoost)."""
+
+    def __init__(self, seconds: float, cap: float) -> None:
+        super().__init__(f"first fit {seconds:.1f}s > cap {cap:.0f}s")
+        self.seconds, self.cap = float(seconds), float(cap)
+
+
 def run_protocol(rd: RunData, spec: dict, params: dict, *, seed: int, threads: int, prog: Progress | None = None,
-                 label: str = "") -> ProtocolResult:
-    """Inner early stopping per fold -> frozen median count -> fixed-count fold fits -> OOF (+ forward) predictions."""
+                 label: str = "", max_first_fit_seconds: float | None = None) -> ProtocolResult:
+    """Inner early stopping per fold -> frozen median count -> fixed-count fold fits -> OOF (+ forward) predictions.
+
+    ``max_first_fit_seconds`` (CatBoost cost guard, INTERFACES section 15): the very first fit of this run is timed and
+    :class:`TimingDrop` is raised immediately when it took longer.
+    """
     res = ProtocolResult()
     t0 = time.perf_counter()
+    first = [True]
+
+    def _guard(seconds: float) -> None:
+        if first[0]:
+            first[0] = False
+            if max_first_fit_seconds is not None and seconds > float(max_first_fit_seconds):
+                raise TimingDrop(seconds, float(max_first_fit_seconds))
     input_kind = spec["input"]
     cols_by_fold = {f.name: rd.resolve_features(spec["features"], f, spec["target"]) for f in rd.folds}
     if rd.forward is not None:
@@ -444,6 +671,7 @@ def run_protocol(rd: RunData, spec: dict, params: dict, *, seed: int, threads: i
             fm = _fit(rd, spec, params, cols_by_fold[f.name], f.train_eras, None, seed=seed, threads=threads,
                       es=(f.inner_train_eras, f.inner_val_eras))
             res.max_fit_seconds = max(res.max_fit_seconds, time.perf_counter() - t1)
+            _guard(time.perf_counter() - t1)
             es_iters[f.name] = int(fm.n_iter)
             log.info("%s %s: inner best_iter=%d (%.1fs)", label, f.name, fm.n_iter, fm.fit_seconds)
         res.inner_iters = [es_iters[f.name] for f in rd.folds]
@@ -466,6 +694,7 @@ def run_protocol(rd: RunData, spec: dict, params: dict, *, seed: int, threads: i
         t1 = time.perf_counter()
         fm = _fit(rd, spec, params, cols_by_fold[f.name], f.train_eras, counts[f.name], seed=seed, threads=threads)
         res.max_fit_seconds = max(res.max_fit_seconds, time.perf_counter() - t1)
+        _guard(time.perf_counter() - t1)
         pred = _predict_rows(rd, fm, cols_by_fold[f.name], f.test_eras, input_kind)
         if f.name == "forward":
             res.forward, res.forward_blob = pred, fm.blob
@@ -509,35 +738,62 @@ def frozen_counts(rd: RunData, es_iters: dict[str, int]) -> tuple[dict[str, int]
 
 def refit_full(rd: RunData, spec: dict, params: dict, n_iter: int | None, *, seeds: list[int], threads: int,
                prog: Progress | None = None, label: str = "") -> tuple[list[bytes], list[str]]:
-    """Refit on ALL run eras with the frozen count, once per seed; returns (blobs, feature_cols)."""
+    """Refit on ALL training-pool eras under the current universe with the frozen count, once per seed; returns
+    (blobs, feature_cols). Without knobs the pool is exactly the run eras (M1 behaviour)."""
     cols = rd.resolve_features(spec["features"], None, spec["target"])
     blobs = []
     for s in seeds:
         if prog:
             prog.set(f"{label}: full refit seed={s}")
-        fm = _fit(rd, spec, params, cols, rd.eras, n_iter, seed=int(s), threads=threads)
+        fm = _fit(rd, spec, params, cols, rd.pool_eras, n_iter, seed=int(s), threads=threads)
         log.info("%s: full refit seed=%d n_iter=%s (%.1fs, %d bytes)", label, s, fm.n_iter, fm.fit_seconds, len(fm.blob))
         blobs.append(fm.blob)
     return blobs, cols
 
 
-def validation_bench_corr(spec: dict, blobs: list[bytes], cols: list[str], missing_cols: list[str], data_dir: Path) -> float | None:
-    """Mean per-era corr(prediction, v1_sherpa) on the VALIDATION split (exact rho_b; None if files are missing)."""
+def validation_side_metrics(spec: dict, blobs: list[bytes], cols: list[str], missing_cols: list[str], data_dir: Path,
+                            core_proxy_cols: list[str] | None = None) -> dict:
+    """``{"corr_with_bench_val": rho_b, "rho_c": rho_c}`` on the VALIDATION split (INTERFACES section 15).
+
+    ``rho_b`` = mean per-era corr(prediction, v1_sherpa) (exact, no targets needed); ``rho_c`` = mean per-era
+    corr(prediction, core proxy) with the proxy = row mean of ``core_proxy_cols`` ignoring -1. Either is None when the
+    files / columns are missing.
+    """
+    out: dict = {"corr_with_bench_val": None, "rho_c": None}
+    core = [c for c in (core_proxy_cols or [])]
     try:
-        val = data.load_split("validation", data_dir, columns=list(cols) + list(missing_cols))
-        bench = data.load_benchmark("validation", data_dir)
+        val = data.load_split("validation", data_dir, columns=list(dict.fromkeys(list(cols) + list(missing_cols) + core)))
     except FileNotFoundError:
-        return None
+        return out
     X = data.features_linear(val, cols, missing_cols) if spec["input"] == "linear" else data.features_nan(val, cols)
-    pred = np.mean([models.predict_member((spec["family"], b), X) for b in blobs], axis=0)
-    s = metrics.per_era_corr(pd.Series(pred, index=X.index), bench.reindex(X.index), val["era"])
-    return float(s.mean())
+    if spec["family"] in EXTERNAL_FAMILIES:  # mlp: the base columns of the linear frame, selected by name
+        X = X[list(cols)]
+    pred = pd.Series(np.mean([models.predict_member((spec["family"], b), X) for b in blobs], axis=0), index=X.index)
+    try:
+        bench = data.load_benchmark("validation", data_dir)
+        out["corr_with_bench_val"] = float(per_era_spearman_fast(pred, bench.reindex(X.index), val["era"]).mean())
+    except FileNotFoundError:
+        pass
+    if core:
+        cp = features.core_proxy_series(val, core)
+        out["rho_c"] = float(per_era_spearman_fast(pred, cp.reindex(X.index), val["era"]).mean())
+    return out
+
+
+def validation_bench_corr(spec: dict, blobs: list[bytes], cols: list[str], missing_cols: list[str], data_dir: Path) -> float | None:
+    """Back-compat wrapper: rho_b only (see :func:`validation_side_metrics`)."""
+    return validation_side_metrics(spec, blobs, cols, missing_cols, data_dir)["corr_with_bench_val"]
 
 
 def _params_hash(params: dict) -> str:
     import hashlib
 
     return hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+def cell_hash(params: dict, universe: knobsmod.Universe) -> str:
+    """Search/knob cell identity: params AND the training universe (a resumed run never reuses another universe's cell)."""
+    return _params_hash({**params, "__universe__": universe.key()})
 
 
 def _save_protocol(d: Path, res: ProtocolResult) -> None:
@@ -582,14 +838,23 @@ def _load_protocol(d: Path) -> ProtocolResult | None:
 # member driver (search, resume, artifacts)
 # --------------------------------------------------------------------------------------------------
 def _resolve_params(mspec: dict, run_dir: Path) -> dict:
+    """Member params; ``params.best_of: <m>`` resolves to ``search/<m>.adopted.json["best"]`` (the search top-1 when the
+    search was adopted, else <m>'s base params -- INTERFACES section 13). Legacy run dirs without an adoption record
+    fall back to the search top-1."""
     params = dict(mspec.get("params") or {})
     if "best_of" in params:
-        src = run_dir / "search" / f"{params.pop('best_of')}.json"
-        if not src.exists():
-            raise FileNotFoundError(f"{mspec['name']}: params.best_of needs {src} (run the searched member first)")
-        best = json.loads(src.read_text())[0]["params"]
+        src_name = params.pop("best_of")
+        adopted = run_dir / "search" / f"{src_name}.adopted.json"
+        src = run_dir / "search" / f"{src_name}.json"
+        if adopted.exists():
+            rec = json.loads(adopted.read_text())
+            best, how = rec["best"], "adopted search top-1" if rec.get("adopted") else "base params (search not adopted)"
+        elif src.exists():
+            best, how = json.loads(src.read_text())[0]["params"], "search top-1 (no adoption record)"
+        else:
+            raise FileNotFoundError(f"{mspec['name']}: params.best_of needs {adopted} (run the searched member first)")
         params = {**best, **params}
-        log.info("%s: params from search top-1 of %s", mspec["name"], src.stem)
+        log.info("%s: params from %s of %s", mspec["name"], how, src_name)
     return params
 
 
@@ -615,80 +880,233 @@ def member_order(cfg: dict) -> list[dict]:
     return order
 
 
+def _reusable_spec(rd: RunData, name: str, spec_path: Path, oof_path: Path, resume: bool) -> dict | None:
+    """A finished (or timing-dropped) member's spec.json when ``resume`` and its universe matches; else None (retrain)."""
+    if not resume or not spec_path.exists():
+        return None
+    spec = json.loads(spec_path.read_text())
+    if spec.get("universe") != rd.universe.key():
+        log.info("member %s: spec.json universe %s != run universe %s -> retraining", name, spec.get("universe"), rd.universe.key())
+        return None
+    if spec.get("status") == "dropped_timing":
+        log.info("member %s: resumed as dropped_timing (first fit %.0fs > cap) -- the drop is kept", name,
+                 float(spec.get("first_fit_seconds") or 0.0))
+        return spec
+    if spec.get("status") == "done" and oof_path.exists():
+        log.info("member %s: resumed from %s", name, spec_path.parent)
+        return spec
+    return None
+
+
+def per_era_fit_fast(pred: pd.Series, target: pd.Series, era: pd.Series) -> pd.Series:
+    """``metrics.per_era_fit`` semantics (SDK ``fit20`` per era: NaN pairs dropped, < 3 rows or constant predictions ->
+    0.0) computed with the vectorised kernels ``metrics.pad_by_era`` / ``rank_gauss_rows`` / ``fit_rows`` (parity-tested
+    against the SDK to 1e-12 in tests/test_metrics.py and tests/test_train_m2.py); ~50x faster than the per-era SDK loop,
+    which dominated search objectives, knob comparisons and member metrics."""
+    import warnings
+
+    p = pred.reindex(era.index).to_numpy(dtype=np.float64)
+    t = target.reindex(era.index).to_numpy(dtype=np.float64)
+    bad = np.isnan(p) | np.isnan(t)
+    p, t = np.where(bad, np.nan, p), np.where(bad, np.nan, t)
+    P, eras = metrics.pad_by_era(p, era)
+    T, _ = metrics.pad_by_era(t, era)
+    n = np.sum(~np.isnan(P), axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN eras -> 0.0 below
+        Z = metrics.rank_gauss_rows(P)
+        tc = T - np.nanmean(T, axis=1, keepdims=True)
+        f = metrics.fit_rows(Z, tc)
+        sd = np.nanstd(P, axis=1, ddof=1)
+    f = np.where((n < 3) | ~(sd > 0.0) | np.isnan(f), 0.0, f)
+    return pd.Series(f.astype(np.float64), index=pd.Index(eras.astype(np.int32), name="era"), name="fit")
+
+
+def per_era_spearman_fast(pred: pd.Series, target: pd.Series, era: pd.Series) -> pd.Series:
+    """``metrics.per_era_spearman`` semantics (NaN pairs dropped; < 3 rows or a constant side -> 0.0), vectorised:
+    Pearson correlation of the per-era average ranks on a padded ``[n_eras, max_rows]`` array."""
+    from scipy import stats
+
+    p = pred.reindex(era.index).to_numpy(dtype=np.float64)
+    t = target.reindex(era.index).to_numpy(dtype=np.float64)
+    bad = np.isnan(p) | np.isnan(t)
+    p, t = np.where(bad, np.nan, p), np.where(bad, np.nan, t)
+    P, eras = metrics.pad_by_era(p, era)
+    T, _ = metrics.pad_by_era(t, era)
+    nan = np.isnan(P)
+    n = np.sum(~nan, axis=1)
+    rp = np.where(nan, np.nan, stats.rankdata(P, axis=1, method="average", nan_policy="omit"))
+    rt = np.where(nan, np.nan, stats.rankdata(T, axis=1, method="average", nan_policy="omit"))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        dp = np.where(nan, 0.0, rp - np.nanmean(np.where(nan, np.nan, rp), axis=1, keepdims=True))
+        dt = np.where(nan, 0.0, rt - np.nanmean(np.where(nan, np.nan, rt), axis=1, keepdims=True))
+        den = np.sqrt((dp * dp).sum(axis=1) * (dt * dt).sum(axis=1))
+        rho = np.where(den > 0, (dp * dt).sum(axis=1) / np.where(den > 0, den, 1.0), 0.0)
+    rho = np.where((n < 3) | np.isnan(rho), 0.0, rho)
+    return pd.Series(rho.astype(np.float64), index=pd.Index(eras.astype(np.int32), name="era"), name="spearman")
+
+
+def _mean_fit_series(rd: RunData, pred: pd.Series) -> pd.Series:
+    return per_era_fit_fast(pred, rd.df.loc[pred.index, data.PRIMARY_TARGET], rd.era.loc[pred.index])
+
+
+def _average_results(runs: list[ProtocolResult]) -> ProtocolResult:
+    """Equal-weight mean of several cells' OOF/forward predictions; fold blobs and counts of the first cell (top-1)."""
+    base = runs[0]
+    res = ProtocolResult()
+    res.oof = pd.concat([r.oof for r in runs], axis=1).mean(axis=1)
+    res.oof_fold = base.oof_fold
+    res.forward = pd.concat([r.forward for r in runs], axis=1).mean(axis=1) if base.forward is not None else None
+    res.fold_blobs, res.forward_blob = base.fold_blobs, base.forward_blob
+    res.inner_iters, res.frozen_n_iter = base.inner_iters, base.frozen_n_iter
+    res.inner_iter_forward, res.frozen_n_iter_per_fold = base.inner_iter_forward, base.frozen_n_iter_per_fold
+    res.frozen_n_iter_forward, res.count_sources = base.frozen_n_iter_forward, base.count_sources
+    res.fit_seconds = sum(r.fit_seconds for r in runs)
+    res.max_fit_seconds, res.feature_cols = max(r.max_fit_seconds for r in runs), base.feature_cols
+    return res
+
+
+def adoption_decision(paired_cv: dict, forward_gain: float | None, *, p_pos_adopt: float, adopt_gate: bool = True) -> tuple[bool, str]:
+    """INTERFACES section 13: adopt the top-k average iff ``paired_cv.p_pos >= p_pos_adopt`` AND ``forward_gain >= 0``.
+
+    ``adopt_gate: false`` keeps the M1 behaviour (top-k always). Without a forward block only the CV gate applies.
+    """
+    if not adopt_gate:
+        return True, "adopt_gate: false (top-k average always used, M1 behaviour)"
+    p = float(paired_cv["p_pos"])
+    if p < float(p_pos_adopt):
+        return False, f"tie: paired CV p_pos {p:.3f} < {p_pos_adopt} -> base cell (simpler)"
+    if forward_gain is None:
+        return True, f"paired CV p_pos {p:.3f} >= {p_pos_adopt}; no forward block (CV gate only)"
+    if float(forward_gain) < 0.0:
+        return False, f"tie: forward gain {float(forward_gain):+.4f} < 0 -> base cell (simpler)"
+    return True, f"paired CV p_pos {p:.3f} >= {p_pos_adopt} and forward gain {float(forward_gain):+.4f} >= 0"
+
+
+def _knob_cell(rd: RunData, run_dir: Path, name: str, h: str) -> ProtocolResult | None:
+    """The knob decision's cell for this member + universe when its hash matches (saves one protocol run)."""
+    d = run_dir / "knobs" / rd.universe.key()
+    cj = d / "cell.json"
+    if not cj.exists():
+        return None
+    meta = json.loads(cj.read_text())
+    if meta.get("member") != name or meta.get("params_hash") != h:
+        return None
+    res = _load_protocol(d)
+    if res is not None:
+        log.info("%s: base cell reused from the knob decision (%s)", name, d.name)
+    return res
+
+
+def search_member(rd: RunData, mspec: dict, params: dict, cfg: dict, run_dir: Path, *, prog: Progress | None,
+                  cap: float | None) -> tuple[ProtocolResult, list[dict], list[int | None], dict]:
+    """Search + winner's-curse record + adoption gate (INTERFACES sections 6, 8, 13).
+
+    Returns ``(result, params_list, frozen_n_iter per params, gain record)``. The base cell is ALWAYS evaluated; the
+    top-k average is adopted only if the paired CV gate and the forward gain agree, otherwise the member IS the base
+    cell. Writes ``search/<m>.json``, ``search/<m>.gain.json`` and ``search/<m>.adopted.json``.
+    """
+    from stealth import search as searchmod
+
+    name = mspec["name"]
+    search_cfg = cfg["search"][name]
+    seed, threads = int(cfg["run"]["seed"]), int(cfg["run"]["threads"])
+    bs, gates = cfg["bootstrap"], cfg["gates"]
+    sdir = run_dir / "search" / name
+    cache: dict[str, ProtocolResult] = {}
+
+    def cell(p: dict, label: str) -> ProtocolResult:
+        h = cell_hash(p, rd.universe)
+        if h in cache:
+            return cache[h]
+        res = _load_protocol(sdir / h) or _knob_cell(rd, run_dir, name, h)  # trial cache on disk = the resume unit
+        if res is None:
+            res = run_protocol(rd, mspec, p, seed=seed, threads=threads, prog=prog, label=label, max_first_fit_seconds=cap)
+        if not (sdir / h / "result.json").exists():
+            _save_protocol(sdir / h, res)
+        cache[h] = res
+        return res
+
+    def objective(c: dict) -> float:
+        # a grid cell overrides the member's base params; everything not in the grid (bagging, max_bin, ...) stays
+        p = {**params, **c}
+        return float(_mean_fit_series(rd, cell(p, f"{name}[{cell_hash(p, rd.universe)}]").oof).mean())
+
+    n_trials = min(int(search_cfg["n_trials"]), int(gates.get("max_search_trials", DEFAULT_MAX_SEARCH_TRIALS)))
+    results = searchmod.run_search(name, search_cfg["grid"], objective, n_trials=n_trials,
+                                   storage=run_dir / "optuna.db", seed=seed)
+    # search/<name>.json carries the FULL params (base + cell) so params.best_of dependents inherit everything
+    results = [({**params, **c}, v) for c, v in results]
+    write_json(run_dir / "search" / f"{name}.json", [{"params": p, "value": v} for p, v in results])
+    top = searchmod.top_k_params(results, int(search_cfg["top_k"]))
+    runs = [cell(p, name) for p in top]
+    topk_res = _average_results(runs)
+    base_h = cell_hash(params, rd.universe)
+    base_res = cell(params, f"{name}[base]")
+    gain = _search_gain(rd, topk_res, base_res, [cell_hash(p, rd.universe) for p in top], base_h,
+                        float(gates["suspect_gain_over_baseline"]))
+    d = (_mean_fit_series(rd, topk_res.oof) - _mean_fit_series(rd, base_res.oof)).dropna()
+    paired = cvmod.paired_block_bootstrap(d, block=int(bs["block"]), n_boot=int(bs["n_boot"]), seed=int(bs["seed"])).as_dict()
+    adopted, reason = adoption_decision(paired, gain["forward_gain"], p_pos_adopt=float(gates["p_pos_adopt"]),
+                                        adopt_gate=bool(search_cfg.get("adopt_gate", True)))
+    gain.update({"paired_cv": paired, "adopted": adopted, "adopt_reason": reason, "n_trials": n_trials,
+                 "universe": rd.universe.key()})
+    write_json(run_dir / "search" / f"{name}.gain.json", gain)
+    if adopted:
+        res, params_list, frozen = topk_res, top, [r.frozen_n_iter for r in runs]
+    else:
+        res, params_list, frozen = base_res, [params], [base_res.frozen_n_iter]
+    write_json(run_dir / "search" / f"{name}.adopted.json", {"adopted": adopted, "params_list": params_list,
+                                                             "best": params_list[0], "reason": reason})
+    log.info("%s search: top-%d OOF fit %.4f vs base cell %.4f (gain %+.4f, paired p_pos %.3f%s); forward gain %s -> %s", name,
+             len(top), gain["topk_fit"], gain["base_params_fit"], gain["gain"], paired["p_pos"], ", SUSPECT" if gain["suspect"] else "",
+             None if gain["forward_gain"] is None else round(gain["forward_gain"], 4), "ADOPTED" if adopted else f"NOT adopted ({reason})")
+    return res, params_list, frozen, gain
+
+
+def _drop_for_timing(rd: RunData, mspec: dict, spec_path: Path, oof_path: Path, exc: TimingDrop) -> dict:
+    """Write the ``dropped_timing`` spec.json (INTERFACES section 15): no oof file, excluded from assembly and blend."""
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    for stale in [oof_path, *spec_path.parent.glob("*.bin")]:
+        stale.unlink(missing_ok=True)
+    spec = {**mspec, "arm": arm_of(mspec), "status": "dropped_timing", "first_fit_seconds": exc.seconds, "max_fit_seconds_cap": exc.cap,
+            "universe": rd.universe.key(), "dropped_at": _now()}
+    write_json(spec_path, spec)
+    log.warning("member %s: CatBoost dropped (%.0fs > %.0fs cap on its first fit)", mspec["name"], exc.seconds, exc.cap)
+    return spec
+
+
+def _data_dir(cfg: dict) -> Path:
+    d = Path(cfg["run"]["data_dir"])
+    return d if d.is_absolute() else REPO_ROOT / d
+
+
 def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: bool, prog: Progress) -> dict:
-    """Run one member end-to-end; returns its spec.json dict. ``resume`` reuses finished artifacts."""
+    """Run one member end-to-end under ``rd.universe``; returns its spec.json dict. ``resume`` reuses finished
+    artifacts of the SAME universe (and keeps a timing drop)."""
     name = mspec["name"]
     mdir = run_dir / "members" / name
     spec_path, oof_path = mdir / "spec.json", run_dir / f"oof_{name}.parquet"
-    if resume and spec_path.exists() and oof_path.exists():
-        spec = json.loads(spec_path.read_text())
-        if spec.get("status") == "done":
-            log.info("member %s: resumed from %s", name, mdir)
-            return spec
+    spec = _reusable_spec(rd, name, spec_path, oof_path, resume)
+    if spec is not None:
+        return spec
     seed, threads = int(cfg["run"]["seed"]), int(cfg["run"]["threads"])
     seeds = [int(s) for s in (cfg.get("refit") or {}).get("seeds", [0])]
     params = _resolve_params(mspec, run_dir)
-    search_cfg = cfg["search"].get(name)
+    cap = float(cfg["timing"]["catboost_max_fit_seconds"]) if mspec["family"] == "cat" else None
     t0 = time.perf_counter()
-    if search_cfg:
-        from stealth import search as searchmod
-
-        sdir = run_dir / "search" / name
-        cache: dict[str, ProtocolResult] = {}
-
-        def objective(cell: dict) -> float:
-            # a grid cell overrides the member's base params; everything not in the grid (bagging, max_bin, ...) stays
-            p = {**params, **cell}
-            h = _params_hash(p)
-            res = _load_protocol(sdir / h)  # trial cache on disk doubles as the resume unit
-            if res is None:
-                res = run_protocol(rd, mspec, p, seed=seed, threads=threads, prog=prog, label=f"{name}[{h}]")
-                _save_protocol(sdir / h, res)
-            cache[h] = res
-            fit = metrics.per_era_fit(res.oof, rd.df.loc[res.oof.index, data.PRIMARY_TARGET], rd.era.loc[res.oof.index])
-            return float(fit.mean())
-
-        results = searchmod.run_search(name, search_cfg["grid"], objective, n_trials=int(search_cfg["n_trials"]),
-                                       storage=run_dir / "optuna.db", seed=seed)
-        # search/<name>.json carries the FULL params (base + cell) so params.best_of dependents inherit everything
-        results = [({**params, **cell}, v) for cell, v in results]
-        write_json(run_dir / "search" / f"{name}.json", [{"params": p, "value": v} for p, v in results])
-        top = searchmod.top_k_params(results, int(search_cfg["top_k"]))
-        runs = []
-        for p in top:
-            h = _params_hash(p)
-            runs.append(cache.get(h) or _load_protocol(sdir / h) or run_protocol(rd, mspec, p, seed=seed, threads=threads, prog=prog, label=name))
-        base = runs[0]
-        oof = pd.concat([r.oof for r in runs], axis=1).mean(axis=1)
-        forward = pd.concat([r.forward for r in runs], axis=1).mean(axis=1) if base.forward is not None else None
-        res = ProtocolResult()
-        res.oof, res.oof_fold, res.forward = oof, base.oof_fold, forward
-        res.fold_blobs, res.forward_blob = base.fold_blobs, base.forward_blob
-        res.inner_iters, res.frozen_n_iter = base.inner_iters, base.frozen_n_iter
-        res.inner_iter_forward, res.frozen_n_iter_per_fold = base.inner_iter_forward, base.frozen_n_iter_per_fold
-        res.frozen_n_iter_forward, res.count_sources = base.frozen_n_iter_forward, base.count_sources
-        res.fit_seconds = sum(r.fit_seconds for r in runs)
-        res.max_fit_seconds, res.feature_cols = max(r.max_fit_seconds for r in runs), base.feature_cols
-        top_params, frozen_per_cfg = top, [r.frozen_n_iter for r in runs]
-        # winner's-curse check: the BASE params cell is always evaluated; top-k minus base on OOF and forward
-        base_h = _params_hash(params)
-        base_res = cache.get(base_h) or _load_protocol(sdir / base_h)
-        if base_res is None:
-            base_res = run_protocol(rd, mspec, params, seed=seed, threads=threads, prog=prog, label=f"{name}[base]")
-            _save_protocol(sdir / base_h, base_res)
-        search_gain = _search_gain(rd, res, base_res, [_params_hash(p) for p in top], base_h,
-                                   float(cfg["gates"]["suspect_gain_over_baseline"]))
-        write_json(run_dir / "search" / f"{name}.gain.json", search_gain)
-        log.info("%s search gain: top-%d OOF fit %.4f vs base-params cell %.4f (gain %+.4f%s); forward %s vs %s (gain %s)%s", name,
-                 len(top), search_gain["topk_fit"], search_gain["base_params_fit"], search_gain["gain"],
-                 ", SUSPECT" if search_gain["suspect"] else "", search_gain["topk_forward_fit"], search_gain["base_params_forward_fit"],
-                 search_gain["forward_gain"], "" if search_gain["forward_confirms"] in (True, None) else " NOT CONFIRMED on the forward block")
-    else:
-        res = run_protocol(rd, mspec, params, seed=seed, threads=threads, prog=prog, label=name)
-        top_params, frozen_per_cfg = [params], [res.frozen_n_iter]
-        search_gain = None
+    try:
+        if cfg["search"].get(name):
+            res, top_params, frozen_per_cfg, search_gain = search_member(rd, mspec, params, cfg, run_dir, prog=prog, cap=cap)
+        else:
+            res = run_protocol(rd, mspec, params, seed=seed, threads=threads, prog=prog, label=name, max_first_fit_seconds=cap)
+            top_params, frozen_per_cfg, search_gain = [params], [res.frozen_n_iter], None
+    except TimingDrop as exc:
+        return _drop_for_timing(rd, mspec, spec_path, oof_path, exc)
     # artifacts
     mdir.mkdir(parents=True, exist_ok=True)
+    for stale in mdir.glob("*.bin"):  # a non-adopted search may have fewer blobs than an earlier attempt
+        stale.unlink()
     for k, b in enumerate(res.fold_blobs):
         (mdir / f"fold{k}.bin").write_bytes(b)
     if res.forward_blob is not None:
@@ -701,25 +1119,28 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
             fname = f"full_s{rank * len(seeds) + j}.bin"
             (mdir / fname).write_bytes(b)
             full_files.append({"file": fname, "rank": rank, "seed": seeds[j], "n_iter": n_iter})
-    prog.set(f"{name}: validation benchmark correlation")
-    corr = validation_bench_corr(mspec, [(mdir / f["file"]).read_bytes() for f in full_files], full_cols, rd.missing_cols,
-                                 Path(cfg["run"]["data_dir"]) if Path(cfg["run"]["data_dir"]).is_absolute() else REPO_ROOT / cfg["run"]["data_dir"])
+    prog.set(f"{name}: validation benchmark / core-proxy correlation")
+    side = validation_side_metrics(mspec, [(mdir / f["file"]).read_bytes() for f in full_files], full_cols, rd.missing_cols,
+                                   _data_dir(cfg), rd.core_proxy_cols)
     df = pd.DataFrame({"era": rd.era.loc[res.oof.index].astype(np.int32), "fold": res.oof_fold.loc[res.oof.index], "pred": res.oof.astype(np.float32)})
     if res.forward is not None:
         df = pd.concat([df, pd.DataFrame({"era": rd.era.loc[res.forward.index].astype(np.int32), "fold": np.int8(-1),
                                           "pred": res.forward.astype(np.float32)})])
     df.index.name = "id"
     df.to_parquet(oof_path)
-    spec = {**mspec, "params": top_params[0], "top_params": top_params, "feature_cols": full_cols, "all_feature_cols": rd.feature_cols,
-            "missing_cols": rd.missing_cols, "feature_cols_per_fold": res.feature_cols, "inner_iters": res.inner_iters,
-            "inner_iter_forward": res.inner_iter_forward, "frozen_n_iter": res.frozen_n_iter,
+    spec = {**mspec, "arm": arm_of(mspec), "params": top_params[0], "top_params": top_params, "feature_cols": full_cols,
+            "all_feature_cols": rd.feature_cols, "missing_cols": rd.missing_cols, "feature_cols_per_fold": res.feature_cols,
+            "inner_iters": res.inner_iters, "inner_iter_forward": res.inner_iter_forward, "frozen_n_iter": res.frozen_n_iter,
             "frozen_n_iter_per_fold": res.frozen_n_iter_per_fold, "frozen_n_iter_forward": res.frozen_n_iter_forward,
             "count_sources": res.count_sources, "frozen_n_iter_per_config": frozen_per_cfg, "fit_seconds": res.fit_seconds,
             "max_fit_seconds": res.max_fit_seconds, "member_seconds": time.perf_counter() - t0, "full_blobs": full_files,
-            "corr_with_bench_val": corr, "search_gain": search_gain, "status": "done"}
+            "corr_with_bench_val": side["corr_with_bench_val"], "rho_c": side["rho_c"], "search_gain": search_gain,
+            "search_adopted": None if search_gain is None else bool(search_gain["adopted"]),
+            "universe": rd.universe.key(), "universe_dict": rd.universe.to_dict(), "status": "done"}
     write_json(spec_path, spec)
-    log.info("member %s done in %.0fs (frozen n_iter=%s, rho_b(val)=%s)", name, spec["member_seconds"], res.frozen_n_iter,
-             None if corr is None else round(corr, 4))
+    log.info("member %s done in %.0fs (frozen n_iter=%s, rho_b(val)=%s, rho_c(val)=%s)", name, spec["member_seconds"], res.frozen_n_iter,
+             None if side["corr_with_bench_val"] is None else round(side["corr_with_bench_val"], 4),
+             None if side["rho_c"] is None else round(side["rho_c"], 4))
     return spec
 
 
@@ -730,9 +1151,7 @@ def _search_gain(rd: RunData, topk: ProtocolResult, base: ProtocolResult, top_ha
     Hashes identify grid cells without exposing hyperparameter values (the file lands under artifacts/ anyway).
     """
     def _mean_fit(pred: pd.Series | None) -> float | None:
-        if pred is None:
-            return None
-        return float(metrics.per_era_fit(pred, rd.df.loc[pred.index, data.PRIMARY_TARGET], rd.era.loc[pred.index]).mean())
+        return None if pred is None else float(_mean_fit_series(rd, pred).mean())
 
     topk_fit, base_fit = _mean_fit(topk.oof), _mean_fit(base.oof)
     topk_fwd, base_fwd = _mean_fit(topk.forward), _mean_fit(base.forward)
@@ -742,6 +1161,83 @@ def _search_gain(rd: RunData, topk: ProtocolResult, base: ProtocolResult, top_ha
             "topk_forward_fit": topk_fwd, "base_params_forward_fit": base_fwd, "forward_gain": fwd_gain,
             "forward_confirms": None if fwd_gain is None else bool(fwd_gain >= 0.0),
             "topk_cells": top_hashes, "base_cell": base_hash, "base_cell_in_topk": base_hash in top_hashes}
+
+
+# --------------------------------------------------------------------------------------------------
+# external members (family mlp) + folds_eras.json (INTERFACES section 14)
+# --------------------------------------------------------------------------------------------------
+def count_sources(rd: RunData) -> dict[str, list[str]]:
+    """Fold name -> the folds whose inner early stopping may set its frozen count (same rule as :func:`frozen_counts`)."""
+    out: dict[str, list[str]] = {}
+    for f in rd.folds:
+        out[f.name] = [rd.folds[j].name for j in cvmod.independent_inner_folds(f, rd.folds, min_gap=rd.min_gap)]
+    if rd.forward is not None:
+        fw = rd.forward
+        out[fw.name] = [rd.folds[j].name for j in cvmod.independent_inner_folds(fw, rd.folds, min_gap=rd.min_gap)] + [fw.name]
+    return out
+
+
+def folds_eras_doc(rd: RunData) -> dict:
+    """``folds_eras.json``: the exact fold era lists (pool-extended; the universe's row mask applies on top, exactly as in
+    train.py's ``_fit_rows``), count sources and the full-refit eras, for ``scripts/mlp_train.py``."""
+    src = count_sources(rd)
+
+    def fold_doc(f: Fold) -> dict:
+        return {"name": f.name, "train_eras": [int(e) for e in f.train_eras], "test_eras": [int(e) for e in f.test_eras],
+                "inner_train_eras": [int(e) for e in f.inner_train_eras], "inner_val_eras": [int(e) for e in f.inner_val_eras],
+                "count_sources": src[f.name]}
+
+    return {"universe": rd.universe.to_dict(), "universe_key": rd.universe.key(), "scoring_min_era": int(rd.scoring_min_era),
+            "folds": [fold_doc(f) for f in rd.folds], "forward": fold_doc(rd.forward) if rd.forward is not None else None,
+            "full_train_eras": [int(e) for e in rd.pool_eras], "full_refit_count": "median over CV folds' inner best iterations",
+            "min_gap": int(rd.min_gap)}
+
+
+def _external_blobs(mdir: Path, spec: dict) -> list[bytes]:
+    files = []
+    for f in spec.get("full_blobs") or []:
+        files.append(f["file"] if isinstance(f, dict) else str(f))
+    if not files:
+        files = sorted(p.name for p in mdir.glob("full_s*.bin"))
+    return [(mdir / f).read_bytes() for f in files]
+
+
+def load_external_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path) -> tuple[dict | None, str | None]:
+    """``(spec, None)`` for a finished external member of THIS universe, else ``(None, reason)`` (it stays pending).
+
+    Finished = ``members/<m>/spec.json`` with ``status: done``, ``universe == rd.universe.key()`` and ``oof_<m>.parquet``.
+    Missing ``corr_with_bench_val`` / ``rho_c`` are computed via ``models.predict_member`` when the family module can
+    load the blobs (best effort: a failure only logs a WARNING).
+    """
+    name = mspec["name"]
+    mdir = run_dir / "members" / name
+    spec_path, oof_path = mdir / "spec.json", run_dir / f"oof_{name}.parquet"
+    if not spec_path.exists():
+        return None, "no members/<m>/spec.json yet"
+    spec = json.loads(spec_path.read_text())
+    if spec.get("status") != "done":
+        return None, f"spec status {spec.get('status')!r}"
+    if spec.get("universe") != rd.universe.key():
+        return None, f"spec universe {spec.get('universe')!r} != run universe {rd.universe.key()!r}"
+    if not oof_path.exists():
+        return None, f"{oof_path.name} missing"
+    for k in ("name", "family", "target", "group", "input", "features"):
+        spec.setdefault(k, mspec[k])
+    spec.setdefault("arm", arm_of(mspec))
+    spec.setdefault("feature_cols", list(rd.feature_cols))
+    spec.setdefault("missing_cols", list(rd.missing_cols))
+    if spec.get("corr_with_bench_val") is None or spec.get("rho_c") is None:
+        try:
+            side = validation_side_metrics(spec, _external_blobs(mdir, spec), list(spec["feature_cols"]), list(spec["missing_cols"]),
+                                           _data_dir(cfg), rd.core_proxy_cols)
+            for k, v in side.items():
+                if spec.get(k) is None:
+                    spec[k] = v
+            write_json(spec_path, spec)
+        except Exception as exc:  # noqa: BLE001 - side metrics are informational
+            log.warning("external member %s: validation side metrics unavailable (%s)", name, exc)
+    log.info("external member %s: loaded (%s)", name, spec_path)
+    return spec, None
 
 
 # --------------------------------------------------------------------------------------------------
@@ -781,6 +1277,17 @@ def assemble_oof(rd: RunData, names: list[str], run_dir: Path) -> tuple[pd.DataF
     return oof, fwd
 
 
+def knobs_summary(doc: dict) -> dict:
+    """Config-name-level summary of ``knobs.json`` for metrics.json (keys, diffs, p_pos, pass; no hyperparameters)."""
+    if doc.get("status") != "done":
+        return {"status": doc.get("status", "none"), "chosen": (doc.get("chosen") or {}).get("key"), "candidates": []}
+    keep = ("key", "dimension", "fit_cv", "fit_fwd", "diff_fwd", "diff_se_fwd", "p_pos_fwd", "diff_cv_indep", "holm_rank",
+            "holm_threshold", "pass", "reason", "equivalent_to_default")
+    return {"status": "done", "member": doc.get("member"), "alpha_total": doc.get("alpha_total"), "default": doc.get("default"),
+            "chosen": doc["chosen"]["key"], "winners": doc.get("winners"),
+            "candidates": [{k: c.get(k) for k in keep} for c in doc.get("candidates", [])]}
+
+
 def baseline_fit(cfg: dict, member_fit_means: dict[str, float]) -> tuple[float | None, str]:
     """``(baseline fit20, label)`` for the suspect flag: ``gates.baseline_fit`` (a FIXED M1 number recorded from an unsearched
     run) when set, else the in-run :func:`baseline_member`'s OOF mean. Returns ``(None, label)`` when neither exists.
@@ -816,9 +1323,9 @@ def member_metrics(cfg: dict, oof: pd.DataFrame, fwd: pd.DataFrame | None, specs
     leak = "pass"
     for n, spec in specs.items():
         pred = oof[f"m__{n}"]
-        fit = metrics.per_era_fit(pred, y, era)
+        fit = per_era_fit_fast(pred, y, era)
         fits[n] = fit
-        sp = metrics.per_era_spearman(pred, y, era)
+        sp = per_era_spearman_fast(pred, y, era)
         try:
             metrics.leak_check(sp, float(gates["leak_spearman"]))
         except RuntimeError as exc:
@@ -827,12 +1334,13 @@ def member_metrics(cfg: dict, oof: pd.DataFrame, fwd: pd.DataFrame | None, specs
             log.error("%s", exc)
         fwd_fit = None
         if fwd is not None:
-            fwd_fit = float(metrics.per_era_fit(fwd[f"m__{n}"], fwd[data.PRIMARY_TARGET], fwd["era"]).mean())
+            fwd_fit = float(per_era_fit_fast(fwd[f"m__{n}"], fwd[data.PRIMARY_TARGET], fwd["era"]).mean())
         out[n] = {"fit": metrics.summarise(fit, block=int(bs["block"]), n_boot=int(bs["n_boot"]), seed=int(bs["seed"])),
                   "spearman_mean": float(sp.mean()), "forward_fit": fwd_fit, "corr_with_bench_val": spec.get("corr_with_bench_val"),
                   "n_iter": spec.get("frozen_n_iter"), "inner_iters": spec.get("inner_iters"), "fit_seconds": spec.get("fit_seconds"),
                   "max_fit_seconds": spec.get("max_fit_seconds"), "group": spec["group"], "target": spec["target"], "family": spec["family"],
-                  "suspect": False}
+                  "arm": spec.get("arm") or arm_of(spec), "rho_c": spec.get("rho_c"), "universe": spec.get("universe"),
+                  "search_adopted": spec.get("search_adopted"), "suspect": False}
         if spec["family"] == "cat" and spec.get("max_fit_seconds", 0) > float(cfg["timing"]["catboost_max_fit_seconds"]):
             notes.append(f"{n}: catboost fit {spec['max_fit_seconds']:.0f}s > {cfg['timing']['catboost_max_fit_seconds']}s -> drop candidate")
         sg = spec.get("search_gain")
@@ -894,17 +1402,42 @@ def train_run(cfg: dict, run_id: str, *, resume: bool = False, config_path: Path
             write_json(run_dir / "folds.json", rd.folds_summary())
             write_json(run_dir / "features.json", {"feature_cols": rd.feature_cols, "missing_cols": rd.missing_cols,
                                                    "core_proxy_cols": rd.core_proxy_cols, "surrogate": rd.surrogate.to_dict()})
+            prog.set("deciding the training universe (knobs)")
+            universe, knobs_doc = knobsmod.select_universe(rd, cfg, run_dir, prog=prog)
+            rd.universe = universe
+            write_json(run_dir / "folds_eras.json", folds_eras_doc(rd))
+            result["universe"] = {"key": universe.key(), **universe.to_dict()}
+            result["knobs"] = knobs_summary(knobs_doc)
             specs: dict[str, dict] = {}
+            dropped: list[dict] = []
+            run_notes: list[str] = []
             order = member_order(cfg)
             for i, m in enumerate(order):
                 prog.set(f"member {i + 1}/{len(order)} {m['name']}")
-                specs[m["name"]] = train_member(rd, m, cfg, run_dir, resume=resume, prog=prog)
-                result["timings"]["per_member_fit_s"][m["name"]] = specs[m["name"]].get("fit_seconds")
+                if m["family"] in EXTERNAL_FAMILIES:
+                    spec, why = load_external_member(rd, m, cfg, run_dir)
+                    if spec is None:
+                        msg = f"external member {m['name']} pending: run scripts/mlp_train.py --run-id {run_id} ({why})"
+                        log.warning("%s", msg)
+                        run_notes.append(msg)
+                        dropped.append({"member": m["name"], "status": "pending_external", "reason": why})
+                        continue
+                else:
+                    spec = train_member(rd, m, cfg, run_dir, resume=resume, prog=prog)
+                if spec.get("status") == "dropped_timing":
+                    cap = float(cfg["timing"]["catboost_max_fit_seconds"])
+                    run_notes.append(f"{m['name']}: CatBoost dropped ({float(spec['first_fit_seconds']):.0f}s > {cap:.0f}s cap)")
+                    dropped.append({"member": m["name"], "status": "dropped_timing", "first_fit_seconds": spec["first_fit_seconds"]})
+                    continue
+                specs[m["name"]] = spec
+                result["timings"]["per_member_fit_s"][m["name"]] = spec.get("fit_seconds")
                 result["timings"]["total_s"] = time.perf_counter() - t0
                 write_json(mpath, result)
+            result["dropped"] = dropped
             prog.set("assembling OOF + metrics")
             oof, fwd = assemble_oof(rd, list(specs), run_dir)
             members_m, paired, leak, notes = member_metrics(cfg, oof, fwd, specs)
+            notes = run_notes + notes
         result.update({"members": members_m, "paired": paired, "leak_check": leak, "notes": notes,
                        "frozen_n_iter": {n: s.get("frozen_n_iter") for n, s in specs.items()},
                        "frozen_n_iter_per_fold": {n: s.get("frozen_n_iter_per_fold") for n, s in specs.items()},

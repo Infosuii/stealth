@@ -10,7 +10,15 @@ Contract (docs/INTERFACES.md section 9, docs/PLAN.md "Packaging"):
 * ``write_manifest`` writes ``<stem>.manifest.json`` and ``<stem>.pkl.sha256`` next to the pickle. The
   ``.pkl`` itself is never committed; the manifest and sha256 are.
 
-Defaults: ``p_b`` 0.5 (cap 0.75), ``p_c`` 0.25 (cap 0.5) when ``blend.json`` carries none.
+Neutralisation constants (docs/INTERFACES.md section 18), resolved in this order and recorded as ``p_source``:
+explicit ``p_b``/``p_c`` arguments (``"override"``, WARNING) > ``blend.json["neutralisation"]`` with
+``p_source: "simulation"`` (``"simulation"``, the frozen staking-aware choice) > ``blend.json`` ``p_b``/``p_c``
+(``"config"``) > ``DEFAULT_P_B``/``DEFAULT_P_C`` (``"default"``, WARNING). ``require_frozen=True`` (CLI
+``--require-frozen``) refuses anything but ``"simulation"``. Caps 0.75 / 0.5 always apply.
+
+The fold-blob fallback (no ``full_s*.bin``) is refused for a member whose per-fold feature lists differ from its
+``feature_cols`` (``sharpe_subset``): averaging fold models over one column list would feed them wrong columns.
+``assert_plain`` guarantees the bundle holds only plain Python values before it is pickled.
 """
 from __future__ import annotations
 
@@ -26,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from stealth import VERSION
-from stealth._runtime import P_B_CAP, P_C_CAP, DEFAULT_MIN_BENCH_COVERAGE
+from stealth._runtime import DEFAULT_MIN_BENCH_COVERAGE, LINEAR_FAMILIES, P_B_CAP, P_C_CAP, SUPPORTED_FAMILIES
 
 log = logging.getLogger("stealth.bundle")  # explicit: under `python -m` __name__ is __main__
 
@@ -40,6 +48,8 @@ PKL_PYTHON = (3, 11)  # the python_version declared at upload (predict.PKL_PYTHO
 MANIFEST_LIBS = ("lightgbm", "xgboost", "catboost", "scikit-learn", "numpy", "pandas", "scipy", "cloudpickle")
 _FULL_RE = re.compile(r"^full_s(\d+)\.bin$")
 _FOLD_RE = re.compile(r"^fold(\d+)\.bin$")
+P_SOURCES = ("override", "simulation", "config", "default")
+_PLAIN_SCALARS = (str, bytes, bool, int, float, type(None))
 
 
 # --------------------------------------------------------------------------------------------------
@@ -86,6 +96,99 @@ def _clamp(value: float | None, default: float, cap: float, name: str) -> float:
         log.warning("%s=%.3f exceeds the hard cap %.2f; capping", name, v, cap)
         v = cap
     return v
+
+
+def assert_plain(obj: object, path: str = "bundle") -> None:
+    """Raise ``TypeError`` unless ``obj`` is built only from dict (str keys) / list / str / bytes / int / float / bool /
+    None -- EXACT types, so numpy scalars/arrays, tuples, tensors or any other object are refused before pickling."""
+    t = type(obj)
+    if t in _PLAIN_SCALARS:
+        return
+    if t is dict:
+        for k, v in obj.items():  # type: ignore[union-attr]
+            if type(k) is not str:
+                raise TypeError(f"{path}: dict key {k!r} is {type(k).__name__}, not str")
+            assert_plain(v, f"{path}.{k}")
+        return
+    if t is list:
+        for i, v in enumerate(obj):  # type: ignore[arg-type]
+            assert_plain(v, f"{path}[{i}]")
+        return
+    raise TypeError(f"{path}: {t.__module__}.{t.__name__} is not a plain value (dict/list/str/bytes/int/float/bool/None)")
+
+
+def resolve_p(blend: dict, p_b: float | None = None, p_c: float | None = None) -> tuple[float, float, str, str]:
+    """``(p_b, p_c, p_source, reason)`` before capping, by the precedence in the module docstring.
+
+    An override of only one constant keeps the other from the next source down; ``p_source`` is then still
+    ``"override"`` (the pair as a whole was not frozen by the simulation).
+    """
+    neu = blend.get("neutralisation") if isinstance(blend.get("neutralisation"), dict) else {}
+    # keyed on p_source, never on the mere presence of `neutralisation` (blend.py always writes it; "config" when
+    # blend.neutralisation.select is false). Fallback: the top-level p_source mirror.
+    source = neu.get("p_source") or blend.get("p_source")
+    frozen = None
+    if source == "simulation":
+        sb = neu.get("p_b") if neu.get("p_b") is not None else blend.get("p_b")
+        sc = neu.get("p_c") if neu.get("p_c") is not None else blend.get("p_c")
+        if sb is not None and sc is not None:
+            frozen = (float(sb), float(sc))
+        top = (blend.get("p_b"), blend.get("p_c"))
+        if frozen and top[0] is not None and top[1] is not None and (abs(float(top[0]) - frozen[0]) > 1e-12 or abs(float(top[1]) - frozen[1]) > 1e-12):
+            log.warning("blend.json top-level p_b/p_c %s differ from neutralisation %s; using the neutralisation (simulation) values",
+                        top, frozen)
+    cfg_b = blend.get("p_b") if blend.get("p_b") is not None else neu.get("p_b")
+    cfg_c = blend.get("p_c") if blend.get("p_c") is not None else neu.get("p_c")
+    if frozen is not None:
+        base = (frozen[0], frozen[1], "simulation", "blend.json neutralisation (frozen from the regime simulation)")
+    elif cfg_b is not None or cfg_c is not None:
+        cb = float(cfg_b) if cfg_b is not None else DEFAULT_P_B
+        cc = float(cfg_c) if cfg_c is not None else DEFAULT_P_C
+        why = "blend.json p_b/p_c (config constants, not frozen by the simulation)"
+        if cfg_b is None or cfg_c is None:
+            log.warning("blend.json carries only one of p_b/p_c; the other falls back to its default")
+            why += "; one of them defaulted"
+        base = (cb, cc, "config", why)
+    else:
+        log.warning("blend.json has no neutralisation and no p_b/p_c; using defaults p_b=%.2f p_c=%.2f", DEFAULT_P_B, DEFAULT_P_C)
+        base = (DEFAULT_P_B, DEFAULT_P_C, "default", "no neutralisation constants in blend.json -> module defaults")
+    if p_b is None and p_c is None:
+        return base
+    rb = float(p_b) if p_b is not None else base[0]
+    rc = float(p_c) if p_c is not None else base[1]
+    log.warning("neutralisation OVERRIDE p_b=%s p_c=%s (would have been %.3f / %.3f from %s); never ship an override without a handoff "
+                "that says why", p_b, p_c, base[0], base[1], base[2])
+    return rb, rc, "override", f"explicit override (p_b={p_b}, p_c={p_c}) of {base[2]} values {base[0]:g}/{base[1]:g}"
+
+
+def member_arm(name: str, spec: dict, blend: dict) -> str:
+    """``spec["arm"]`` > ``blend.json["arms"][name]`` > ``"aux"`` for group aux > the member name (INTERFACES section 11)."""
+    if spec.get("arm"):
+        return str(spec["arm"])
+    arms = blend.get("arms") or {}
+    if isinstance(arms, dict) and arms.get(name):
+        return str(arms[name])
+    return "aux" if spec.get("group") == "aux" else str(name)
+
+
+def check_fold_fallback(name: str, spec: dict, n_blobs: int) -> None:
+    """Refuse averaging ``fold<k>.bin`` under ONE column list when the per-fold lists differ (``sharpe_subset``).
+
+    ``spec["feature_cols_per_fold"]`` is ``{fold_name: [cols]}`` (train.py) or a list per fold; only the CV folds
+    whose blobs are used (``fold0..fold{n_blobs-1}``) are compared with ``spec["feature_cols"]``.
+    """
+    per_fold = spec.get("feature_cols_per_fold")
+    if not per_fold:
+        return
+    cols = [str(c) for c in spec["feature_cols"]]
+    if isinstance(per_fold, dict):
+        lists = [(f"fold{k}", per_fold.get(f"fold{k}")) for k in range(n_blobs)]
+    else:
+        lists = [(f"fold{k}", per_fold[k] if k < len(per_fold) else None) for k in range(n_blobs)]
+    differ = [fname for fname, lst in lists if lst is not None and [str(c) for c in lst] != cols]
+    if differ:
+        raise ValueError(f"member {name!r}: no full_s*.bin refit and the fold feature lists of {differ} differ from feature_cols "
+                         "(sharpe_subset); refusing the fold-blob fallback -- re-run `stealth.train --resume` to write the full refits")
 
 
 def member_blobs(member_dir: Path) -> tuple[list[bytes], str]:
@@ -158,49 +261,86 @@ def _resolve_feature_cols(run_dir: Path, members: list[dict]) -> tuple[list[str]
 # --------------------------------------------------------------------------------------------------
 # bundle
 # --------------------------------------------------------------------------------------------------
-def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None = None, version: str = VERSION) -> dict:
+def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None = None, version: str = VERSION,
+                 require_frozen: bool = False, members: list[str] | None = None) -> dict:
     """Assemble the bundle dict ``stealth._runtime.make_predict`` consumes from ``artifacts/<run_id>``.
 
-    Reads ``blend.json`` (``weights``, ``p_b``, ``p_c``, ``core_proxy_cols``) and each positively weighted
-    member's ``spec.json`` + bytes. ``p_b`` / ``p_c`` arguments override blend.json; both are capped
-    (0.75 / 0.5). Weights are renormalised to sum to 1 over the members actually bundled.
+    Reads ``blend.json`` (``weights``, ``rule``, ``neutralisation``/``p_b``/``p_c``, ``core_proxy_cols``, ``arms``,
+    ``final.admitted_arms``) and each positively weighted member's ``spec.json`` + bytes. ``p_b`` / ``p_c`` resolve
+    via :func:`resolve_p` (``require_frozen`` -> ``ValueError`` unless the source is the simulation); both are capped
+    (0.75 / 0.5). Weights are renormalised to sum to 1 over the members actually bundled. The result passes
+    :func:`assert_plain` and ``make_predict`` (subset / family checks) before it is returned.
+
+    ``members`` (CLI ``--members a b``) bundles exactly that subset -- e.g. the single-LGBM baseline for a diag
+    upload: blend.json weights renormalised over the subset when every requested member has a positive weight, else
+    EQUAL weights (WARNING; e.g. a member the ladder did not admit). ``weights_source`` / ``member_subset`` record it.
     """
+    from stealth._runtime import make_predict
+
     run_dir = Path(run_dir)
     blend_path = run_dir / "blend.json"
     if not blend_path.exists():
         raise FileNotFoundError(f"{blend_path} missing; run `python -m stealth.blend --run-id {run_dir.name}` first")
     blend = json.loads(blend_path.read_text())
+    rb, rc, p_source, p_reason = resolve_p(blend, p_b, p_c)
+    if require_frozen and p_source != "simulation":
+        raise ValueError(f"--require-frozen: neutralisation constants come from {p_source!r} ({p_reason}), not from the regime "
+                         "simulation; run `python -m stealth.blend` with blend.neutralisation.select: true and drop any --p-b/--p-c")
     weights_in: dict[str, float] = {str(k): float(v) for k, v in blend.get("weights", {}).items()}
-    kept = {k: v for k, v in weights_in.items() if v > 0.0}
-    if not kept:
-        raise ValueError(f"{blend_path}: no member with positive weight")
-    dropped = sorted(set(weights_in) - set(kept))
-    if dropped:
-        log.info("dropping zero-weight members: %s", dropped)
+    subset = None if members is None else list(dict.fromkeys(str(m) for m in members))
+    if subset is not None:
+        if not subset:
+            raise ValueError("--members: empty member list")
+        absent = [m for m in subset if not (run_dir / "members" / m / "spec.json").exists()]
+        if absent:
+            raise ValueError(f"--members: no members/<m>/spec.json for {absent} in {run_dir}")
+        if all(weights_in.get(m, 0.0) > 0.0 for m in subset):
+            kept, weights_source = {m: weights_in[m] for m in subset}, "blend (member subset, renormalised)"
+        else:
+            kept, weights_source = {m: 1.0 for m in subset}, "equal (member subset; not every member has a blend weight)"
+            log.warning("--members %s: not every member has a positive blend.json weight (%s); using EQUAL weights", subset,
+                        {m: weights_in.get(m) for m in subset})
+        log.info("member subset %s (blend weights ignored for %s)", subset, sorted(set(weights_in) - set(subset)))
+    else:
+        kept, weights_source = {k: v for k, v in weights_in.items() if v > 0.0}, "blend"
+        if not kept:
+            raise ValueError(f"{blend_path}: no member with positive weight")
+        dropped = sorted(set(weights_in) - set(kept))
+        if dropped:
+            log.info("dropping zero-weight members: %s", dropped)
 
-    members: list[dict] = []
+    members_out: list[dict] = []
     for name in sorted(kept):
         mdir = run_dir / "members" / name
         spec_path = mdir / "spec.json"
         if not spec_path.exists():
             raise FileNotFoundError(f"{spec_path} missing for weighted member {name!r}")
         spec = json.loads(spec_path.read_text())
+        family = str(spec["family"])
+        if family not in SUPPORTED_FAMILIES:
+            raise ValueError(f"member {name!r}: family {family!r} is not supported by the runtime {SUPPORTED_FAMILIES}")
+        if spec.get("status") not in (None, "done"):
+            raise ValueError(f"member {name!r}: spec status {spec.get('status')!r} is not 'done' but blend.json weights it")
         blobs, source = member_blobs(mdir)
-        members.append({
+        if source == "folds":
+            check_fold_fallback(name, spec, len(blobs))
+            log.warning("member %s: no full refit; bundling the %d fold models (averaged)", name, len(blobs))
+        members_out.append({
             "name": name,
-            "family": str(spec["family"]),
+            "family": family,
             "target": str(spec.get("target", "target_everest")),
             "group": str(spec.get("group", "everest")),
-            "input": str(spec.get("input", "linear" if spec["family"] == "ridge" else "nan")),
+            "arm": member_arm(name, spec, blend),
+            "input": str(spec.get("input", "linear" if family in LINEAR_FAMILIES else "nan")),
             "feature_cols": [str(c) for c in spec["feature_cols"]],
             "blobs": blobs,
             "spec": spec,
             "_source": source,
         })
-        log.info("member %s: family=%s input=%s %d blobs (%s), %d features", name, spec["family"],
-                 members[-1]["input"], len(blobs), source, len(spec["feature_cols"]))
+        log.info("member %s: family=%s arm=%s input=%s %d blobs (%s), %d features", name, family, members_out[-1]["arm"],
+                 members_out[-1]["input"], len(blobs), source, len(spec["feature_cols"]))
 
-    feature_cols, missing_cols = _resolve_feature_cols(run_dir, members)
+    feature_cols, missing_cols = _resolve_feature_cols(run_dir, members_out)
     if len(feature_cols) != N_FEATURES_EXPECTED:
         log.warning("bundle has %d feature columns (expected %d)", len(feature_cols), N_FEATURES_EXPECTED)
     total = sum(kept.values())
@@ -208,6 +348,10 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
     core_cols = [str(c) for c in blend.get("core_proxy_cols", [])]
     if not core_cols:
         log.warning("blend.json has no core_proxy_cols; core-proxy neutralisation will be skipped")
+    final = blend.get("final") if isinstance(blend.get("final"), dict) else {}
+    admitted_arms = [str(a) for a in (final.get("admitted_arms") or [])]
+    if subset is not None or not admitted_arms:  # a member subset ships only its own arms
+        admitted_arms = list(dict.fromkeys(m["arm"] for m in members_out))
     bundle = {
         "version": version,
         "git_sha": git_sha(),
@@ -215,14 +359,24 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
         "run_id": run_dir.name,
         "feature_cols": feature_cols,
         "missing_cols": missing_cols,
-        "members": [{k: v for k, v in m.items() if k not in ("spec", "_source")} for m in members],
+        "members": [{k: v for k, v in m.items() if k not in ("spec", "_source")} for m in members_out],
         "weights": weights,
-        "p_b": _clamp(p_b if p_b is not None else blend.get("p_b"), DEFAULT_P_B, P_B_CAP, "p_b"),
-        "p_c": _clamp(p_c if p_c is not None else blend.get("p_c"), DEFAULT_P_C, P_C_CAP, "p_c"),
+        "p_b": _clamp(rb, DEFAULT_P_B, P_B_CAP, "p_b"),
+        "p_c": _clamp(rc, DEFAULT_P_C, P_C_CAP, "p_c"),
+        "p_source": p_source,
+        "p_reason": p_reason,
+        "blend_rule": str(blend.get("rule", "ew")),
+        "admitted_arms": admitted_arms,
         "core_proxy_cols": core_cols,
         "min_bench_coverage": DEFAULT_MIN_BENCH_COVERAGE,
-        "blob_source": {m["name"]: m["_source"] for m in members},
+        "blob_source": {m["name"]: m["_source"] for m in members_out},
+        "member_subset": subset,
+        "weights_source": weights_source,
     }
+    assert_plain(bundle)
+    make_predict(bundle)  # fail here (subset / family / input checks), not inside the lane
+    log.info("neutralisation: p_b=%.3f p_c=%.3f p_source=%s (%s); rule=%s; arms=%s", bundle["p_b"], bundle["p_c"], p_source,
+             p_reason, bundle["blend_rule"], admitted_arms)
     return bundle
 
 
@@ -244,6 +398,7 @@ def write_pickle(bundle: dict, out: Path) -> str:
                            f"this interpreter is {platform.python_version()} -- use the train venv")
     if "torch" in sys.modules:
         raise RuntimeError("torch is loaded in this interpreter; build the pickle from the train venv")
+    assert_plain(bundle)
     predict = runtime.make_predict(bundle)
     cloudpickle.register_pickle_by_value(runtime)
     cloudpickle.register_pickle_by_value(stealth)
@@ -292,10 +447,16 @@ def write_manifest(out_pkl: Path, bundle: dict, sha256: str) -> Path:
         "python": platform.python_version(),
         "libs": lib_versions(),
         "members": [{"name": m["name"], "family": m["family"], "target": m["target"], "group": m["group"],
-                     "n_blobs": len(m["blobs"])} for m in bundle["members"]],
+                     "arm": m.get("arm", "aux" if m.get("group") == "aux" else m["name"]), "input": m.get("input", "nan"),
+                     "n_features": len(m["feature_cols"]), "n_blobs": len(m["blobs"])} for m in bundle["members"]],
         "weights": bundle["weights"],
         "p_b": bundle["p_b"],
         "p_c": bundle["p_c"],
+        "p_source": bundle.get("p_source"),
+        "blend_rule": bundle.get("blend_rule"),
+        "admitted_arms": bundle.get("admitted_arms"),
+        "member_subset": bundle.get("member_subset"),
+        "weights_source": bundle.get("weights_source"),
         "core_proxy_cols": bundle.get("core_proxy_cols", []),
         "n_features": len(bundle["feature_cols"]),
         "pkl_check": previous.get("pkl_check") if same else None,
@@ -308,34 +469,41 @@ def write_manifest(out_pkl: Path, bundle: dict, sha256: str) -> Path:
     return mpath
 
 
-def build_and_write(run_dir: Path, out: Path, *, p_b: float | None = None, p_c: float | None = None) -> tuple[dict, str, Path]:
+def build_and_write(run_dir: Path, out: Path, *, p_b: float | None = None, p_c: float | None = None,
+                    require_frozen: bool = False, members: list[str] | None = None) -> tuple[dict, str, Path]:
     """build_bundle -> write_pickle -> write_manifest; returns (bundle, sha256, manifest_path)."""
-    bundle = build_bundle(run_dir, p_b=p_b, p_c=p_c)
+    bundle = build_bundle(run_dir, p_b=p_b, p_c=p_c, require_frozen=require_frozen, members=members)
     sha = write_pickle(bundle, out)
     mpath = write_manifest(out, bundle, sha)
     return bundle, sha, mpath
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m stealth.bundle --run-id ID --out models/stealth_v1.pkl [--p-b x] [--p-c y] [--artifacts-dir D]``."""
+    """``python -m stealth.bundle --run-id ID --out models/stealth_v1.pkl [--p-b x] [--p-c y] [--require-frozen]
+    [--members m1 m2 ...] [--artifacts-dir D]``. Exit 0 ok, 1 error (including a --require-frozen refusal)."""
     parser = argparse.ArgumentParser(prog="python -m stealth.bundle", description=__doc__.splitlines()[0])
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--out", type=Path, required=True, help="output .pkl path (e.g. models/stealth_v1.pkl)")
     parser.add_argument("--p-b", type=float, default=None, help="benchmark neutralisation strength (cap 0.75)")
     parser.add_argument("--p-c", type=float, default=None, help="core-proxy neutralisation strength (cap 0.5)")
+    parser.add_argument("--require-frozen", action="store_true",
+                        help="refuse unless p_b/p_c were frozen by the regime simulation (blend.json neutralisation)")
+    parser.add_argument("--members", nargs="+", default=None,
+                        help="bundle exactly these members (e.g. the single-LGBM baseline for a diag upload)")
     parser.add_argument("--artifacts-dir", type=Path, default=ARTIFACTS_DIR)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
-        bundle, sha, mpath = build_and_write(args.artifacts_dir / args.run_id, args.out, p_b=args.p_b, p_c=args.p_c)
-    except (FileNotFoundError, ValueError, KeyError) as exc:
+        bundle, sha, mpath = build_and_write(args.artifacts_dir / args.run_id, args.out, p_b=args.p_b, p_c=args.p_c,
+                                             require_frozen=args.require_frozen, members=args.members)
+    except (FileNotFoundError, ValueError, KeyError, TypeError) as exc:
         log.error("bundle failed: %s", exc)
         return 1
     except Exception:  # noqa: BLE001 - CLI boundary
         log.exception("bundle failed")
         return 1
-    log.info("bundle ok: run=%s members=%s p_b=%.2f p_c=%.2f sha256=%s manifest=%s", bundle["run_id"],
-             [m["name"] for m in bundle["members"]], bundle["p_b"], bundle["p_c"], sha, mpath)
+    log.info("bundle ok: run=%s members=%s p_b=%.2f p_c=%.2f p_source=%s rule=%s sha256=%s manifest=%s", bundle["run_id"],
+             [m["name"] for m in bundle["members"]], bundle["p_b"], bundle["p_c"], bundle["p_source"], bundle["blend_rule"], sha, mpath)
     return 0
 
 

@@ -1,3 +1,6 @@
+# local agent worktrees
+.claude/
+
 # secrets — never commit API keys
 .env
 .env.*
@@ -7,7 +10,9 @@ secrets/
 
 # data & artifacts (large; regenerate with the scripts)
 data/
+/data
 artifacts/
+/artifacts
 reports/
 *.parquet
 *.pkl
@@ -22,6 +27,7 @@ optuna*.db
 __pycache__/
 *.pyc
 .venv/
+.venv-gpu/
 venv/
 *.egg-info/
 build/

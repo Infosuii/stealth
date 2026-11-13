@@ -13,9 +13,17 @@ Rules (docs/PLAN.md "Packaging", docs/INTERFACES.md section 9):
 platform calls once per round (one call == one era / cross-section). Everything the closure needs is
 captured in the ``bundle`` dict (feature names, serialised member bytes, blend weights, neutralisation
 constants). Members are deserialised lazily on the first call and cached.
+
+Families (docs/INTERFACES.md section 18): ``lgbm``/``xgb``/``cat`` take the NaN tree matrix indexed by the
+member's ``feature_cols``; ``ridge``/``mlp`` take the linear frame and select the npz ``columns`` BY NAME.
+The MLP forward pass (:func:`mlp_forward`, GELU tanh approximation) is plain numpy and lives here so the
+pickle still references this single by-value module. NOTE: function docstrings and string constants of
+everything the closure references end up inside the pickle, whose bytes are scanned for the name of the
+deep-learning library and for package references -- keep both words out of them.
 """
 from __future__ import annotations
 
+import io
 import logging
 from typing import Any, Callable
 
@@ -28,6 +36,11 @@ MISSING = -1.0
 DEFAULT_MIN_BENCH_COVERAGE = 0.5
 P_B_CAP = 0.75
 P_C_CAP = 0.5
+SUPPORTED_FAMILIES = ("lgbm", "xgb", "cat", "ridge", "mlp")
+LINEAR_FAMILIES = ("ridge", "mlp")   # input: linear, npz blobs with a by-name ``columns`` list
+TREE_FAMILIES = ("lgbm", "xgb", "cat")  # input: nan, positions of ``feature_cols`` in the bundle list
+MLP_ACT = "gelu_tanh"
+_GELU_C = 0.7978845608028654  # sqrt(2 / pi)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -146,6 +159,12 @@ def linear_frame(raw: np.ndarray, feature_cols: list[str], missing_cols: list[st
     return pd.DataFrame(np.hstack(blocks), columns=cols)
 
 
+def linear_columns(feature_cols: list[str], missing_cols: list[str]) -> list[str]:
+    """Column names :func:`linear_frame` produces for these lists (no data needed)."""
+    known = set(feature_cols)
+    return list(feature_cols) + [f"miss_{c}" for c in missing_cols if c in known] + ["n_missing"]
+
+
 def core_proxy_values(raw: np.ndarray, feature_cols: list[str], core_cols: list[str]) -> np.ndarray:
     """Row mean of ``core_cols`` ignoring -1/NaN (the ``scoring.core_feature_average`` rule).
 
@@ -169,13 +188,115 @@ def core_proxy_values(raw: np.ndarray, feature_cols: list[str], core_cols: list[
 
 
 # --------------------------------------------------------------------------------------------------
+# MLP: npz format + numpy forward (section 18)
+# --------------------------------------------------------------------------------------------------
+def npz_columns(blob: bytes) -> list[str]:
+    """The ``columns`` list stored in a ridge/mlp npz blob (cheap: no other array is read)."""
+    try:
+        with np.load(io.BytesIO(bytes(blob)), allow_pickle=False) as z:
+            return [str(c) for c in z["columns"].tolist()]
+    except Exception as exc:  # noqa: BLE001 - surface every malformed blob as one error type
+        raise ValueError(f"npz blob has no readable columns list: {type(exc).__name__}: {exc}") from exc
+
+
+def _load_mlp(blob: bytes) -> dict:
+    """npz -> ``{"W": [float64 (in x out)], "b": [...], "x_mean", "x_std", "columns", "act", "n_layers"}``, shape-checked."""
+    try:
+        with np.load(io.BytesIO(bytes(blob)), allow_pickle=False) as z:
+            n_layers = int(np.asarray(z["n_layers"]).ravel()[0])
+            act = str(np.asarray(z["act"]).ravel()[0])
+            W = [np.asarray(z[f"W{i}"], dtype=np.float64) for i in range(n_layers)]
+            b = [np.asarray(z[f"b{i}"], dtype=np.float64).ravel() for i in range(n_layers)]
+            x_mean = np.asarray(z["x_mean"], dtype=np.float64).ravel()
+            x_std = np.asarray(z["x_std"], dtype=np.float64).ravel()
+            columns = [str(c) for c in z["columns"].tolist()]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"mlp: malformed npz blob ({type(exc).__name__}: {exc})") from exc
+    if n_layers < 1:
+        raise ValueError("mlp: n_layers must be >= 1")
+    if act != MLP_ACT:
+        raise ValueError(f"mlp: activation {act!r} is not supported (want {MLP_ACT!r})")
+    n_in = len(columns)
+    if x_mean.size != n_in or x_std.size != n_in or W[0].ndim != 2 or W[0].shape[0] != n_in:
+        raise ValueError(f"mlp: input size mismatch (columns={n_in}, x_mean={x_mean.size}, x_std={x_std.size}, "
+                         f"W0={W[0].shape})")
+    for i in range(n_layers):
+        if W[i].ndim != 2 or b[i].shape != (W[i].shape[1],):
+            raise ValueError(f"mlp: layer {i}: W{W[i].shape} vs b{b[i].shape}")
+        if i + 1 < n_layers and W[i].shape[1] != W[i + 1].shape[0]:
+            raise ValueError(f"mlp: layer {i} output {W[i].shape[1]} != layer {i + 1} input {W[i + 1].shape[0]}")
+    if W[-1].shape[1] != 1:
+        raise ValueError(f"mlp: last layer must have one output (got {W[-1].shape[1]})")
+    if not all(np.isfinite(a).all() for a in [*W, *b, x_mean, x_std]):
+        raise ValueError("mlp: non-finite weights")
+    return {"W": W, "b": b, "x_mean": x_mean, "x_std": x_std, "columns": columns, "act": act, "n_layers": n_layers}
+
+
+def mlp_to_bytes(model: dict) -> bytes:
+    """Serialise an MLP dict (``W``/``b`` lists, in x out) to the npz member format: ``W0..``, ``b0..``, ``x_mean``,
+    ``x_std`` float32; ``columns`` str[n_in]; ``act``; ``n_layers``. Round trip: ``load_member("mlp", blob)``."""
+    W, b = list(model["W"]), list(model["b"])
+    if len(W) != len(b) or not W:
+        raise ValueError("mlp: W and b must be non-empty lists of equal length")
+    arrays: dict[str, np.ndarray] = {}
+    for i, (w_i, b_i) in enumerate(zip(W, b)):
+        arrays[f"W{i}"] = np.ascontiguousarray(np.asarray(w_i, dtype=np.float32))
+        arrays[f"b{i}"] = np.ascontiguousarray(np.asarray(b_i, dtype=np.float32).ravel())
+    arrays["x_mean"] = np.asarray(model["x_mean"], dtype=np.float32).ravel()
+    arrays["x_std"] = np.asarray(model["x_std"], dtype=np.float32).ravel()
+    arrays["columns"] = np.asarray([str(c) for c in model["columns"]], dtype=str)
+    arrays["act"] = np.asarray(str(model.get("act", MLP_ACT)), dtype=str)
+    arrays["n_layers"] = np.asarray(len(W), dtype=np.int64)
+    buf = io.BytesIO()
+    np.savez(buf, **arrays)
+    blob = buf.getvalue()
+    _load_mlp(blob)  # validate the exported shapes once
+    return blob
+
+
+def gelu_tanh(x: np.ndarray) -> np.ndarray:
+    """GELU, tanh approximation: ``0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x^3)))`` (float64)."""
+    x = np.asarray(x, dtype=np.float64)
+    return 0.5 * x * (1.0 + np.tanh(_GELU_C * (x + 0.044715 * (x * x * x))))
+
+
+def mlp_forward(model: dict, X: Any) -> np.ndarray:
+    """MLP inference in numpy: ``h = (X - x_mean) / x_std``; hidden layers ``h = gelu_tanh(h @ W + b)``; last layer
+    linear (dropout is off at inference; only the main head is exported). ``X``: a DataFrame (``model["columns"]``
+    selected BY NAME, ``KeyError`` when absent) or a 2-D matrix already in that column order. Returns float64[n]."""
+    cols = model["columns"]
+    if isinstance(X, pd.DataFrame):
+        absent = [c for c in cols if c not in X.columns]
+        if absent:
+            raise KeyError(f"mlp: input frame is missing {len(absent)} column(s): {absent[:5]}")
+        x = X.loc[:, list(cols)].to_numpy(dtype=np.float64)
+    else:
+        x = np.asarray(X, dtype=np.float64)
+    if x.ndim != 2 or x.shape[1] != len(cols):
+        raise ValueError(f"mlp: expected a 2-D input with {len(cols)} columns, got shape {x.shape}")
+    if x.shape[0] == 0:
+        return np.empty(0, dtype=np.float64)
+    std = np.asarray(model["x_std"], dtype=np.float64)
+    std = np.where(np.isfinite(std) & (std > 0.0), std, 1.0)
+    h = (x - np.asarray(model["x_mean"], dtype=np.float64)) / std
+    W, b = model["W"], model["b"]
+    last = len(W) - 1
+    for i in range(len(W)):
+        h = h @ W[i] + b[i]
+        if i < last:
+            h = gelu_tanh(h)
+    return np.ascontiguousarray(h[:, 0], dtype=np.float64)
+
+
+# --------------------------------------------------------------------------------------------------
 # members
 # --------------------------------------------------------------------------------------------------
 def load_member(family: str, blob: bytes) -> Any:
     """Deserialise one member from its bytes (the family module's ``to_bytes`` format).
 
     lgbm: ``Booster(model_str=...)``; xgb: ``Booster().load_model(bytearray)``; cat:
-    ``CatBoostRegressor().load_model(blob=...)``; ridge: dict ``{coef, intercept, columns}`` from npz.
+    ``CatBoostRegressor().load_model(blob=...)``; ridge: dict ``{coef, intercept, columns}`` from npz;
+    mlp: dict ``{W, b, x_mean, x_std, columns, act, n_layers}`` from npz (``allow_pickle=False``).
     """
     if family == "lgbm":
         import lightgbm as lgb
@@ -194,14 +315,14 @@ def load_member(family: str, blob: bytes) -> Any:
         model.load_model(blob=bytes(blob))
         return model
     if family == "ridge":
-        import io
-
         with np.load(io.BytesIO(bytes(blob)), allow_pickle=False) as z:
             return {
                 "coef": np.asarray(z["coef"], dtype=np.float64).ravel(),
                 "intercept": float(np.asarray(z["intercept"]).ravel()[0]),
                 "columns": [str(c) for c in z["columns"].tolist()],
             }
+    if family == "mlp":
+        return _load_mlp(blob)
     raise ValueError(f"unknown member family {family!r}")
 
 
@@ -225,6 +346,8 @@ def predict_member(family: str, model: Any, X: np.ndarray) -> np.ndarray:
         if X.shape[1] != coef.size:
             raise ValueError(f"ridge: {X.shape[1]} input columns vs {coef.size} coefficients")
         return X.astype(np.float64) @ coef + float(model["intercept"])
+    if family == "mlp":
+        return mlp_forward(model, X)
     raise ValueError(f"unknown member family {family!r}")
 
 
@@ -315,6 +438,11 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
     -> ``rank01``. Returns an exact ``pd.DataFrame`` with one float64 column ``prediction`` on
     ``live_features.index``, all values strictly in (0, 1), no NaN. The last call's diagnostics are
     exposed as ``predict.last_info`` (dict).
+
+    Member inputs: ``input: nan`` members (lgbm/xgb/cat) index the NaN matrix by the positions of their
+    ``feature_cols``; ``input: linear`` members (ridge/mlp) select each blob's npz ``columns`` BY NAME from the
+    linear frame. A member whose columns are not all in the bundle lists, an unsupported family or a
+    family/input mismatch raises ``ValueError`` here, never at predict time.
     """
     feature_cols: list[str] = [str(c) for c in bundle["feature_cols"]]
     missing_cols: list[str] = [str(c) for c in bundle.get("missing_cols", [])]
@@ -331,11 +459,37 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
     w = np.asarray([float(weights_in[m["name"]]) for m in active], dtype=np.float64)
     w = w / w.sum()
     col_pos = {c: i for i, c in enumerate(feature_cols)}
-    member_idx = [np.asarray([col_pos[c] for c in m["feature_cols"]], dtype=np.int64) for m in active]
+    lin_cols = linear_columns(feature_cols, missing_cols)
+    lin_pos = {c: i for i, c in enumerate(lin_cols)}
+    # per member: positions into the nan matrix (trees) or, per blob, into the linear frame (ridge / mlp, BY NAME)
+    member_idx: list[np.ndarray | None] = []
+    blob_idx: list[list[np.ndarray] | None] = []
     for m in active:
+        fam, inp = m["family"], m.get("input", "nan")
+        if fam not in SUPPORTED_FAMILIES:
+            raise ValueError(f"member {m['name']}: unsupported family {fam!r} (supported: {SUPPORTED_FAMILIES})")
         unknown = [c for c in m["feature_cols"] if c not in col_pos]
         if unknown:
             raise ValueError(f"member {m['name']}: feature(s) not in bundle feature_cols: {unknown[:5]}")
+        if inp == "linear":
+            if fam not in LINEAR_FAMILIES:
+                raise ValueError(f"member {m['name']}: input 'linear' is only supported for {LINEAR_FAMILIES}")
+            per_blob = []
+            for j, blob in enumerate(m["blobs"]):
+                cols_j = npz_columns(blob)
+                bad = [c for c in cols_j if c not in lin_pos]
+                if bad:
+                    raise ValueError(f"member {m['name']} blob {j}: column(s) not in the bundle's linear frame: {bad[:5]}")
+                per_blob.append(np.asarray([lin_pos[c] for c in cols_j], dtype=np.int64))
+            member_idx.append(None)
+            blob_idx.append(per_blob)
+        elif inp == "nan":
+            if fam in LINEAR_FAMILIES:
+                raise ValueError(f"member {m['name']}: family {fam!r} needs input 'linear'")
+            member_idx.append(np.asarray([col_pos[c] for c in m["feature_cols"]], dtype=np.int64))
+            blob_idx.append(None)
+        else:
+            raise ValueError(f"member {m['name']}: unknown input kind {inp!r}")
 
     cache: dict[tuple[str, int], Any] = {}
 
@@ -349,22 +503,20 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
             out.append(cache[key])
         return out
 
-    def _member_score(i: int, nan_mat: np.ndarray, lin: pd.DataFrame | None) -> np.ndarray:
+    def _member_score(i: int, nan_mat: np.ndarray, lin: np.ndarray | None) -> np.ndarray:
         m = active[i]
         models = _models(i)
-        if m.get("input", "nan") == "linear":
-            assert lin is not None
-            scores = []
-            for model in models:
-                cols = model["columns"] if m["family"] == "ridge" else list(lin.columns)
-                X = lin.loc[:, cols].to_numpy(dtype=np.float32, copy=False)
-                scores.append(predict_member(m["family"], model, X))
+        per_blob = blob_idx[i]
+        if per_blob is not None:
+            if lin is None:
+                raise RuntimeError("linear frame missing")
+            scores = [predict_member(m["family"], model, lin[:, per_blob[j]]) for j, model in enumerate(models)]
         else:
             X = nan_mat[:, member_idx[i]]
             scores = [predict_member(m["family"], model, X) for model in models]
         return np.mean(np.vstack(scores), axis=0)
 
-    needs_linear = any(m.get("input", "nan") == "linear" for m in active)
+    needs_linear = any(b is not None for b in blob_idx)
 
     def predict(live_features: pd.DataFrame, live_benchmark_models: Any = None) -> pd.DataFrame:
         index = live_features.index
@@ -376,7 +528,7 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
             predict.last_info = info  # type: ignore[attr-defined]
             return pd.DataFrame({"prediction": np.empty(0, dtype=np.float64)}, index=index)
         nan_mat = nan_matrix(raw)
-        lin = linear_frame(raw, feature_cols, missing_cols) if needs_linear else None
+        lin = linear_frame(raw, feature_cols, missing_cols).to_numpy(dtype=np.float32) if needs_linear else None
         Z = np.empty((n, len(active)), dtype=np.float64)
         for i in range(len(active)):
             s = _member_score(i, nan_mat, lin)
@@ -409,6 +561,7 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
     predict.last_info = {}  # type: ignore[attr-defined]
     predict.bundle_meta = {  # type: ignore[attr-defined]
         "version": bundle.get("version"), "run_id": bundle.get("run_id"), "git_sha": bundle.get("git_sha"),
-        "members": [m["name"] for m in active], "p_b": p_b, "p_c": p_c,
+        "members": [m["name"] for m in active], "families": {m["name"]: m["family"] for m in active},
+        "p_b": p_b, "p_c": p_c, "p_source": bundle.get("p_source"),
     }
     return predict

@@ -200,7 +200,11 @@ def test_load_and_predict_member_roundtrip_ridge_lgbm():
     assert p.shape == (40,) and np.isfinite(p).all()
     assert rt.predict_member("lgbm", booster, X[:0]).shape == (0,)
     with pytest.raises(ValueError):
-        rt.load_member("mlp", b"")
+        rt.load_member("mlp", b"")  # malformed npz -> ValueError (mlp is a supported family now)
+    with pytest.raises(ValueError, match="unknown member family"):
+        rt.load_member("nope", b"")
+    with pytest.raises(ValueError, match="unknown member family"):
+        rt.predict_member("nope", None, X)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -328,3 +332,107 @@ def test_coerce_benchmark_multi_column_frame_prefers_named_column():
     assert rt.select_benchmark_column(frame3)[1] == "scores"  # first numeric column
     assert rt.select_benchmark_column(pd.DataFrame({"only_text": ["x"] * 20}, index=idx)) == (None, None)
     assert rt.coerce_benchmark(pd.DataFrame(index=idx), idx) is None
+
+
+# --------------------------------------------------------------------------------------------------
+# M5/M6 (INTERFACES section 18): mlp family, per-member subsets, linear members BY NAME
+# --------------------------------------------------------------------------------------------------
+def mlp_blob(columns: list[str], hidden=(6, 3), seed: int = 0) -> bytes:
+    rng = np.random.default_rng(seed)
+    dims = [len(columns), *hidden, 1]
+    W = [rng.normal(scale=1.0 / np.sqrt(dims[i]), size=(dims[i], dims[i + 1])) for i in range(len(dims) - 1)]
+    b = [rng.normal(scale=0.1, size=dims[i + 1]) for i in range(len(dims) - 1)]
+    return rt.mlp_to_bytes({"W": W, "b": b, "x_mean": np.full(len(columns), 0.5), "x_std": np.full(len(columns), 0.3),
+                            "columns": columns, "act": "gelu_tanh"})
+
+
+def mixed_bundle(df: pd.DataFrame, *, p_b: float = 0.5, p_c: float = 0.25) -> dict:
+    """lgbm on a column BAG (subset, non-contiguous) + ridge (linear, with miss_ columns in shuffled order) + mlp
+    (linear base columns, two seeds, columns stored in REVERSED order)."""
+    cols = [c for c in df.columns if c.startswith("feature_")]
+    missing_cols = cols[:3]
+    rng = np.random.default_rng(11)
+    bag = cols[1::3] + cols[::4]  # arbitrary order, not a prefix
+    X = rt.nan_matrix(rt.raw_matrix(df, cols))
+    y = rng.normal(size=len(df))
+    pos = [cols.index(c) for c in bag]
+    lin_cols = cols + [f"miss_{c}" for c in missing_cols] + ["n_missing"]
+    ridge_cols = list(rng.permutation(lin_cols))
+    members = [
+        {"name": "lgbm_everest_bag0", "family": "lgbm", "target": "target_everest", "group": "everest", "arm": "bags", "input": "nan",
+         "feature_cols": bag, "blobs": [lgbm_blob(X[:, pos], y, 0)]},
+        {"name": "ridge_everest", "family": "ridge", "target": "target_everest", "group": "everest", "arm": "ridge", "input": "linear",
+         "feature_cols": cols, "blobs": [ridge_blob(ridge_cols, rng.normal(size=len(ridge_cols)), 0.2)]},
+        {"name": "mlp_everest", "family": "mlp", "target": "target_everest", "group": "everest", "arm": "mlp", "input": "linear",
+         "feature_cols": cols, "blobs": [mlp_blob(list(reversed(cols)), seed=1), mlp_blob(list(reversed(cols)), seed=2)]},
+    ]
+    return {"version": "test", "git_sha": "x", "built_at": "now", "run_id": "t", "feature_cols": cols, "missing_cols": missing_cols,
+            "members": members, "weights": {"lgbm_everest_bag0": 0.4, "ridge_everest": 0.3, "mlp_everest": 0.3},
+            "p_b": p_b, "p_c": p_c, "core_proxy_cols": cols[-4:], "min_bench_coverage": 0.5, "p_source": "simulation"}
+
+
+def test_mixed_bundle_bag_ridge_mlp_by_name_and_shuffle_invariant():
+    df = make_frame(n=90, n_feat=12, seed=21)
+    bundle = mixed_bundle(df)
+    predict = rt.make_predict(bundle)
+    out = predict(df)
+    check_output(out, df.index)
+    assert predict.bundle_meta["families"] == {"lgbm_everest_bag0": "lgbm", "ridge_everest": "ridge", "mlp_everest": "mlp"}
+    assert predict.bundle_meta["p_source"] == "simulation"
+    shuffled = df.sample(frac=1.0, axis=1, random_state=5).copy()
+    shuffled["feature_zz_extra"] = 4
+    pd.testing.assert_frame_equal(predict(shuffled), out)
+    # the members really see their own columns BY NAME: recompute every raw score by hand and blend
+    cols = bundle["feature_cols"]
+    raw = rt.raw_matrix(df, cols)
+    lin = rt.linear_frame(raw, cols, bundle["missing_cols"])
+    m_bag, m_ridge, m_mlp = bundle["members"]
+    s_bag = rt.predict_member("lgbm", rt.load_member("lgbm", m_bag["blobs"][0]), rt.nan_matrix(raw)[:, [cols.index(c) for c in m_bag["feature_cols"]]])
+    ridge = rt.load_member("ridge", m_ridge["blobs"][0])
+    s_ridge = lin[ridge["columns"]].to_numpy(dtype=np.float64) @ ridge["coef"] + ridge["intercept"]
+    s_mlp = np.mean([rt.mlp_forward(rt.load_member("mlp", b), lin) for b in m_mlp["blobs"]], axis=0)
+    Z = np.column_stack([rt.gaussianise(s) for s in (s_bag, s_ridge, s_mlp)])
+    z = Z @ np.array([0.4, 0.3, 0.3])
+    z = rt.neutralise(z, rt.gaussianise(rt.core_proxy_values(raw, cols, bundle["core_proxy_cols"])), 0.25)
+    np.testing.assert_allclose(out["prediction"].to_numpy(), rt.rank01(z), atol=1e-12)
+
+
+def test_make_predict_subset_violations_raise_valueerror():
+    df = make_frame(n=40, n_feat=8, seed=22)
+    cols = [c for c in df.columns if c.startswith("feature_")]
+    base = mixed_bundle(df)
+
+    def with_member(i: int, **upd) -> dict:
+        b = {**base, "members": [dict(m) for m in base["members"]]}
+        b["members"][i].update(upd)
+        return b
+
+    with pytest.raises(ValueError, match="not in the bundle's linear frame"):  # mlp npz column unknown to the bundle
+        rt.make_predict(with_member(2, blobs=[mlp_blob(cols[:-1] + ["feature_zzz"])]))
+    with pytest.raises(ValueError, match="not in the bundle's linear frame"):  # ridge miss_ column not in missing_cols
+        rt.make_predict({**base, "missing_cols": cols[:2]})
+    with pytest.raises(ValueError, match="not in bundle feature_cols"):
+        rt.make_predict(with_member(0, feature_cols=["feature_nope", *cols[:2]]))
+    with pytest.raises(ValueError, match="needs input 'linear'"):
+        rt.make_predict(with_member(2, input="nan"))
+    with pytest.raises(ValueError, match="only supported for"):
+        rt.make_predict(with_member(0, input="linear"))
+    with pytest.raises(ValueError, match="unsupported family"):
+        rt.make_predict(with_member(0, family="tabnet"))
+    with pytest.raises(ValueError, match="unknown input kind"):
+        rt.make_predict(with_member(0, input="raw"))
+    with pytest.raises(ValueError, match="npz blob"):  # never unpickled: allow_pickle=False refuses it
+        rt.make_predict(with_member(2, blobs=[b"not an npz"]))
+    # an mlp-only bundle works (no tree family is ever imported for it)
+    only = {**base, "weights": {"mlp_everest": 1.0}}
+    check_output(rt.make_predict(only)(df), df.index)
+
+
+def test_mlp_member_on_live_frame(live_frame: pd.DataFrame, live_bench: pd.Series):
+    cols = [c for c in live_frame.columns if c.startswith("feature_")]
+    bundle = mixed_bundle(live_frame.loc[:, ["exped", *cols]])
+    predict = rt.make_predict(bundle)
+    out = predict(live_frame, live_bench)
+    check_output(out, live_frame.index)
+    assert predict.last_info["bench_used"] is True
+    pd.testing.assert_frame_equal(predict(live_frame.sample(frac=1.0, axis=1, random_state=1), live_bench), out)

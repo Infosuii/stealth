@@ -269,3 +269,118 @@ def test_regime_simulation_validates_args(sim_inputs) -> None:
         M.regime_simulation(z_pred, sl[TARGET], sl["era"], direction, core, p_c=0.1, p_b_grid=(0.9,), n_draws=1)
     with pytest.raises(ValueError):
         M.regime_simulation(z_pred, sl[TARGET], sl["era"], direction, core, p_c=0.1, n_draws=0)
+
+
+# ------------------------------------------------------------------------- M5 additions (INTERFACES 17)
+def _rank_gauss_rows_direct(a: np.ndarray) -> np.ndarray:
+    """The pre-lookup implementation: rankdata + norm.ppf computed directly."""
+    from scipy import stats
+
+    r = stats.rankdata(a, axis=1, method="average", nan_policy="omit")
+    n = np.sum(~np.isnan(a), axis=1, keepdims=True)
+    with np.errstate(invalid="ignore"):
+        u = (r - 0.5) / n
+    z = stats.norm.ppf(np.clip(u, 0.001, 0.999))
+    z[np.isnan(a)] = np.nan
+    return z
+
+
+def test_rank_gauss_rows_lookup_is_bit_identical() -> None:
+    rng = np.random.default_rng(21)
+    a = rng.integers(0, 6, size=(40, 93)).astype(float)  # heavy ties
+    a[:, 70:] = np.nan                                    # padding
+    a[3, :] = np.nan                                      # an all-NaN row
+    a[5, 10] = np.nan                                     # an interior NaN
+    b = rng.standard_normal((7, 2))                       # tiny width
+    for x in (a, b, rng.standard_normal((5, 91))):
+        np.testing.assert_array_equal(M.rank_gauss_rows(x), _rank_gauss_rows_direct(x))
+
+
+def test_block_bootstrap_index_matches_cv_generator() -> None:
+    from stealth.cv import block_bootstrap_means
+
+    v = np.random.default_rng(3).standard_normal(157)
+    idx = M._block_bootstrap_index(len(v), block=20, n_boot=50, seed=4)
+    np.testing.assert_allclose(v[idx].mean(axis=1), block_bootstrap_means(v, block=20, n_boot=50, seed=4), atol=0, rtol=0)
+    counts = M._bootstrap_counts(len(v), block=20, n_boot=50, seed=4)
+    assert counts.shape == (50, 157) and np.all(counts.sum(axis=1) == 157)
+    np.testing.assert_allclose(counts @ v / 157, v[idx].mean(axis=1), atol=1e-12)
+
+
+def test_score_sharpe_helper_matches_naive_loop() -> None:
+    rng = np.random.default_rng(9)
+    score = 0.02 + 0.05 * rng.standard_normal((6, 80))
+    mask = rng.random((6, 80)) > 0.4
+    mask[2] = False
+    mask[2, 5] = True  # a draw with a single era is skipped
+    counts = M._bootstrap_counts(80, n_boot=100)
+    s, se = M._score_sharpe(score, mask, counts)
+    naive = [score[k][mask[k]].mean() / score[k][mask[k]].std(ddof=1) for k in range(6) if mask[k].sum() >= 2]
+    assert s == pytest.approx(float(np.mean(naive)), abs=1e-12)
+    assert np.isfinite(se) and 0.0 < se < 0.5
+    s_all, _ = M._score_sharpe(score, np.ones_like(mask), None)
+    assert s_all == pytest.approx(float(np.mean(score.mean(axis=1) / score.std(axis=1, ddof=1))), abs=1e-12)
+
+
+def test_regime_grid_structure_crn_and_single_pc_consistency(sim_inputs) -> None:
+    sl, z_pred, direction, core = sim_inputs
+    kw = dict(n_draws=5, seed=2, bench_fit_means=(0.0, 0.02), p_b_grid=(0.0, 0.5))
+    grid = M.regime_grid(z_pred, sl[TARGET], sl["era"], direction, core, p_c_grid=(0.0, 0.25, 0.5), **kw)
+    assert set(grid) == {"0", "0.02", "meta"}
+    for mean_key in ("0", "0.02"):
+        assert set(grid[mean_key]) == {"p_c=0", "p_c=0.25", "p_c=0.5"}
+        for by_pb in grid[mean_key].values():
+            assert set(by_pb) == {"p_b=0", "p_b=0.5"}
+            for regs in by_pb.values():
+                assert set(regs) == {"bpos", "bneg", "mix"}
+                for blk in regs.values():
+                    assert {"fit", "unq", "inov", "score", "score_se", "score_sharpe", "score_sharpe_se", "n_eras", "frac"} <= set(blk)
+                mix = regs["mix"]
+                assert np.isfinite(mix["score_sharpe"]) and mix["score_sharpe_se"] > 0
+    meta = grid["meta"]
+    assert meta["p_c_grid"] == [0.0, 0.25, 0.5] and meta["p_b_grid"] == [0.0, 0.5] and meta["common_random_numbers"] is True
+    # single-p_c simulation == the grid's slice (same draws: common random numbers across cells)
+    for p_c in (0.0, 0.25):
+        single = M.regime_simulation(z_pred, sl[TARGET], sl["era"], direction, core, p_c=p_c, **kw)
+        assert single == M.regime_slice(grid, p_c)
+        assert single["meta"]["p_c"] == p_c and single["meta"]["bench"] == meta["bench"]
+    # a cell's numbers do not depend on which other cells are simulated alongside it
+    small = M.regime_grid(z_pred, sl[TARGET], sl["era"], direction, core, p_c_grid=(0.5,), **kw)
+    assert small["0.02"]["p_c=0.5"] == grid["0.02"]["p_c=0.5"] and small["meta"]["bench"] == meta["bench"]
+    # p_b = 0 cells: fit/inov do not depend on the benchmark draw; p_c = 0 leaves the prediction untouched
+    fit = M.per_era_fit(z_pred, sl[TARGET], sl["era"])
+    for mean_key in ("0", "0.02"):
+        assert grid[mean_key]["p_c=0"]["p_b=0"]["mix"]["fit"] == pytest.approx(fit.mean(), abs=1e-9)
+    assert grid["0"]["p_c=0.5"]["p_b=0"]["mix"]["inov"] == pytest.approx(grid["0.02"]["p_c=0.5"]["p_b=0"]["mix"]["inov"], abs=1e-15)
+    table = M.regime_grid_table(grid)
+    assert len(table) == 2 * 3 * 2 and {"p_c", "p_b", "score_sharpe"} <= set(table.columns)
+    with pytest.raises(ValueError):
+        M.regime_grid(z_pred, sl[TARGET], sl["era"], direction, core, p_c_grid=(0.0, 0.75), **kw)
+    with pytest.raises(ValueError):
+        M.regime_grid(z_pred, sl[TARGET], sl["era"], direction, core, p_c_grid=(0.0, 0.0), **kw)
+    with pytest.raises(ValueError):
+        M.regime_grid(z_pred, sl[TARGET], sl["era"], direction, core, p_c_grid=(), **kw)
+
+
+def test_paired_sharpe_bootstrap_sign_and_p_pos() -> None:
+    rng = np.random.default_rng(12)
+    idx = pd.Index(np.arange(600, dtype=np.int32), name="era")
+    common = rng.standard_normal(600)
+    b = pd.Series(0.02 + 0.05 * common + 0.03 * rng.standard_normal(600), index=idx)
+    a = pd.Series(0.02 + 0.02 * common + 0.01 * rng.standard_normal(600), index=idx)  # same mean, ~2.5x less risk
+    res = M.paired_sharpe_bootstrap(a, b, n_boot=500)
+    assert set(res) >= {"dsharpe", "se", "p_pos", "ci90", "n_eras"} and res["n_eras"] == 600
+    assert res["dsharpe"] > 0.2 and res["p_pos"] > 0.95 and res["se"] > 0
+    assert res["ci90"][0] < res["dsharpe"] < res["ci90"][1]
+    assert res["dsharpe"] == pytest.approx(a.mean() / a.std() - b.mean() / b.std(), abs=1e-12)
+    rev = M.paired_sharpe_bootstrap(b, a, n_boot=500)
+    assert rev["dsharpe"] == pytest.approx(-res["dsharpe"]) and rev["p_pos"] < 0.05
+    same = M.paired_sharpe_bootstrap(a, a, n_boot=200)
+    assert same["dsharpe"] == 0.0 and same["p_pos"] == 0.0
+    # inner join on the era index, NaN eras dropped, order irrelevant
+    shuffled = M.paired_sharpe_bootstrap(a.sample(frac=1.0, random_state=1).iloc[:550], b.where(b.index != 3), n_boot=200)
+    assert shuffled["n_eras"] == 550 - int(3 in set(a.sample(frac=1.0, random_state=1).iloc[:550].index))
+    # deterministic for a seed
+    assert M.paired_sharpe_bootstrap(a, b, n_boot=300, seed=5) == M.paired_sharpe_bootstrap(a, b, n_boot=300, seed=5)
+    with pytest.raises(ValueError):
+        M.paired_sharpe_bootstrap(a.iloc[:2], b.iloc[:2])

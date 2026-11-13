@@ -1,13 +1,14 @@
-# Full tier (laptop CPU, 2.5-3.5 h, < 8 GB). Final run. Schema: docs/INTERFACES.md "Config YAML".
-# Resumable: Optuna SQLite + member cache in artifacts/<run_id>/. Budget goes into MEMBERS, not trials (C6).
+# Full tier (laptop CPU, 2.5-3.5 h, < 8 GB; + optional MLP on the GPU venv). Final run (handoff 04).
+# Schema: docs/INTERFACES.md sections 7 + 11. Resumable: Optuna SQLite + member cache in artifacts/<run_id>/.
+# Budget goes into MEMBERS, not trials (C6). Hyperparameter values stay here + artifacts/, never in handoff results.
 name: full
 run:
   seed: 0
   threads: 16
-  min_era: 2800          # era-start knob; variants {2000, 2800, all} are evaluated via knobs.era_start
+  min_era: 2800          # SCORING universe (CV + forward test blocks). Training-universe alternatives: knobs below
   max_era: null
-  min_rows: null         # knob: null | 80 (n_rows >= 80 filter)
-  time_decay: false      # knob: linear time-decay weights
+  min_rows: null         # must stay null when knobs are set (use knobs.rows_rule)
+  time_decay: false      # default of the time_decay knob
   data_dir: data
 cv:
   n_folds: 5
@@ -19,62 +20,81 @@ cv:
     enabled: true
     train_end: 5925
     test_start: 5945
-knobs:                   # evaluated on lgbm_everest only, chosen by the forward block + paired gate
-  era_start: [2000, 2800, 3]
-  min_rows: [null, 80]
+knobs:                   # TRAINING rows only; decided ONCE on the forward block (Holm, alpha 0.2) -> knobs.json
+  member: lgbm_everest   # runs at its BASE params under every candidate (default + one knob changed at a time)
+  era_start: [2800, 2000, 3]
+  rows_rule: [none, filter80, weight80]
+  rows_low_weight: 0.5
   time_decay: [false, true]
+  alpha_total: 0.2
 members:
-  # LGBM everest: Optuna TPE <= 25 trials over the 96-cell coarse grid, top-3 averaged
+  # LGBM everest: Optuna TPE <= 25 trials over the 96-cell coarse grid, top-3 averaged iff the adoption gate passes
   - name: lgbm_everest
     family: lgbm
     target: target_everest
     group: everest
+    arm: lgbm
     features: all
     input: nan
     params: {num_leaves: 8, learning_rate: 0.03, min_data_in_leaf: 2000, feature_fraction: 0.3,
              lambda_l2: 10, bagging_fraction: 0.7, bagging_freq: 1, max_bin: 16}
     n_estimators: null
     es_cap: 1500
-  # 6 aux targets x 2 families (lgbm + xgb) at family-best params
-  - {name: lgbm_tougroute,  family: lgbm, target: target_Tougroute,  group: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_ghat,       family: lgbm, target: target_Ghat,       group: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_meltsene,   family: lgbm, target: target_Meltsene,   group: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_timesguida, family: lgbm, target: target_Timesguida, group: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_ighil,      family: lgbm, target: target_Ighil,      group: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_tarhat,     family: lgbm, target: target_Tarhat,     group: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: xgb_tougroute,   family: xgb,  target: target_Tougroute,  group: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
-  - {name: xgb_ghat,        family: xgb,  target: target_Ghat,       group: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
-  - {name: xgb_meltsene,    family: xgb,  target: target_Meltsene,   group: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
-  - {name: xgb_timesguida,  family: xgb,  target: target_Timesguida, group: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
-  - {name: xgb_ighil,       family: xgb,  target: target_Ighil,      group: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
-  - {name: xgb_tarhat,      family: xgb,  target: target_Tarhat,     group: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
-  # XGB everest: 12 fixed configs = depth {3,4,6} x lr {0.02,0.05} x mcw {200,1000}, top-2 averaged (search.xgb_everest, exhaustive)
+  # 6 aux targets x 2 families (lgbm + xgb) at family-best params; one arm "aux" on the admission ladder
+  - {name: lgbm_tougroute,  family: lgbm, target: target_Tougroute,  group: aux, arm: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_ghat,       family: lgbm, target: target_Ghat,       group: aux, arm: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_meltsene,   family: lgbm, target: target_Meltsene,   group: aux, arm: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_timesguida, family: lgbm, target: target_Timesguida, group: aux, arm: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_ighil,      family: lgbm, target: target_Ighil,      group: aux, arm: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_tarhat,     family: lgbm, target: target_Tarhat,     group: aux, arm: aux, features: all, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: xgb_tougroute,   family: xgb,  target: target_Tougroute,  group: aux, arm: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
+  - {name: xgb_ghat,        family: xgb,  target: target_Ghat,       group: aux, arm: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
+  - {name: xgb_meltsene,    family: xgb,  target: target_Meltsene,   group: aux, arm: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
+  - {name: xgb_timesguida,  family: xgb,  target: target_Timesguida, group: aux, arm: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
+  - {name: xgb_ighil,       family: xgb,  target: target_Ighil,      group: aux, arm: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
+  - {name: xgb_tarhat,      family: xgb,  target: target_Tarhat,     group: aux, arm: aux, features: all, input: nan, params: {best_of: xgb_everest}, n_estimators: null, es_cap: 1500}
+  # XGB everest: 12 fixed configs = depth {3,4,6} x lr {0.02,0.05} x mcw {200,1000}, top-2 averaged (exhaustive search)
   - name: xgb_everest
     family: xgb
     target: target_everest
     group: everest
+    arm: xgb
     features: all
     input: nan
     params: {max_depth: 4, learning_rate: 0.05, min_child_weight: 200, subsample: 0.7, colsample_bytree: 0.3,
              reg_lambda: 10, tree_method: hist, max_bin: 16}
     n_estimators: null
     es_cap: 1500
-  # CatBoost: 3 fixed configs, CONDITIONAL on the test run timing (<= 2 min / fit); delete these three if dropped
-  - {name: cat_everest_l2_3,   family: cat, target: target_everest, group: everest, features: all, input: nan,
+  # CatBoost: 3 fixed configs; a member whose FIRST fit exceeds timing.catboost_max_fit_seconds is dropped_timing
+  - {name: cat_everest_l2_3,   family: cat, target: target_everest, group: everest, arm: cat, features: all, input: nan,
      params: {depth: 4, learning_rate: 0.05, l2_leaf_reg: 3,   iterations: 400, border_count: 16}, n_estimators: 400, es_cap: null}
-  - {name: cat_everest_l2_30,  family: cat, target: target_everest, group: everest, features: all, input: nan,
+  - {name: cat_everest_l2_30,  family: cat, target: target_everest, group: everest, arm: cat, features: all, input: nan,
      params: {depth: 4, learning_rate: 0.05, l2_leaf_reg: 30,  iterations: 400, border_count: 16}, n_estimators: 400, es_cap: null}
-  - {name: cat_everest_l2_100, family: cat, target: target_everest, group: everest, features: all, input: nan,
+  - {name: cat_everest_l2_100, family: cat, target: target_everest, group: everest, arm: cat, features: all, input: nan,
      params: {depth: 4, learning_rate: 0.05, l2_leaf_reg: 100, iterations: 400, border_count: 16}, n_estimators: 400, es_cap: null}
   # Ridge
-  - {name: ridge_everest, family: ridge, target: target_everest, group: everest, features: all, input: linear,
+  - {name: ridge_everest, family: ridge, target: target_everest, group: everest, arm: ridge, features: all, input: linear,
      params: {alpha: 1.0e5}, n_estimators: null, es_cap: null}
-  # Feature-subset arms: |sharpe|>0.1 subset (per fold, training eras only) + 4 random 50% column bags
-  - {name: lgbm_everest_sharpe, family: lgbm, target: target_everest, group: everest, features: sharpe_subset, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_everest_bag0, family: lgbm, target: target_everest, group: everest, features: "bag:0", input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_everest_bag1, family: lgbm, target: target_everest, group: everest, features: "bag:1", input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_everest_bag2, family: lgbm, target: target_everest, group: everest, features: "bag:2", input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
-  - {name: lgbm_everest_bag3, family: lgbm, target: target_everest, group: everest, features: "bag:3", input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  # Feature-subset arms: |sharpe|>0.1 subset (per fold, universe-masked training rows only) + 4 random 50% column bags
+  - {name: lgbm_everest_sharpe, family: lgbm, target: target_everest, group: everest, arm: sharpe, features: sharpe_subset, input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_everest_bag0, family: lgbm, target: target_everest, group: everest, arm: bags, features: "bag:0", input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_everest_bag1, family: lgbm, target: target_everest, group: everest, arm: bags, features: "bag:1", input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_everest_bag2, family: lgbm, target: target_everest, group: everest, arm: bags, features: "bag:2", input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  - {name: lgbm_everest_bag3, family: lgbm, target: target_everest, group: everest, arm: bags, features: "bag:3", input: nan, params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 1500}
+  # MLP (M6, optional): EXTERNAL member trained by scripts/mlp_train.py in .venv-gpu; train.py only loads it when done
+  - name: mlp_everest
+    family: mlp
+    target: target_everest
+    group: everest
+    arm: mlp
+    features: all                 # the 178 base columns of the linear frame
+    input: linear
+    params: {hidden: [256, 64], dropout: 0.3,
+             aux_targets: [target_Tougroute, target_Ghat, target_Meltsene, target_Timesguida, target_Ighil, target_Tarhat],
+             aux_weight: 0.5, lr: 1.0e-3, weight_decay: 1.0e-4, batch_size: 4096, patience: 5, device: auto}
+    seeds: [0, 1, 2, 3, 4]
+    n_estimators: null            # epochs come from inner early stopping
+    es_cap: 60                    # max epochs
 search:
   lgbm_everest:
     grid:
@@ -83,8 +103,9 @@ search:
       min_data_in_leaf: [500, 2000, 5000]
       feature_fraction: [0.15, 0.3]
       lambda_l2: [10, 100]
-    n_trials: 25         # TPE over the 96-cell grid, SQLite-resumable
+    n_trials: 25         # TPE over the 96-cell grid, SQLite-resumable (<= gates.max_search_trials)
     top_k: 3
+    adopt_gate: true     # top-k adopted iff paired CV p_pos >= 0.8 AND forward gain >= 0, else the base cell
   xgb_everest:
     grid:
       max_depth: [3, 4, 6]
@@ -92,6 +113,7 @@ search:
       min_child_weight: [200, 1000]
     n_trials: 12         # == grid size -> exhaustive
     top_k: 2
+    adopt_gate: true
 feature_bags:
   n_bags: 4
   fraction: 0.5
@@ -99,18 +121,30 @@ feature_bags:
 sharpe_subset:
   threshold: 0.1
 refit:
-  seeds: [0, 1]          # full-train refit of admitted members, frozen tree counts
+  seeds: [0, 1]          # full-train refit of every member, frozen tree counts
 blend:
   everest_weight: 0.5
   nnls: true
-  p_b: 0.5               # hard cap 0.75 enforced by blend/bundle
-  p_c: 0.25              # hard cap 0.5
+  p_b: 0.5               # FALLBACK only (neutralisation.select false); a frozen bundle uses the simulation's choice
+  p_c: 0.25
+  admission:             # pre-registered ladder: one look per arm vs the incumbent (paired gate or Sharpe route)
+    base: [lgbm]
+    order: [aux, xgb, cat, ridge, sharpe, bags, mlp]
+    sharpe_gain: 0.05
   simulation:
     n_draws: 500
     p_b_grid: [0.0, 0.25, 0.5, 0.75]
+    p_c_grid: [0.0, 0.25, 0.5]
     bench_fit_means: [0.0, 0.009, 0.02]
     bench_fit_sd: 0.035
     seed: 0
+  neutralisation:        # staking-aware selection of (p_b, p_c) from the simulation grid (never from the diag lane)
+    select: true
+    central_mean: 0.009
+    pessimistic_mean: 0.02
+    fit_cost_max: 0.003
+    sharpe_tol: 0.02
+    worst_tol: 0.0005
 bootstrap:
   block: 20
   n_boot: 2000
@@ -120,6 +154,8 @@ gates:
   suspect_gain_over_baseline: 0.004
   p_pos_adopt: 0.8
   member_corr_max: 0.95
+  max_search_trials: 25
+  baseline_fit: null     # set from handoff 02 (the fixed M1 OOF fit20 of the unsearched lgbm_everest)
 timing:
   catboost_max_fit_seconds: 120
   progress_every_seconds: 60

@@ -6,7 +6,10 @@ What it proves (docs/PLAN.md "Packaging", Fix C1):
   ``major.minor`` equals the version declared at upload (3.11; ``--expect-python``);
 * after ``predict()`` neither ``stealth`` nor ``torch`` is in ``sys.modules``;
 * the raw bytes contain no ``b"torch"`` and no ``b"stealth."`` reference other than the by-value module
-  qualname ``stealth._runtime`` (bare ``b"stealth"`` occurrences are reported, not failed);
+  qualname ``stealth._runtime`` and its source path (``co_filename``; a ``stealth`` directory that is a parent of
+  ``.../stealth/_runtime.py`` -- e.g. a git worktree under the checkout -- is part of that path); bare
+  ``b"stealth"`` occurrences are reported, not failed. The MLP member is numpy arrays in an npz, so it adds
+  nothing to either scan (never put library names in member metadata);
 * ``predict(live)``, ``predict(live, bench)``, ``predict(live, bench_misaligned)``, ``predict(live, bench_constant)``,
   ``predict(live, None)``, ``predict(live, bench.to_frame())`` and ``predict(live_shuffled_extra_cols)`` on the
   live parquet and ``--eras`` random validation eras all return an exact ``pd.DataFrame``, one float column, the
@@ -59,8 +62,19 @@ MAX_S = %(max_s)r
 #   * the qualname/module string      b"stealth._runtime"
 #   * code objects' co_filename       b".../stealth/stealth/_runtime.py"  (repo dir + package dir)
 #   * the function's __package__      b"stealth" followed by a pickle framing byte (no '.' or '/')
-ALLOWED_AFTER = (b"._runtime", b"/_runtime.py", b"/stealth/_runtime.py")
+ALLOWED_AFTER = (b"._runtime", b"/_runtime.py", b"/stealth/_runtime.py", b"\\_runtime.py", b"\\stealth\\_runtime.py")
 IDENT = set(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./\\")
+# a 'stealth' directory that is a PARENT of the runtime file in co_filename (e.g. a checkout under
+# /home/u/work/stealth/.claude/worktrees/x/stealth/_runtime.py) is allowed: the rest of that path must contain the file
+PATH_CHARS = IDENT | set(b"-~+ ")
+RUNTIME_FILE = (b"/stealth/_runtime.py", b"\\stealth\\_runtime.py")
+
+
+def _path_run(raw, j):
+    k, n = j, len(raw)
+    while k < n and raw[k] in PATH_CHARS and k - j < 4096:
+        k += 1
+    return raw[j:k]
 
 
 def scan_bytes(raw):
@@ -74,6 +88,8 @@ def scan_bytes(raw):
         total += 1
         tail = raw[i + 7: i + 8]
         ok = any(raw.startswith(a, i + 7) for a in ALLOWED_AFTER) or not tail or tail[0] not in IDENT
+        if not ok and tail in (b"/", b"\\"):
+            ok = any(r in _path_run(raw, i + 7) for r in RUNTIME_FILE)
         if not ok:
             bad.append(raw[max(0, i - 20): i + 40].decode("latin-1"))
         start = i + 7
@@ -443,6 +459,10 @@ def format_report(report: dict) -> str:
     bs = report.get("byte_scan") or {}
     lines.append(f"  byte scan: torch={bs.get('torch')} stealth_total={bs.get('stealth_total')} "
                  f"non-runtime stealth refs={len(bs.get('stealth_non_runtime') or [])}")
+    bm = report.get("bundle_meta") or {}
+    if bm:
+        lines.append(f"  bundle: families={bm.get('families') or bm.get('members')} p_b={bm.get('p_b')} p_c={bm.get('p_c')} "
+                     f"p_source={bm.get('p_source')}")
     st = report.get("stats") or {}
     if st:
         lines.append("  stats: " + ", ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in st.items()))

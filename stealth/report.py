@@ -3,6 +3,7 @@
 CLI contract (docs/INTERFACES.md section 10)::
 
     python -m stealth.report --run-id R --handoff NN [--no-git] [--no-push] [--log-lines 60]
+                             [--diag-json artifacts/diag/<file>.upload.json] [--no-recompute]
 
 Writes three files under ``handoffs/results/``:
 
@@ -12,6 +13,14 @@ Writes three files under ``handoffs/results/``:
                       host{os,cpu,ram_gb,gpu,driver,python,libs,tz}, timings, configs[]{name, fit_mean, fit_se, sharpe,
                       forward_fit, rho_b_val, rho_c, regime{bpos,bneg,mix}, ci90, paired_vs_baseline{diff,se,p_pos}}
 * ``NN-log-tail.txt`` the log tail on its own
+
+M2-M6 additions (docs/INTERFACES.md section 20), present only when the run produced them: ``universe``, ``knobs``
+(candidate keys + diff/p_pos/pass, chosen key), ``search`` (per searched member: gain, forward_gain, paired_cv,
+adopted), ``ladder``, ``member_corr_max_pair`` (+ ``member_corr`` matrix), ``neutralisation`` (table + chosen +
+p_source), ``final``, ``dropped`` (timing / pending external / redundant / not admitted), ``diag`` (with
+``--diag-json``: the validation-diagnostics panel + the diag/OOF fit ratio, informational only). The blend row
+reports the CHOSEN blend (cross-fitted when NNLS was adopted). When metrics.json has no ``blend_vs_<baseline>``
+paired row (M1 runs), it is recomputed from ``oof.parquet`` with the blend.json weights and labelled as such.
 
 Then ``git add handoffs/results && git commit -m "results: NN <slug>" && git push``. On push failure it prints
 ``PUSH FAILED — results are saved locally in handoffs/results/; ask the human to run git push`` and exits 1
@@ -206,12 +215,285 @@ def _headline_regime(blend: dict[str, Any] | None) -> dict[str, Any] | None:
     return out
 
 
+# --------------------------------------------------------------------------------------------- M2-M6 sections
+# Every helper below copies an explicit allow-list of keys: metrics, config/arm/member/universe NAMES, decisions and
+# reasons. Hyperparameter values never get here (search/<m>.json and spec.json are never read).
+
+_SUMMARY_KEYS = ("mean", "se_block", "std", "sharpe", "pct_pos", "frac_roll20_neg", "ci90", "n_eras")
+_PAIRED_KEYS = ("diff_mean", "diff_se", "p_pos", "ci90", "n_eras")
+_KNOB_KEYS = ("key", "dimension", "fit_cv", "fit_fwd", "diff_fwd", "diff_se_fwd", "p_pos_fwd", "diff_cv_indep", "holm_rank",
+              "holm_threshold", "pass", "reason", "equivalent_to_default")
+_SEARCH_KEYS = ("n_trials", "topk_fit", "base_params_fit", "gain", "margin", "suspect", "topk_forward_fit",
+                "base_params_forward_fit", "forward_gain", "forward_confirms", "base_cell_in_topk", "adopted", "adopt_reason",
+                "universe")
+_LADDER_KEYS = ("arm", "members", "admitted", "reason", "diff_mean", "diff_se", "p_pos", "fwd_diff", "dsharpe", "p_pos_sharpe",
+                "corr_with_incumbent", "dropped_redundant")
+_NEUTRAL_ROW_KEYS = ("p_b", "p_c", "fit", "score", "score_sharpe", "W", "eligible", "in_tie_set")
+_UNIVERSE_KEYS = ("key", "era_start", "rows_rule", "time_decay", "rows_low_weight")
+
+
+def _pick(d: Any, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    if not isinstance(d, dict):
+        return None
+    return {k: d.get(k) for k in keys if k in d}
+
+
+def _summary(d: Any) -> dict[str, Any] | None:
+    out = _pick(d, _SUMMARY_KEYS)
+    if out is not None:
+        out["fit_se"] = _se(d)
+    return out
+
+
+def knobs_doc(run_dir: Path, metrics: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The training-universe decision (``metrics.json.knobs``, else ``knobs.json``): candidate keys + diff/p_pos/pass."""
+    src = (metrics or {}).get("knobs")
+    if not isinstance(src, dict) or not src.get("candidates"):
+        raw = _load_json(run_dir / "knobs.json")
+        if isinstance(raw, dict) and raw.get("candidates"):
+            src = {**raw, "chosen": (raw.get("chosen") or {}).get("key") if isinstance(raw.get("chosen"), dict) else raw.get("chosen")}
+    if not isinstance(src, dict) or not (src.get("candidates") or src.get("chosen")):
+        return None
+    return {"status": src.get("status"), "member": src.get("member"), "alpha_total": src.get("alpha_total"),
+            "default": src.get("default"), "chosen": src.get("chosen"), "winners": src.get("winners"),
+            "candidates": [_pick(c, _KNOB_KEYS) for c in src.get("candidates") or [] if isinstance(c, dict)]}
+
+
+def _search_row(name: str, g: dict[str, Any]) -> dict[str, Any]:
+    row: dict[str, Any] = {"member": name, **(_pick(g, _SEARCH_KEYS) or {})}
+    row["paired_cv"] = _pick(g.get("paired_cv"), _PAIRED_KEYS)
+    return row
+
+
+def search_doc(run_dir: Path, metrics: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Per searched member: gain, forward_gain, paired_cv, adopted (``members.<m>.search_gain``, else ``*.gain.json``)."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for name, m in ((metrics or {}).get("members") or {}).items():
+        if isinstance(m, dict) and isinstance(m.get("search_gain"), dict):
+            rows.append(_search_row(name, m["search_gain"]))
+            seen.add(name)
+    sdir = run_dir / "search"
+    if sdir.is_dir():
+        for p in sorted(sdir.glob("*.gain.json")):
+            name = p.name[: -len(".gain.json")]
+            g = _load_json(p) if name not in seen else None
+            if isinstance(g, dict):
+                rows.append(_search_row(name, g))
+    return rows
+
+
+def ladder_doc(blend: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return [_pick(r, _LADDER_KEYS) for r in (blend or {}).get("ladder") or [] if isinstance(r, dict)]
+
+
+def member_corr_doc(blend: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(max-pair summary incl. the top 5 pairs, {names, matrix rounded to 4 dp})`` from ``blend.json.member_corr``."""
+    mc = (blend or {}).get("member_corr")
+    if not isinstance(mc, dict) or not mc.get("names") or not mc.get("matrix"):
+        return None, None
+    names, mat = list(mc["names"]), mc["matrix"]
+    pairs = []
+    for i, a in enumerate(names):
+        for j in range(i + 1, len(names)):
+            try:
+                v = float(mat[i][j])
+            except (IndexError, TypeError, ValueError):
+                continue
+            if math.isfinite(v):
+                pairs.append({"a": a, "b": names[j], "corr": v})
+    pairs.sort(key=lambda p: -p["corr"])
+    rounded = [[round(float(v), 4) if isinstance(v, (int, float)) and math.isfinite(float(v)) else None for v in row]
+               for row in mat]
+    summary = {"max_pair": pairs[0] if pairs else None, "top_pairs": pairs[:5], "n_members": len(names)}
+    return summary, {"names": names, "matrix": rounded}
+
+
+def neutralisation_doc(blend: dict[str, Any] | None) -> dict[str, Any] | None:
+    n = (blend or {}).get("neutralisation")
+    if not isinstance(n, dict):
+        return None
+    return {"p_b": n.get("p_b"), "p_c": n.get("p_c"), "p_source": n.get("p_source"), "z_source": n.get("z_source"),
+            "reason": n.get("reason"), "criterion": n.get("criterion"), "would_choose": n.get("would_choose"),
+            "table": [_pick(r, _NEUTRAL_ROW_KEYS) for r in n.get("table") or [] if isinstance(r, dict)]}
+
+
+def final_doc(blend: dict[str, Any] | None) -> dict[str, Any] | None:
+    f = (blend or {}).get("final")
+    if not isinstance(f, dict):
+        return None
+    out = {k: f.get(k) for k in ("admitted_arms", "rule", "p_b", "p_c", "p_source", "forward_fit", "score_mix_central",
+                                 "score_sharpe_central", "W") if k in f}
+    out["oof"] = _summary(f.get("oof"))
+    return out
+
+
+def dropped_doc(metrics: dict[str, Any] | None, blend: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Members that are not in the bundle and why: timing / pending external (train), redundant / not admitted (blend)."""
+    out: list[dict[str, Any]] = []
+    for d in (metrics or {}).get("dropped") or []:
+        if isinstance(d, dict) and d.get("member"):
+            detail = d.get("reason")
+            if d.get("first_fit_seconds") is not None:
+                detail = f"first fit {_fmt(float(d['first_fit_seconds']), 0)} s > cap"
+            out.append({"member": d["member"], "status": d.get("status"), "detail": detail})
+    for name, r in ((blend or {}).get("redundant") or {}).items():
+        if isinstance(r, dict):
+            out.append({"member": name, "status": "redundant", "detail": f"corr {_fmt(r.get('corr'), 3)} with {r.get('other')}"})
+    for r in (blend or {}).get("ladder") or []:
+        if isinstance(r, dict) and not r.get("admitted"):
+            for m in r.get("members") or []:
+                out.append({"member": m, "status": "not_admitted", "detail": f"arm {r.get('arm')}: {r.get('reason')}"})
+    seen: set[str] = set()
+    return [d for d in out if not (d["member"] in seen or seen.add(d["member"]))]
+
+
+def diag_reference(diag_json: Path, configs: list[dict[str, Any]], models_dir: Path | None = None) -> tuple[float | None, float | None, str]:
+    """``(oof_fit, forward_fit, label)`` the diag ratio is taken against: the uploaded pickle's single member when its
+    manifest (found in ``models/`` by the sha256 the diag sidecars record) bundles exactly one member of this run
+    (e.g. ``bundle --members lgbm_everest``), else the blend row."""
+    blend_fit = next((c.get("fit_mean") for c in configs if c["kind"] == "blend"), None)
+    blend_fwd = next((c.get("forward_fit") for c in configs if c["kind"] == "blend"), None)
+    try:
+        path = Path(diag_json)
+        sides = [path]
+        if path.name.endswith(".upload.json"):
+            sides.append(path.with_name(path.name[: -len(".upload.json")] + ".meta.json"))
+        shas: set[str] = set()
+        for side in sides:
+            rec = _load_json(side)
+            if isinstance(rec, dict):
+                shas |= {str(rec[k]) for k in ("built_from_pkl_sha256", "pkl_sha256") if rec.get(k)}
+        mdir = Path(models_dir) if models_dir is not None else Path(__file__).resolve().parents[1] / "models"
+        manifests = sorted(mdir.glob("*.manifest.json")) if shas and mdir.is_dir() else []
+        for mf in manifests:
+            man = _load_json(mf)
+            if not isinstance(man, dict) or str(man.get("sha256")) not in shas:
+                continue
+            names = [str(m.get("name")) for m in man.get("members") or [] if isinstance(m, dict)]
+            row = next((c for c in configs if c.get("kind") == "member" and len(names) == 1 and c.get("name") == names[0]), None)
+            if row is not None:
+                return row.get("fit_mean"), row.get("forward_fit"), f"member {names[0]} ({mf.name})"
+    except Exception as exc:  # noqa: BLE001 - a reporter never fails on a side computation
+        log.warning("diag reference lookup skipped: %s", exc)
+    return blend_fit, blend_fwd, "blend row"
+
+
+def _diag_with_reference(diag_json: Path, configs: list[dict[str, Any]], models_dir: Path | None) -> dict[str, Any]:
+    fit, fwd, label = diag_reference(diag_json, configs, models_dir)
+    d = diag_doc(diag_json, fit, fwd)
+    if d.get("present"):
+        d["oof_reference"] = label
+    return d
+
+
+def diag_doc(path: Path, oof_fit: float | None, forward_fit: float | None) -> dict[str, Any]:
+    """Validation-diagnostics panel from ``<file>.upload.json`` (written by ``stealth.diag --upload``) + the OOF ratio.
+
+    Informational only (PLAN C13): the number is never used to tune p_b / p_c or to select members.
+    """
+    path = Path(path)
+    rec = _load_json(path)
+    if not isinstance(rec, dict):
+        return {"present": False, "path": path.name, "note": f"{path.name} missing or unreadable (no upload recorded)"}
+    panel = rec.get("panel")
+    if not isinstance(panel, dict) and isinstance(rec.get("result"), dict):
+        from stealth import diag as diagmod  # lazy: only for an upload json written before the panel was stored
+
+        panel = diagmod.panel_from_result(rec["result"])
+    panel = panel if isinstance(panel, dict) else {}
+    fit = panel.get("fit20")
+
+    def _ratio(ref: float | None) -> float | None:
+        if isinstance(fit, (int, float)) and isinstance(ref, (int, float)) and ref:
+            return float(fit) / float(ref)
+        return None
+
+    return {"present": True, "path": path.name, "model_id": rec.get("model_id"), "upload_id": rec.get("upload_id"),
+            "file": rec.get("file"), "rows": rec.get("rows"), "uploaded_at": rec.get("uploaded_at"),
+            "result_at": rec.get("result_at"), "attached_pkl": rec.get("attached_pkl"),
+            "built_from_pkl_sha256": rec.get("built_from_pkl_sha256"), "status": panel.get("status"),
+            "panel": {k: v for k, v in panel.items() if k != "status"},
+            "oof_fit": oof_fit, "forward_fit": forward_fit,
+            "ratio_diag_vs_oof": _ratio(oof_fit), "ratio_diag_vs_forward": _ratio(forward_fit),
+            "note": "informational only: the diag lane never tunes p_b/p_c or selects members"}
+
+
+def _baseline_name(paired: dict[str, Any], members: dict[str, Any]) -> str | None:
+    """The B side most member paired keys (``<member>_vs_<B>``) share; else ``lgbm_everest`` when it is a member."""
+    counts: dict[str, int] = {}
+    for key in paired:
+        a, sep, b = key.partition("_vs_")
+        if sep and a in members and b in members:
+            counts[b] = counts.get(b, 0) + 1
+    if counts:
+        return max(counts, key=lambda k: counts[k])
+    return "lgbm_everest" if "lgbm_everest" in members else None
+
+
+def blend_vs_baseline(run_dir: Path, blend: dict[str, Any] | None, metrics: dict[str, Any] | None) -> tuple[str, dict] | None:
+    """``("blend_vs_<B>", paired)`` recomputed from ``oof.parquet`` when metrics.json lacks a ``blend_vs_*`` row.
+
+    Per-era fit20 of the reported blend z (blend.json weights; cross-fitted weights when NNLS was adopted, exactly as
+    blend.py reports it) minus the baseline member's, 20-era paired block bootstrap (2000 draws, seed 0) + forward
+    diff. Returns None when the row already exists or the inputs are missing; never raises.
+    """
+    paired = (metrics or {}).get("paired") or {}
+    members = (metrics or {}).get("members") or {}
+    if any(k.startswith("blend_vs_") for k in paired) or not blend or not isinstance(blend.get("weights"), dict):
+        return None
+    base = _baseline_name(paired, members)
+    if base is None or not (run_dir / "oof.parquet").exists():
+        return None
+    try:
+        import pandas as pd
+
+        from stealth import blend as blendmod
+        from stealth import cv as cvmod
+        from stealth import metrics as metmod
+        from stealth.data import PRIMARY_TARGET
+
+        w = {k: float(v) for k, v in blend["weights"].items() if isinstance(v, (int, float)) and float(v) > 0}
+        cols = sorted({f"m__{n}" for n in [*w, base]})
+
+        def fits(frame: pd.DataFrame, crossfit: bool) -> tuple[pd.Series, pd.Series]:
+            Z = blendmod.gaussianise_per_era(frame[cols].rename(columns=lambda c: c[3:]), frame["era"])
+            if crossfit:
+                z, _ = blendmod.crossfit_nnls(Z[list(w)], frame)
+            else:
+                z = blendmod.blend_scores(Z, w)
+            y, era = frame[PRIMARY_TARGET], frame["era"]
+            return metmod.per_era_fit(z, y, era), metmod.per_era_fit(frame[f"m__{base}"], y, era)
+
+        oof = pd.read_parquet(run_dir / "oof.parquet", columns=["era", "fold", PRIMARY_TARGET, *cols])
+        nnls = blend.get("rule") == "nnls"
+        fb, fbase = fits(oof, nnls)
+        res = cvmod.paired_block_bootstrap((fb - fbase).dropna(), block=20, n_boot=2000, seed=0).as_dict()
+        res["fwd_diff"] = None
+        fwd_path = run_dir / "forward.parquet"
+        if fwd_path.exists() and not nnls:
+            fwd = pd.read_parquet(fwd_path, columns=["era", PRIMARY_TARGET, *cols])
+            gb, gbase = fits(fwd, False)
+            res["fwd_diff"] = float(gb.mean() - gbase.mean())
+        res["source"] = ("report.py: recomputed from oof.parquet with blend.json weights"
+                         + (" (cross-fitted NNLS)" if nnls else " (equal weights)"))
+        return f"blend_vs_{base}", res
+    except Exception as exc:  # noqa: BLE001 - a reporter never fails on a side computation
+        log.warning("blend_vs_baseline recompute skipped: %s", exc)
+        return None
+
+
 # --------------------------------------------------------------------------------------------- JSON
 
 
 def build_metrics_json(run_id: str, handoff: str, slug: str, run_dir: Path, metrics: dict[str, Any] | None,
-                       blend: dict[str, Any] | None, env: dict[str, Any]) -> dict[str, Any]:
-    """Assemble the ``NN-metrics.json`` document. Config names + metrics only; never hyperparameter values."""
+                       blend: dict[str, Any] | None, env: dict[str, Any], *, diag_json: Path | None = None,
+                       recompute: bool = True, models_dir: Path | None = None) -> dict[str, Any]:
+    """Assemble the ``NN-metrics.json`` document. Config names + metrics only; never hyperparameter values.
+
+    ``diag_json`` adds the validation-diagnostics panel (``stealth.diag`` upload record); ``recompute`` allows the
+    ``blend_vs_<baseline>`` paired row to be recomputed from ``oof.parquet`` when metrics.json lacks it.
+    """
     status = (metrics or {}).get("status") or "failed"
     host_src = (metrics or {}).get("host") or {}
     host = {
@@ -224,11 +506,19 @@ def build_metrics_json(run_id: str, handoff: str, slug: str, run_dir: Path, metr
         "libs": host_src.get("libs", env.get("libs")),
         "tz": host_src.get("tz", env.get("tz")),
     }
-    paired = (metrics or {}).get("paired") or {}
+    paired = dict((metrics or {}).get("paired") or {})
+    recomputed = blend_vs_baseline(run_dir, blend, metrics) if recompute else None
+    if recomputed is not None:
+        paired[recomputed[0]] = recomputed[1]
+    admitted = (blend or {}).get("admitted")
+    weights = (blend or {}).get("weights") if isinstance((blend or {}).get("weights"), dict) else {}
     configs: list[dict[str, Any]] = []
     for name, m in ((metrics or {}).get("members") or {}).items():
         fit = m.get("fit") or {}
         configs.append({
+            "arm": m.get("arm"),
+            "admitted": (name in admitted) if isinstance(admitted, list) else None,
+            "weight": weights.get(name),
             "name": name,
             "kind": "member",
             "fit_mean": fit.get("mean"),
@@ -250,24 +540,35 @@ def build_metrics_json(run_id: str, handoff: str, slug: str, run_dir: Path, metr
         })
     blend_m = (metrics or {}).get("blend") or {}
     if blend_m or blend:
-        ew = blend_m.get("ew") or {}
+        # the blend row is the CHOSEN blend (cross-fitted when NNLS was adopted); M1 metrics.json only has "ew"
+        rule = str((blend or {}).get("rule") or blend_m.get("rule") or "ew")
+        chosen = blend_m.get("chosen") or ((blend or {}).get("blend") or {}).get("chosen") or blend_m.get("ew") or {}
         configs.append({
-            "name": "blend_" + str((blend or {}).get("rule") or "ew"),
+            "name": "blend_" + rule,
             "kind": "blend",
-            "fit_mean": ew.get("mean"),
-            "fit_se": _se(ew),
-            "fit_std": ew.get("std"),
-            "sharpe": ew.get("sharpe"),
-            "pct_pos": ew.get("pct_pos"),
-            "frac_roll20_neg": ew.get("frac_roll20_neg"),
-            "n_eras": ew.get("n_eras"),
-            "ci90": ew.get("ci90"),
+            "fit_mean": chosen.get("mean"),
+            "fit_se": _se(chosen),
+            "fit_std": chosen.get("std"),
+            "sharpe": chosen.get("sharpe"),
+            "pct_pos": chosen.get("pct_pos"),
+            "frac_roll20_neg": chosen.get("frac_roll20_neg"),
+            "n_eras": chosen.get("n_eras"),
+            "ci90": chosen.get("ci90"),
             "forward_fit": blend_m.get("forward_fit"),
             "rho_b_val": blend_m.get("corr_with_bench_val"),
             "rho_c": blend_m.get("rho_c"),
             "regime": _headline_regime(blend),
+            "chosen_is_crossfit": bool(blend_m.get("chosen_is_crossfit") or (blend or {}).get("chosen_is_crossfit")),
+            "suspect": blend_m.get("suspect", (blend or {}).get("suspect")),
             "paired_vs_baseline": _paired_for("blend", paired),
         })
+        ew = blend_m.get("ew")
+        if rule != "ew" and isinstance(ew, dict):
+            configs.append({"name": "blend_ew", "kind": "blend_context", "fit_mean": ew.get("mean"), "fit_se": _se(ew),
+                            "fit_std": ew.get("std"), "sharpe": ew.get("sharpe"), "pct_pos": ew.get("pct_pos"),
+                            "frac_roll20_neg": ew.get("frac_roll20_neg"), "n_eras": ew.get("n_eras"), "ci90": ew.get("ci90"),
+                            "paired_vs_baseline": None})
+    corr_summary, corr_matrix = member_corr_doc(blend)
     doc: dict[str, Any] = {
         "schema": "stealth.results/1",
         "handoff": handoff,
@@ -288,13 +589,28 @@ def build_metrics_json(run_id: str, handoff: str, slug: str, run_dir: Path, metr
             "weights": (blend or {}).get("weights"),
             "p_b": (blend or {}).get("p_b"),
             "p_c": (blend or {}).get("p_c"),
+            "p_source": ((blend or {}).get("neutralisation") or {}).get("p_source") or (blend or {}).get("p_source"),
             "paired_vs_ew": (blend or {}).get("paired_vs_ew"),
             "regime": (blend or {}).get("regime"),
+            "admitted": admitted,
+            "chosen_is_crossfit": (blend or {}).get("chosen_is_crossfit"),
         } if blend else None,
+        "universe": _pick((metrics or {}).get("universe"), _UNIVERSE_KEYS),
+        "knobs": knobs_doc(run_dir, metrics),
+        "search": search_doc(run_dir, metrics),
+        "ladder": ladder_doc(blend),
+        "member_corr_max_pair": corr_summary,
+        "member_corr": corr_matrix,
+        "neutralisation": neutralisation_doc(blend),
+        "final": final_doc(blend),
+        "dropped": dropped_doc(metrics, blend),
+        "diag": _diag_with_reference(diag_json, configs, models_dir) if diag_json is not None else None,
         "leak_check": (metrics or {}).get("leak_check"),
         "notes": list((metrics or {}).get("notes") or []),
         "artifacts_present": sorted(p.name for p in run_dir.iterdir()) if run_dir.exists() else [],
     }
+    if recomputed is not None:
+        doc["notes"].append(f"{recomputed[0]}: not in metrics.json; {recomputed[1]['source']}")
     if metrics is None:
         doc["notes"].append(f"metrics.json missing in {run_dir.relative_to(REPO) if run_dir.is_relative_to(REPO) else run_dir}")
     return doc
@@ -331,15 +647,95 @@ def _metrics_section(doc: dict[str, Any]) -> str:
         p = c.get("paired_vs_baseline") or {}
         ci = c.get("ci90")
         ci_s = f"[{_fmt(ci[0])}, {_fmt(ci[1])}]" if isinstance(ci, (list, tuple)) and len(ci) == 2 else "-"
+        kind = c["kind"] + (" (cross-fitted)" if c.get("chosen_is_crossfit") else "")
         rows.append([
-            c["name"], c["kind"], _fmt(c.get("fit_mean")), _fmt(c.get("fit_se")), _fmt(c.get("sharpe"), 2),
-            _fmt(c.get("pct_pos"), 2), ci_s, _fmt(c.get("forward_fit")), _fmt(c.get("rho_b_val"), 3),
-            _fmt(c.get("n_iter")), _fmt(c.get("suspect")),
+            c["name"], kind, _fmt(c.get("arm")), _fmt(c.get("weight"), 3), _fmt(c.get("fit_mean")), _fmt(c.get("fit_se")),
+            _fmt(c.get("sharpe"), 2), _fmt(c.get("pct_pos"), 2), ci_s, _fmt(c.get("forward_fit")),
+            _fmt(c.get("rho_b_val"), 3), _fmt(c.get("rho_c"), 3), _fmt(c.get("n_iter")), _fmt(c.get("suspect")),
             _fmt(p.get("diff")), _fmt(p.get("se")), _fmt(p.get("p_pos"), 2), _fmt(p.get("baseline")),
         ])
     return _md_table(
-        ["config", "kind", "fit_mean", "fit_se", "sharpe", "pct_pos", "ci90", "forward_fit", "rho_b_val", "n_iter",
-         "suspect", "paired diff_mean", "diff_se", "p_pos", "vs"], rows)
+        ["config", "kind", "arm", "weight", "fit_mean", "fit_se", "sharpe", "pct_pos", "ci90", "forward_fit", "rho_b_val",
+         "rho_c", "n_iter", "suspect", "paired diff_mean", "diff_se", "p_pos", "vs"], rows)
+
+
+def _knobs_section(k: dict[str, Any]) -> str:
+    rows = [[_fmt(c.get("key")), _fmt(c.get("dimension")), _fmt(c.get("fit_cv")), _fmt(c.get("fit_fwd")),
+             _fmt(c.get("diff_fwd")), _fmt(c.get("diff_se_fwd")), _fmt(c.get("p_pos_fwd"), 2), _fmt(c.get("diff_cv_indep")),
+             _fmt(c.get("holm_rank")), _fmt(c.get("holm_threshold"), 3), _fmt(c.get("pass"))] for c in k.get("candidates") or []]
+    head = (f"chosen universe: `{k.get('chosen')}` (default `{k.get('default')}`; knob member {k.get('member')}; "
+            f"Holm alpha {_fmt(k.get('alpha_total'), 2)}; status {k.get('status')})")
+    return head + "\n\n" + _md_table(["candidate", "dimension", "fit_cv", "fit_fwd", "diff_fwd", "diff_se", "p_pos_fwd",
+                                      "diff_cv_indep", "holm_rank", "holm_thr", "pass"], rows)
+
+
+def _search_section(rows_in: list[dict[str, Any]]) -> str:
+    rows = []
+    for r in rows_in:
+        pc = r.get("paired_cv") or {}
+        rows.append([r["member"], _fmt(r.get("n_trials")), _fmt(r.get("topk_fit")), _fmt(r.get("base_params_fit")),
+                     _fmt(r.get("gain")), _fmt(r.get("forward_gain")), _fmt(pc.get("p_pos"), 2), _fmt(r.get("adopted")),
+                     _fmt(r.get("suspect")), scrub(str(r.get("adopt_reason") or "-"))])
+    return _md_table(["member", "n_trials", "topk_fit", "base_fit", "gain", "forward_gain", "paired p_pos", "adopted",
+                      "suspect", "reason"], rows)
+
+
+def _ladder_section(rows_in: list[dict[str, Any]]) -> str:
+    rows = [[_fmt(r.get("arm")), ", ".join(r.get("members") or []) or "-", _fmt(r.get("admitted")), _fmt(r.get("diff_mean")),
+             _fmt(r.get("diff_se")), _fmt(r.get("p_pos"), 2), _fmt(r.get("fwd_diff")), _fmt(r.get("dsharpe"), 3),
+             _fmt(r.get("p_pos_sharpe"), 2), _fmt(r.get("corr_with_incumbent"), 3), scrub(str(r.get("reason") or "-"))]
+            for r in rows_in]
+    return _md_table(["arm", "members", "admitted", "diff_mean", "diff_se", "p_pos", "fwd_diff", "dsharpe", "p_pos_sharpe",
+                      "corr_inc", "reason"], rows)
+
+
+def _corr_section(s: dict[str, Any]) -> str:
+    mp = s.get("max_pair") or {}
+    head = (f"max pair: {mp.get('a', '-')} / {mp.get('b', '-')} corr {_fmt(mp.get('corr'), 3)} "
+            f"({s.get('n_members')} members; full matrix in NN-metrics.json `member_corr`)")
+    rows = [[p["a"], p["b"], _fmt(p["corr"], 3)] for p in s.get("top_pairs") or []]
+    return head + "\n\n" + _md_table(["member a", "member b", "corr"], rows)
+
+
+def _neutral_section(n: dict[str, Any]) -> str:
+    head = [f"chosen p_b = {_fmt(n.get('p_b'), 2)}, p_c = {_fmt(n.get('p_c'), 2)}; p_source = **{n.get('p_source')}**"
+            f" (z: {n.get('z_source') or '-'})", f"reason: {scrub(str(n.get('reason') or '-'))}"]
+    if n.get("would_choose"):
+        head.append(f"simulation would choose: {n['would_choose']} (not used: select is false)")
+    rows = [[_fmt(r.get("p_b"), 2), _fmt(r.get("p_c"), 2), _fmt(r.get("fit")), _fmt(r.get("score")),
+             _fmt(r.get("score_sharpe"), 3), _fmt(r.get("W")), _fmt(r.get("eligible")), _fmt(r.get("in_tie_set"))]
+            for r in n.get("table") or []]
+    return "\n".join(f"- {h}" for h in head) + "\n\n" + _md_table(
+        ["p_b", "p_c", "mix fit", "mix score", "score_sharpe", "W (worst regime)", "eligible", "tie set"], rows)
+
+
+def _final_section(f: dict[str, Any]) -> str:
+    oof = f.get("oof") or {}
+    rows = [["admitted arms", ", ".join(f.get("admitted_arms") or []) or "-"], ["rule", _fmt(f.get("rule"))],
+            ["p_b / p_c (p_source)", f"{_fmt(f.get('p_b'), 2)} / {_fmt(f.get('p_c'), 2)} ({f.get('p_source')})"],
+            ["OOF fit20 mean (se)", f"{_fmt(oof.get('mean'))} ({_fmt(oof.get('fit_se'))})"],
+            ["OOF sharpe / pct_pos", f"{_fmt(oof.get('sharpe'), 3)} / {_fmt(oof.get('pct_pos'), 2)}"],
+            ["forward fit20", _fmt(f.get("forward_fit"))], ["central mix score", _fmt(f.get("score_mix_central"))],
+            ["central score Sharpe", _fmt(f.get("score_sharpe_central"), 3)], ["W (worst regime score)", _fmt(f.get("W"))]]
+    return _md_table(["item", "value"], rows)
+
+
+def _dropped_section(rows_in: list[dict[str, Any]]) -> str:
+    return _md_table(["member", "status", "detail"],
+                     [[d["member"], _fmt(d.get("status")), scrub(str(d.get("detail") or "-"))] for d in rows_in])
+
+
+def _diag_section(d: dict[str, Any]) -> str:
+    if not d.get("present"):
+        return f"_{d.get('note')}_"
+    p = d.get("panel") or {}
+    rows = [["model_id", _fmt(d.get("model_id"))], ["upload_id", _fmt(d.get("upload_id"))],
+            ["file / rows", f"{d.get('file')} / {d.get('rows')}"], ["uploaded_at", _fmt(d.get("uploaded_at"))],
+            ["status", _fmt(d.get("status"))], ["attached_pkl", _fmt(d.get("attached_pkl"))]]
+    rows += [[k, _fmt(v)] for k, v in p.items()]
+    rows += [[f"OOF fit20 ({d.get('oof_reference') or 'blend row'})", _fmt(d.get("oof_fit"))], ["diag fit20 / OOF fit20", _fmt(d.get("ratio_diag_vs_oof"), 3)],
+             ["diag fit20 / forward fit20", _fmt(d.get("ratio_diag_vs_forward"), 3)]]
+    return _md_table(["item", "value"], rows) + f"\n\n- {d.get('note')}"
 
 
 def _paired_section(paired: dict[str, Any]) -> str:
@@ -442,6 +838,22 @@ def render_markdown(doc: dict[str, Any], env: dict[str, Any], blend: dict[str, A
         "",
         _regime_section(blend),
         "",
+    ]
+    # M2-M6 sections appear only when the run produced them (an M1 run's report keeps its old shape)
+    optional = [
+        ("Validation diagnostics (upload; informational only, never tunes p)", doc.get("diag"), _diag_section),
+        ("Training universe (knobs, decided once on the forward block)", doc.get("knobs"), _knobs_section),
+        ("Search adoption (top-k vs base cell; paired gate)", doc.get("search"), _search_section),
+        ("Admission ladder (pre-registered order, one look per arm)", doc.get("ladder"), _ladder_section),
+        ("Member correlation", doc.get("member_corr_max_pair"), _corr_section),
+        ("Neutralisation constants (simulation, staking-aware)", doc.get("neutralisation"), _neutral_section),
+        ("Final selection", doc.get("final"), _final_section),
+        ("Dropped members", doc.get("dropped"), _dropped_section),
+    ]
+    for title, value, fn in optional:
+        if value:
+            parts += [f"## {title}", "", fn(value), ""]
+    parts += [
         "## Wall times",
         "",
         _timings_section(doc.get("timings") or {}),
@@ -462,12 +874,16 @@ def render_markdown(doc: dict[str, Any], env: dict[str, Any], blend: dict[str, A
 
 
 def write_results(run_id: str, handoff: str, *, repo: Path = REPO, artifacts_dir: Path | None = None,
-                  results_dir: Path | None = None, log_lines: int = 60) -> dict[str, Any]:
+                  results_dir: Path | None = None, log_lines: int = 60, diag_json: Path | None = None,
+                  recompute: bool = True) -> dict[str, Any]:
     """Write ``NN-results.md``, ``NN-metrics.json``, ``NN-log-tail.txt``.
 
     Returns ``{"paths": [Path, ...], "status": str, "slug": str, "doc": dict}``. Never raises on missing
-    artifacts: a missing ``metrics.json`` yields status ``failed`` with whatever log tail exists.
+    artifacts: a missing ``metrics.json`` yields status ``failed`` with whatever log tail exists. ``diag_json``
+    (relative paths resolve against ``repo``) adds the validation-diagnostics panel.
     """
+    if diag_json is not None and not Path(diag_json).is_absolute():
+        diag_json = repo / diag_json
     artifacts_dir = artifacts_dir or (repo / "artifacts")
     results_dir = results_dir or (repo / "handoffs" / "results")
     run_dir = artifacts_dir / run_id
@@ -475,7 +891,8 @@ def write_results(run_id: str, handoff: str, *, repo: Path = REPO, artifacts_dir
     blend = _load_json(run_dir / "blend.json")
     env = selfcheck.collect_env(repo / "requirements-lock.txt", repo)
     slug = handoff_slug(handoff, repo / "handoffs", fallback=_config_name(run_dir, metrics) or run_id)
-    doc = build_metrics_json(run_id, handoff, slug, run_dir, metrics, blend, env)
+    doc = build_metrics_json(run_id, handoff, slug, run_dir, metrics, blend, env, diag_json=diag_json,
+                             recompute=recompute, models_dir=repo / "models")
     tail = log_tail(run_dir / "run.log", log_lines)
     tb = extract_traceback(run_dir / "run.log") if doc["status"] != "ok" else None
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -529,11 +946,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-git", action="store_true", help="write files only; no commit, no push")
     parser.add_argument("--no-push", action="store_true", help="commit but do not push")
     parser.add_argument("--log-lines", type=int, default=60)
+    parser.add_argument("--diag-json", type=Path, default=None,
+                        help="<validation file>.upload.json from `stealth.diag --upload`: adds the diagnostics panel")
+    parser.add_argument("--no-recompute", action="store_true",
+                        help="never recompute the blend_vs_<baseline> paired row from oof.parquet")
     parser.add_argument("--repo", type=Path, default=REPO, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    res = write_results(args.run_id, args.handoff, repo=args.repo, log_lines=args.log_lines)
+    res = write_results(args.run_id, args.handoff, repo=args.repo, log_lines=args.log_lines, diag_json=args.diag_json,
+                        recompute=not args.no_recompute)
     for p in res["paths"]:
         sys.stdout.write(f"wrote {p}\n")
     sys.stdout.write(f"status: {res['status']}\n")

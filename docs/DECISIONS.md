@@ -14,6 +14,14 @@ Decisions made by the user that shape the build. Newest at the bottom.
 | 6 | GPT push auth | User handles it; the GPT has its own GitHub access. Handoffs just say "commit and push". |
 | 7 | Staking intent | **Possibly yes** → model selection weights Sharpe / benchmark-negative-regime robustness more heavily, not just mean FIT. |
 
+## 2026-11-13 — after handoff 02
+
+| # | Question | Decision |
+|---|---|---|
+| 8 | Merge the M2–M6 branch into `main` | **Approved in advance**, once tests and reviews pass. |
+| 9 | Handoff 03 (diag upload #1 of the M1 LightGBM baseline) | **Approved in advance.** The GPT still asks for confirmation in its own chat before the upload step. |
+| 10 | Compute budget | The laptop ran handoff 02 in ~12.5 min (est. 30–45). Spend the extra on measurement (fold offsets, bootstrap draws, stability checks), slower trees, admission candidates and the MLP — not on bigger searches or seed bagging. |
+
 ## Standing rules
 
 - Nothing is submitted, uploaded, or staked without a handoff carrying a **USER MUST APPROVE** banner.

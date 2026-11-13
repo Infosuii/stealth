@@ -29,7 +29,7 @@ def _folds_for_config(cfg: dict) -> list[cv.Fold]:
     return folds
 
 
-@pytest.mark.parametrize("name", ["smoke", "test", "full"])
+@pytest.mark.parametrize("name", ["smoke", "test", "full", "minifull"])
 def test_every_config_fold_gap_ge_20(repo_root: Path, name: str) -> None:
     cfg = yaml.safe_load((repo_root / "configs" / f"{name}.yaml").read_text())
     folds = _folds_for_config(cfg)
@@ -225,3 +225,38 @@ def test_independent_inner_folds_smoke_layout() -> None:
     folds = cv.purged_folds(eras, 3)
     assert cv.independent_inner_folds(folds[2], folds) == [2]
     assert cv.independent_inner_folds(folds[0], folds) == [0, 1, 2]
+
+
+# ------------------------------------------------------------------------------------- extend_train (M2 pool)
+def test_extend_train_adds_pool_eras_with_gap_and_keeps_inner_val() -> None:
+    scoring = ALL_TRAIN_ERAS[ALL_TRAIN_ERAS >= 5000]
+    pool_extra = ALL_TRAIN_ERAS[(ALL_TRAIN_ERAS >= 4600) & (ALL_TRAIN_ERAS < 5000)]
+    folds = cv.purged_folds(scoring, 3)
+    fw = cv.forward_block(scoring)
+    for f in folds + [fw]:
+        g = cv.extend_train(f, pool_extra, gap=40)
+        # test and inner_val untouched -> a universe masking the pool out reproduces the M1 fold exactly
+        assert np.array_equal(g.test_eras, f.test_eras) and np.array_equal(g.inner_val_eras, f.inner_val_eras)
+        added = np.setdiff1d(g.train_eras, f.train_eras)
+        assert np.array_equal(added, np.setdiff1d(g.inner_train_eras, f.inner_train_eras))
+        # every added era lies MORE than 40 eras before the test block (purge + embargo)
+        assert added.size and int(added.max()) < int(f.test_eras.min()) - 40
+        assert np.isin(f.train_eras, g.train_eras).all() and np.isin(f.inner_train_eras, g.inner_train_eras).all()
+        assert g.train_eras.dtype == np.int32 and np.all(np.diff(g.train_eras) > 0)
+        cv.assert_fold_gaps([g], min_gap=20)
+    # fold0's test block starts at 5000: the 40 eras just below are purged, the rest join train AND inner_train
+    g0 = cv.extend_train(folds[0], pool_extra, gap=40)
+    assert int(g0.train_eras.min()) == 4600 and not ((g0.train_eras >= 4960) & (g0.train_eras < 5000)).any()
+    assert int(np.setdiff1d(g0.train_eras, folds[0].train_eras).max()) == 4959
+
+
+def test_extend_train_noop_and_validation() -> None:
+    eras = ALL_TRAIN_ERAS[ALL_TRAIN_ERAS >= 5000]
+    f = cv.purged_folds(eras, 3)[0]
+    assert cv.extend_train(f, np.array([4980, 4990], dtype=np.int32), gap=40) is f  # all inside the purge gap
+    assert cv.extend_train(f, np.array([], dtype=np.int32), gap=40) is f
+    with pytest.raises(ValueError):
+        cv.extend_train(f, eras, gap=-1)
+    # eras after the test block are never added (the pool only extends BELOW the scoring universe)
+    g = cv.extend_train(f, np.array([4000, 9000], dtype=np.int32), gap=40)
+    assert 4000 in g.train_eras and 9000 not in g.train_eras

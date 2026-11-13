@@ -1,0 +1,138 @@
+# Minifull tier (sandbox, 2 threads, <= 8 min end to end incl. the MLP on CPU torch). docs/INTERFACES.md section 20.
+# Exercises every M2-M6 path at toy scale: knobs on a training pool below the scoring universe, TPE search + adoption
+# gate, aux best_of, exhaustive XGB grid, timed CatBoost, ridge, sharpe arm, bags, external MLP, admission ladder,
+# neutralisation selection over the (p_b, p_c) grid, bundle --require-frozen. Numbers from it mean nothing.
+name: minifull
+run:
+  seed: 0
+  threads: 2
+  min_era: 5000          # SCORING universe
+  max_era: null
+  min_rows: null
+  time_decay: false
+  data_dir: data
+cv:
+  n_folds: 3
+  purge: 20
+  embargo: 20
+  inner_frac: 0.15
+  inner_gap: 20
+  forward:
+    enabled: true
+    train_end: 5925
+    test_start: 5945
+knobs:                   # training pool from 4600 (eras 4600..4959 join train/inner_train of every fold)
+  member: lgbm_everest
+  era_start: [5000, 4600]
+  rows_rule: [none, filter80, weight80]   # every era >= 4600 has >= 80 rows: both are equivalent to the default here
+  rows_low_weight: 0.5
+  time_decay: [false, true]
+  alpha_total: 0.2
+members:
+  - name: lgbm_everest
+    family: lgbm
+    target: target_everest
+    group: everest
+    arm: lgbm
+    features: all
+    input: nan
+    params: {num_leaves: 8, learning_rate: 0.1, min_data_in_leaf: 500, feature_fraction: 0.3,
+             lambda_l2: 10, bagging_fraction: 0.7, bagging_freq: 1, max_bin: 16}
+    n_estimators: null
+    es_cap: 80
+  - {name: lgbm_tougroute, family: lgbm, target: target_Tougroute, group: aux, arm: aux, features: all, input: nan,
+     params: {best_of: lgbm_everest}, n_estimators: null, es_cap: 80}
+  - {name: lgbm_ghat, family: lgbm, target: target_Ghat, group: aux, arm: aux, features: all, input: nan,
+     params: {best_of: lgbm_everest}, n_estimators: 60, es_cap: null}
+  - name: xgb_everest
+    family: xgb
+    target: target_everest
+    group: everest
+    arm: xgb
+    features: all
+    input: nan
+    params: {max_depth: 3, learning_rate: 0.1, min_child_weight: 200, subsample: 0.7, colsample_bytree: 0.3,
+             reg_lambda: 10, tree_method: hist, max_bin: 16}
+    n_estimators: 60
+    es_cap: null
+  - {name: cat_everest, family: cat, target: target_everest, group: everest, arm: cat, features: all, input: nan,
+     params: {depth: 4, learning_rate: 0.1, l2_leaf_reg: 30, iterations: 50, border_count: 16}, n_estimators: 50, es_cap: null}
+  - {name: ridge_everest, family: ridge, target: target_everest, group: everest, arm: ridge, features: all, input: linear,
+     params: {alpha: 1.0e5}, n_estimators: null, es_cap: null}
+  - {name: lgbm_everest_sharpe, family: lgbm, target: target_everest, group: everest, arm: sharpe, features: sharpe_subset,
+     input: nan, params: {best_of: lgbm_everest}, n_estimators: 60, es_cap: null}
+  - {name: lgbm_everest_bag0, family: lgbm, target: target_everest, group: everest, arm: bags, features: "bag:0", input: nan,
+     params: {best_of: lgbm_everest}, n_estimators: 60, es_cap: null}
+  - {name: lgbm_everest_bag1, family: lgbm, target: target_everest, group: everest, arm: bags, features: "bag:1", input: nan,
+     params: {best_of: lgbm_everest}, n_estimators: 60, es_cap: null}
+  - name: mlp_everest    # EXTERNAL: /opt/ml/bin/python3 scripts/mlp_train.py --run-id <R> --device cpu (PYTHONPATH=<repo>)
+    family: mlp
+    target: target_everest
+    group: everest
+    arm: mlp
+    features: all
+    input: linear
+    params: {hidden: [32, 16], dropout: 0.3, aux_targets: [target_Tougroute, target_Ghat], aux_weight: 0.5, lr: 1.0e-3,
+             weight_decay: 1.0e-4, batch_size: 4096, patience: 2, device: cpu}
+    seeds: [0]
+    n_estimators: null
+    es_cap: 3
+search:
+  lgbm_everest:          # TPE, 3 trials over a 4-cell grid, top-2, adoption gate on
+    grid:
+      num_leaves: [4, 8]
+      min_data_in_leaf: [500, 2000]
+    n_trials: 3
+    top_k: 2
+    adopt_gate: true
+  xgb_everest:           # exhaustive 2-cell grid, top-2
+    grid:
+      max_depth: [3, 4]
+    n_trials: 2
+    top_k: 2
+    adopt_gate: true
+feature_bags:
+  n_bags: 2
+  fraction: 0.5
+  seed: 0
+sharpe_subset:
+  threshold: 0.1
+refit:
+  seeds: [0]
+blend:
+  everest_weight: 0.5
+  nnls: true
+  p_b: 0.5               # fallback only
+  p_c: 0.25
+  admission:
+    base: [lgbm]
+    order: [aux, xgb, cat, ridge, sharpe, bags, mlp]
+    sharpe_gain: 0.05
+  simulation:
+    n_draws: 30
+    p_b_grid: [0.0, 0.25, 0.5, 0.75]
+    p_c_grid: [0.0, 0.25, 0.5]
+    bench_fit_means: [0.0, 0.009, 0.02]
+    bench_fit_sd: 0.035
+    seed: 0
+  neutralisation:
+    select: true
+    central_mean: 0.009
+    pessimistic_mean: 0.02
+    fit_cost_max: 0.003
+    sharpe_tol: 0.02
+    worst_tol: 0.0005
+bootstrap:
+  block: 20
+  n_boot: 300
+  seed: 0
+gates:
+  leak_spearman: 0.18
+  suspect_gain_over_baseline: 0.004
+  p_pos_adopt: 0.8
+  member_corr_max: 0.95
+  max_search_trials: 25
+  baseline_fit: null
+timing:
+  catboost_max_fit_seconds: 120
+  progress_every_seconds: 30

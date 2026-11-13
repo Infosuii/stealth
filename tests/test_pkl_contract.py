@@ -131,15 +131,10 @@ import json, pickle, sys
 import numpy as np, pandas as pd
 raw = open(sys.argv[1], "rb").read()
 assert b"torch" not in raw
-i = 0; bad = []; allowed = (b"._runtime", b"/_runtime.py", b"/stealth/_runtime.py")
-ident = set(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./\\")
-while True:
-    i = raw.find(b"stealth", i)
-    if i < 0: break
-    tail = raw[i+7:i+8]
-    if not (any(raw.startswith(a, i+7) for a in allowed) or not tail or tail[0] not in ident): bad.append(raw[i-10:i+30])
-    i += 7
-assert not bad, bad
+ns = {}
+exec(sys.argv[4], ns)  # the checker's own scan_bytes (stdlib only), so this test and pkl_check agree on the whitelist
+_, bad, total = ns["scan_bytes"](raw)
+assert not bad and total > 0, bad
 predict = pickle.loads(raw)
 assert "stealth" not in sys.modules and not any(m.startswith("stealth.") for m in sys.modules)
 live = pd.read_parquet(sys.argv[2])
@@ -155,9 +150,11 @@ print(json.dumps({"ok": True, "n": int(len(out1)), "modules": sorted(m for m in 
 """
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
     env["PYTHONPATH"] = ""
+    src = pkl_check.CHECKER_SOURCE
+    scanner = src[src.index("ALLOWED_AFTER ="): src.index("\ndef check_frame")]
     proc = subprocess.run(
         [sys.executable, "-I", "-c", code, str(built["out"]), str(data_dir / "futures_live.parquet"),
-         str(data_dir / "futures_live_benchmark_models.parquet")],
+         str(data_dir / "futures_live_benchmark_models.parquet"), scanner],
         cwd="/tmp", env=env, capture_output=True, text=True, timeout=300,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
@@ -197,6 +194,25 @@ def test_run_check_fails_on_bad_pickle(tmp_path: Path, data_dir: Path):
     torchy.write_bytes(b"\x80\x05" + b"import torch" + b".")
     report2 = pkl_check.run_check(torchy, python=Path(sys.executable), data_dir=data_dir, eras=0)
     assert not report2["passed"] and any("torch" in p for p in report2["problems"])
+
+
+def test_byte_scan_whitelist_is_path_aware():
+    """co_filename of the by-value module may sit under a checkout whose own path contains 'stealth' (a git worktree
+    under /home/u/work/stealth/.claude/...); any other stealth module reference must still fail."""
+    src = pkl_check.CHECKER_SOURCE
+    ns: dict = {}
+    exec(src[src.index("ALLOWED_AFTER ="): src.index("\ndef check_frame")], ns)  # noqa: S102 - our own checker code
+    scan = ns["scan_bytes"]
+    framed = lambda s: b"\x8c" + bytes([len(s) % 256]) + s + b"\x94"  # noqa: E731 - SHORT_BINUNICODE + MEMOIZE framing
+    ok = [b"stealth._runtime", b"/home/u/stealth/stealth/_runtime.py", b"/home/u/work/stealth/.claude/worktrees/m2-m6/stealth/_runtime.py",
+          b"C:\\Users\\u\\stealth\\stealth\\_runtime.py", b"stealth", b"/opt/my stealth/x-y/stealth/_runtime.py"]
+    for s in ok:
+        assert scan(framed(s))[1] == [], s
+    bad = [b"stealth.models.mlp", b"/home/u/stealth/stealth/models/mlp.py", b"/home/u/work/stealth/.claude/worktrees/x/stealth/bundle.py",
+           b"stealthy_thing", b"stealth/models/__init__.py"]
+    for s in bad:
+        assert scan(framed(s))[1], s
+    assert scan(b"xx torch yy")[0] == 1
 
 
 def test_lane_pins_and_cli_errors(tmp_path: Path):

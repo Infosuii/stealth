@@ -134,6 +134,32 @@ def forward_block(
     return fold
 
 
+def extend_train(fold: Fold, extra_eras: np.ndarray, *, gap: int) -> Fold:
+    """Add the eras of ``extra_eras`` lying MORE than ``gap`` eras before ``fold``'s test block to its training sets.
+
+    Used for the training pool below the scoring universe (``run.min_era``, docs/INTERFACES.md section 12): the added
+    eras join ``train_eras`` AND ``inner_train_eras``; ``test_eras`` and ``inner_val_eras`` are unchanged, so a training
+    universe that masks the pool eras out reproduces the unextended fold exactly. Extra eras that would sit inside the
+    inner split's gap (``>= inner_val_min - gap``) or anywhere after the test block are never added. Re-asserts
+    :func:`assert_fold_gaps` with ``min_gap=min(gap, 20)``.
+    """
+    if gap < 0:
+        raise ValueError("gap must be >= 0")
+    extra = np.unique(np.asarray(extra_eras).astype(np.int64)).astype(np.int32)
+    lo = int(fold.test_eras.min())
+    limit = lo - int(gap)  # era < limit  <=>  test_min - era > gap
+    limit = min(limit, int(fold.inner_val_eras.min()) - max(int(gap), 20))
+    add = extra[extra < limit]
+    add = add[~np.isin(add, fold.train_eras)]
+    if add.size == 0:
+        return fold
+    train = np.union1d(fold.train_eras, add).astype(np.int32)
+    inner_tr = np.union1d(fold.inner_train_eras, add).astype(np.int32)
+    out = Fold(fold.name, train, fold.test_eras, inner_tr, fold.inner_val_eras)
+    assert_fold_gaps([out], min_gap=min(int(gap), 20))
+    return out
+
+
 def _gap_to_block(train: np.ndarray, block: np.ndarray) -> int:
     """Smallest distance (in eras) from any ``train`` era to the contiguous span of ``block``."""
     lo, hi = int(block.min()), int(block.max())

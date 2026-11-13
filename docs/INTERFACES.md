@@ -281,3 +281,272 @@ Manifest JSON: `{"pkl": str, "sha256": str, "size_bytes": int, "version": str, "
 | `python -m stealth.selfcheck` | table: python, pinned libs vs requirements-lock (mismatch -> exit 1), OS/CPU/RAM/GPU/TZ, `git config core.hooksPath` (warn if unset), EIQ_API_KEY present yes/no |
 
 `models/active.json`: `{"model_id": str, "upload_id": str, "sha256": str, "pkl": str, "uploaded_at": iso}` (committed).
+
+---
+
+# M2–M6 additions (architect pass, 2026-11-13)
+
+Everything below is additive: an M1 config (`smoke.yaml`, `test.yaml`) must behave exactly as before. Owners in
+brackets (`[train]`, `[blend]`, `[nn]`, `[docs]`) are the work groups; a group never edits another group's files —
+contract changes go through a request file as in the header. "Gate" always means: paired 20-era block bootstrap,
+adopt iff `p_pos >= gates.p_pos_adopt` on CV **and** forward diff `>= 0`; otherwise tie -> keep the simpler thing.
+
+## 11. Config additions (validated by `train.load_config`) [train]
+
+```yaml
+run:
+  min_era: 2800        # SCORING universe: CV test blocks and the forward test block use eras >= min_era (as before)
+  min_rows: null       # legacy scoring-universe filter; load_config REJECTS a non-null value when `knobs` is set
+knobs:                 # optional (full/minifull). Training-universe alternatives, decided ONCE -> knobs.json
+  member: lgbm_everest            # member whose BASE params run the comparison (default: train.baseline_member)
+  era_start: [2800, 2000, 3]      # training rows start here; the entry == run.min_era is the default
+  rows_rule: [none, filter80, weight80]   # none | filter<N>: drop TRAINING eras with n_rows < N |
+                                          # weight<N>: those eras get weight `rows_low_weight`
+  rows_low_weight: 0.5
+  time_decay: [false, true]       # the entry == run.time_decay is the default
+  alpha_total: 0.2                # Holm family-wise level on (1 - p_pos); default 1 - gates.p_pos_adopt
+  # legacy key knobs.min_rows is rejected with "use knobs.rows_rule"
+members:
+  - {..., arm: str}               # optional; default = "aux" for group aux, else the member name. Used for hierarchical
+                                  #   equal weights and the admission ladder. full.yaml sets: lgbm, xgb, cat, ridge,
+                                  #   sharpe, bags, aux, mlp
+  - name: mlp_everest             # family mlp == EXTERNAL member: train.py never fits it (section 14)
+    family: mlp
+    target: target_everest
+    group: everest
+    arm: mlp
+    features: all                 # the 178 base columns of the linear frame
+    input: linear
+    params: {hidden: [256, 64], dropout: 0.3, aux_targets: [<6 aux names>], aux_weight: 0.5, lr: 1.0e-3,
+             weight_decay: 1.0e-4, batch_size: 4096, patience: 5, device: auto}
+    seeds: [0, 1, 2, 3, 4]
+    n_estimators: null            # epochs come from inner early stopping
+    es_cap: 60                    # max epochs
+search:
+  <member>: {grid: {...}, n_trials: int (<= gates.max_search_trials), top_k: int, adopt_gate: true}
+blend:
+  p_b: 0.5             # FALLBACK only (blend.neutralisation.select false); never what a frozen bundle uses
+  p_c: 0.25
+  admission:           # optional; absent -> every trained member is admitted (M1 behaviour)
+    base: [lgbm]                  # arms always in (the M2 incumbent)
+    order: [aux, xgb, cat, ridge, sharpe, bags, mlp]   # pre-registered; arms absent from the run are skipped
+    sharpe_gain: 0.05
+  simulation: {n_draws, p_b_grid, bench_fit_means, bench_fit_sd, seed, p_c_grid: [0.0, 0.25, 0.5]}
+  neutralisation:      # optional; absent -> select: false
+    select: true
+    central_mean: 0.009           # must be one of simulation.bench_fit_means
+    pessimistic_mean: 0.02        # must be one of simulation.bench_fit_means
+    fit_cost_max: 0.003
+    sharpe_tol: 0.02
+    worst_tol: 0.0005
+gates: {..., member_corr_max: 0.95, max_search_trials: 25}
+timing: {catboost_max_fit_seconds: 120, progress_every_seconds: 60}   # cap now ENFORCED (section 15)
+```
+Validation adds: every `p_b_grid`/`p_c_grid` value within the caps 0.75 / 0.5; `central_mean`/`pessimistic_mean` in
+`bench_fit_means`; `admission.base`/`order` name arms (unknown arm -> warning, skipped); `mlp` members need `seeds`,
+`input: linear`; `n_trials <= gates.max_search_trials` (default 25).
+
+## 12. Training universe + knobs (`stealth/knobs.py` NEW, `cv.py`, `train.py`) [train]
+
+`stealth/knobs.py` module-level imports: stdlib, numpy, pandas, `stealth.data`, `stealth.cv` ONLY (the GPU venv
+imports it); `stealth.metrics` is imported inside `select_universe`.
+```python
+@dataclass(frozen=True)
+class Universe:
+    era_start: int; rows_rule: str = "none"; time_decay: bool = False; rows_low_weight: float = 0.5
+    def key(self) -> str                       # stable, e.g. "e2800-none-d0" (cache keys, spec.json["universe"])
+    def to_dict(self) -> dict; @classmethod def from_dict(cls, d) -> "Universe"
+    def train_mask(self, era: np.ndarray, era_n_rows: np.ndarray) -> np.ndarray      # bool per row, TRAINING only
+    def weights(self, era: np.ndarray, era_n_rows: np.ndarray) -> np.ndarray | None
+        # rows rule weight x data.time_decay_weights(era of THIS fit, enabled) ; None when both are off
+def default_universe(cfg: dict) -> Universe            # era_start=run.min_era, rows none, time_decay=run.time_decay
+def candidates(cfg: dict) -> list[Universe]            # [default] + ONE-knob-at-a-time alternatives, config order (no factorial)
+def select_universe(rd, cfg: dict, run_dir: Path, *, prog=None) -> tuple[Universe, dict]   # writes / reuses knobs.json
+```
+`cv.extend_train(fold: Fold, extra_eras: np.ndarray, *, gap: int) -> Fold` adds the eras of `extra_eras` that lie
+`> gap` before the test block to `train_eras` AND `inner_train_eras`; `inner_val_eras` and `test_eras` are unchanged
+(so the default universe reproduces the M1 folds exactly); re-asserts `assert_fold_gaps`.
+
+`RunData` loads eras `>= min(run.min_era, min(knobs.era_start))` (the pool); folds/forward are built on scoring eras
+`>= run.min_era` exactly as today and then extended with the pool eras `< run.min_era`. A universe never touches
+test/prediction rows: `_fit_rows` = fold eras & target notna & `universe.train_mask`; sample weights =
+`universe.weights`. Full refits use pool eras under the universe. `sharpe_subset` uses universe-masked training rows;
+its cache key, search-cell hashes (`_params_hash({**params, "__universe__": key})`) and member resume all include
+`universe.key()` (a member whose spec.json universe differs is retrained).
+
+**Decision rule (once, on the forward block):** run `knobs.member` at its base params under every candidate
+(protocol identical to members, cells cached under `knobs/<key>/`). For each alternative `A_i` vs default `D`:
+`diff_fwd` / `p_pos_fwd` = paired block bootstrap of per-era fit20 on the forward test eras; `diff_cv_indep` = mean
+per-era diff over the CV folds whose test block is >= 20 eras from the forward test block (independent
+confirmation). Holm over the m alternatives sorted by `1 - p_pos_fwd`: rank j passes iff
+`1 - p_pos_fwd <= alpha_total / (m - j + 1)` (stop at the first failure) AND `diff_cv_indep >= 0`. Per dimension at
+most one winner (largest `diff_fwd`); chosen = default with each dimension's winner; the combination is reported,
+never re-tested. `knobs.json`:
+`{"status":"done","member","alpha_total","default":key,"candidates":[{key, era_start, rows_rule, time_decay, fit_cv,
+fit_fwd, diff_fwd, diff_se_fwd, p_pos_fwd, diff_cv_indep, holm_rank, holm_threshold, pass}],"chosen":{...,key},
+"decided_at"}`. Resume reuses it; a config whose candidate keys differ raises `ValueError("knobs already decided
+for this run-id; start a new run-id")` — the knob is never re-decided silently.
+
+## 13. Search adoption gate (`train.py`; `search.py` unchanged API) [train]
+
+`search/<m>.gain.json` gains `paired_cv` (`paired_block_bootstrap` of per-era fit20, top-k mean minus base cell),
+`adopted` and `adopt_reason`. Adopted iff `paired_cv.p_pos >= p_pos_adopt` and `forward_gain >= 0` (or
+`adopt_gate: false`). Not adopted -> the member is the BASE cell (its OOF, fold blobs and full refits), suspect flag
+unchanged. `search/<m>.adopted.json = {"adopted": bool, "params_list": [...], "best": {...}}`; `params.best_of`
+resolves to `best` (search top-1 if adopted, else the base params). spec.json gains `search_adopted`.
+
+## 14. External members + `folds_eras.json` (`train.py`; consumed by `scripts/mlp_train.py`) [train] -> [nn]
+
+Right after the universe is decided train.py writes `artifacts/<run>/folds_eras.json`:
+`{"universe": Universe.to_dict(), "scoring_min_era": int, "folds": [{"name", "train_eras": [int], "test_eras": [int],
+"inner_train_eras": [int], "inner_val_eras": [int], "count_sources": [fold names]}], "forward": {same}|null,
+"full_train_eras": [int]}` (count_sources from `train.frozen_counts`; the full refit uses the median over CV folds).
+A member with `family: mlp` is EXTERNAL: `train_member` never fits it. If `members/<m>/spec.json` has
+`status: done`, `universe == rd.universe.key()` and `oof_<m>.parquet` exists, it is loaded like a finished member
+(`corr_with_bench_val`/`rho_c` computed via `models.predict_member` if absent); otherwise it is skipped with WARNING
+`external member <m> pending: run scripts/mlp_train.py --run-id <R>` and a `metrics.json.notes` entry (exit code
+unchanged). External artifacts follow section 8 exactly: `oof_<m>.parquet` (index id; `era` int32, `fold` int8,
+-1 = forward, `pred` float32), `members/<m>/{fold<k>.bin, forward.bin, full_s<seed>.bin, spec.json}`; spec.json
+carries the tree keys (`inner_iters` = best epochs, `frozen_n_iter_per_fold`, `frozen_n_iter_forward`,
+`frozen_n_iter`, `count_sources`, `fit_seconds`, `max_fit_seconds`, `member_seconds`, `full_blobs`, `feature_cols`,
+`missing_cols`, `universe`, `status`) plus `seeds`, `device`, `torch_version`, `parity_max_abs`.
+
+## 15. Timing drop + validation side metrics (`train.py`) [train]
+
+A `cat` member whose FIRST fit takes longer than `timing.catboost_max_fit_seconds` stops immediately: spec.json
+`{"status": "dropped_timing", "first_fit_seconds": s}`, no oof file, excluded from assembly/blend, note
+`"<m>: CatBoost dropped (s > cap)"`; resume keeps the drop. `validation_bench_corr` additionally returns
+`rho_c` = mean per-era corr(prediction, core proxy) on validation; `metrics.json.members.<m>.rho_c` is filled
+(report.py already reads it).
+
+## 16. Blend: arms, correlation, admission ladder, final selection (`blend.py`) [blend]
+
+```python
+def arm_of(spec: dict) -> str                          # spec["arm"] or ("aux" if group == "aux" else name)
+def blend_weights(groups: dict[str, str], everest_weight: float, arms: dict[str, str] | None = None) -> dict[str, float]
+    # arms None -> M1 behaviour. Else hierarchical: group weight -> equal per arm in the group -> equal per member.
+def member_corr_matrix(Z: pd.DataFrame, era: pd.Series) -> pd.DataFrame   # mean per-era Pearson corr of gaussianised scores
+def admission_ladder(Z, oof, Zf, fwd, specs, cfg) -> tuple[list[str], list[dict]]   # (admitted member names, ladder rows)
+def select_neutralisation(grid: dict, cfg: dict) -> dict       # section 16.3
+def final_selection(run: dict) -> dict                         # orchestrates 16.1-16.3; called by blend_run
+```
+**16.1 Redundancy + admission (M3/M4/M6).** Members are visited in ladder order (base arms, then `admission.order`,
+config order inside an arm). A member whose `member_corr_matrix` entry with any already-kept member exceeds
+`gates.member_corr_max` is dropped as `redundant(<other>)`. Incumbent `I` = base arms. For each arm `A`: candidate
+`C` = I plus A (hierarchical EW over C vs over I), per-era fit20 diff on CV OOF -> `paired_block_bootstrap`;
+`fwd_diff` on the forward block; `metrics.paired_sharpe_bootstrap(fit_C, fit_I)`; `corr_with_incumbent` = mean
+per-era corr of the arm's mean z with I's blend z. Admit iff `corr_with_incumbent <= member_corr_max` AND
+`fwd_diff >= 0` AND (`p_pos >= p_pos_adopt` OR (`dsharpe >= admission.sharpe_gain` AND `p_pos_sharpe >=
+p_pos_adopt`)). Admitted arms join I (sequential, pre-registered order, one look each). Ladder row: `{arm, members,
+admitted, reason, diff_mean, diff_se, p_pos, fwd_diff, dsharpe, p_pos_sharpe, corr_with_incumbent,
+dropped_redundant: [...]}`.
+**16.2 Rule.** The existing nested NNLS gate runs on the admitted set vs hierarchical EW (unchanged semantics,
+cross-fitted headline). Members not admitted get weight 0 (bundle drops them).
+**16.3 Neutralisation constants (M5, staking-aware; never from the diag lane).** `z` = the chosen blend's OOF z
+(cross-fitted if NNLS). `metrics.regime_grid` over `p_b_grid x p_c_grid` (caps 0.75 / 0.5). For each cell at
+`central_mean`: `S` = `mix.score_sharpe`, `fit` = `mix.fit`. Eligible iff (a) `fit >= fit(0,0) - fit_cost_max` and
+(b) `mix.score` at `pessimistic_mean` >= the (0,0) cell's `mix.score - mix.score_se` at `pessimistic_mean`; (0,0) is
+always eligible. Among eligible: best `S`; tie set = cells with `S >= S_best - sharpe_tol`; inside the tie set
+maximise the worst-regime score `W = min over {bpos, bneg} x all bench_fit_means of score`; `W` within `worst_tol`
+-> smaller `p_b + p_c`, then smaller `p_b`. Output `blend.json["neutralisation"] = {"p_b", "p_c", "p_source":
+"simulation", "criterion", "table": [{p_b, p_c, fit, score, score_sharpe, W, eligible, in_tie_set}], "reason",
+"z_source": "crossfit"|"ew"}` and top-level `blend.json.p_b/p_c` are set to the chosen values. `select: false` ->
+`p_source: "config"` with the config values. `blend.json["regime"]` = the grid slice at the chosen `p_c` in the OLD
+shape (`{"<mean>": {"p_b=<x>": {bpos,bneg,mix}}, "meta"}`) so report.py keeps working; the full grid goes to
+`blend.json["regime_grid"]`.
+**16.4 blend.json additions:** `arms`, `member_corr` (`{"names": [...], "matrix": [[...]]}`; also
+`member_corr.csv`), `ladder`, `admitted`, `neutralisation`, `regime_grid`, `final = {admitted_arms, rule, p_b,
+p_c, p_source, oof: summarise(...), forward_fit, score_mix_central, score_sharpe_central, W}`; metrics.json gets
+`blend.final` and `paired.<arm>_ladder`.
+
+## 17. Metrics additions (`metrics.py`) [blend]
+
+```python
+def regime_grid(z_pred, target, era, direction, core_proxy, *, p_b_grid, p_c_grid, bench_fit_means=(0.0, .009, .02),
+                bench_fit_sd=0.035, n_draws=500, seed=0, direction_weight=0.8) -> dict
+    # {"<mean>": {"p_c=<y>": {"p_b=<x>": {"bpos","bneg","mix"}}}, "meta"}; the SAME benchmark draws serve every
+    # (p_b, p_c) cell (common random numbers). regime_simulation(p_c=scalar) keeps its output shape.
+    # Each regime block gains "score_sharpe" = mean over draws of (across-era mean / std of that draw's per-era
+    # score) -- the benchmark noise stays in the variance a staker sees -- and "score_sharpe_se".
+def paired_sharpe_bootstrap(a: pd.Series, b: pd.Series, *, block=20, n_boot=2000, seed=0) -> dict
+    # per-era series on the same era index; circular moving blocks with identical indices for a and b;
+    # {"dsharpe", "se", "p_pos", "ci90", "n_eras"}; sharpe = mean/std per era (not annualised)
+```
+
+## 18. Runtime + bundle additions (`_runtime.py`, `bundle.py`, `models/mlp.py`) [nn]
+
+* `_runtime.SUPPORTED_FAMILIES = ("lgbm", "xgb", "cat", "ridge", "mlp")`. The MLP numpy forward lives IN
+  `stealth/_runtime.py` — the one module `bundle.write_pickle` already registers by value — so the pickle still
+  references a single module and the `pkl_check` byte-scan whitelist (`._runtime` only) stays as is. No second
+  by-value module, no torch anywhere in the package (a test imports every `stealth.*` module in a subprocess and
+  asserts `"torch" not in sys.modules`; another greps the package for `import torch`).
+* `load_member("mlp", blob)` -> dict from npz (`allow_pickle=False`): `W0..W{L-1}` float32 (in x out), `b0..`,
+  `x_mean`, `x_std` float32[n_in], `columns` str[n_in], `act` = "gelu_tanh", `n_layers` int.
+  `mlp_forward(model, X) -> float64[n]`: `h = (X - x_mean) / x_std`; hidden layers `h = gelu_tanh(h @ W + b)` with
+  `gelu_tanh(x) = 0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x^3)))` (torch `GELU(approximate="tanh")`); last layer
+  linear; dropout is inference-off; the aux head is never exported.
+* Per-member feature subsets, by name: `input: nan` members index the nan matrix by the positions of their
+  `feature_cols` inside bundle `feature_cols` (unchanged); `input: linear` members (ridge, mlp) select
+  `model["columns"]` BY NAME from `linear_frame` (mlp: the 178 base columns). Every member's columns must be a
+  subset of bundle `feature_cols` / linear-frame columns (`ValueError` at `make_predict`); live column order is
+  irrelevant (pkl_check's shuffled-columns call covers it).
+* `stealth/models/mlp.py` (numpy only, family contract): `to_bytes(dict) -> npz bytes`, `from_bytes`,
+  `predict = _runtime.mlp_forward`; `fit_with_early_stopping` / `fit_fixed` raise `NotImplementedError("mlp is
+  trained externally by scripts/mlp_train.py")`. `models.FAMILIES` gains "mlp".
+* `build_bundle(run_dir, *, p_b=None, p_c=None, require_frozen=False)`: p resolution = explicit args
+  (`p_source "override"`, WARNING) > `blend.json.neutralisation` (`"simulation"`) > `blend.json.p_b/p_c`
+  (`"config"`) > defaults (`"default"`, WARNING). `require_frozen=True` (CLI `--require-frozen`, used by handoff 04)
+  raises unless `p_source == "simulation"`. Caps unchanged. Bundle and manifest gain `p_source`, `blend_rule`,
+  `admitted_arms`; manifest `members[]` gains `arm`, `n_features`. The fold-blob fallback is refused when
+  `spec.feature_cols_per_fold` differs from `spec.feature_cols` (sharpe_subset). `assert_plain(bundle)`: only
+  dict/list/str/bytes/int/float/bool/None values (no torch / numpy objects) before pickling.
+
+## 19. MLP training (`scripts/mlp_train.py`, `requirements-gpu.txt`, `scripts/setup_gpu.sh`) [nn]
+
+* GPU venv `.venv-gpu` (never the train venv): `requirements-gpu.txt` = numpy/pandas/pyarrow/PyYAML/scipy at the lane
+  pins; torch installed by `scripts/setup_gpu.sh` from `https://download.pytorch.org/whl/cu128` (Blackwell sm_120
+  needs CUDA >= 12.8 wheels), then `pip install --no-deps -e .`. setup_gpu.sh ends with a GPU smoke
+  (`torch.cuda.is_available()`, capability, 4096^2 matmul) and prints `GPU OK` or `GPU FAIL -> skip MLP`.
+  Sandbox analogue: `/opt/ml/bin/python3` (torch 2.15.0+cpu) with `PYTHONPATH=<repo>` and `--device cpu`.
+* CLI: `$GPU_PY scripts/mlp_train.py --run-id R [--artifacts DIR] [--member mlp_everest] [--device auto|cuda|cpu]
+  [--seeds 0 1 ...] [--epochs-cap N] [--threads N] [--resume]`. Imports only torch, numpy, pandas, yaml,
+  `stealth.data`, `stealth.knobs`, `stealth._runtime` (parity). Reads `config.yaml`, `folds_eras.json`,
+  `features.json`; refuses if `folds_eras.json` is missing ("run stealth.train first").
+* Protocol (identical to trees): per seed and fold, inner early stopping on `inner_val_eras` (metric: mean per-era
+  Pearson of the main head; patience from params) -> best epoch; frozen epochs per fold = median over that fold's
+  `count_sources` of the seed-median best epochs; refit on the fold's train eras for the frozen count; predict the
+  test eras; OOF = mean over seeds. Full refit per seed on `full_train_eras` with the median CV count. Training rows
+  = universe mask, sample weights = universe weights. Loss = MSE(main) + `aux_weight` x masked MSE(aux heads, NaN
+  aux targets masked). Input = `features_linear` base 178 columns, standardised with that fit's training mean/std.
+  `torch.manual_seed(seed)`, deterministic algorithms where available.
+* Export per blob to the npz format of section 18; after export the numpy `mlp_forward` is compared with the torch
+  eval forward on <= 2000 rows: `max_abs > 1e-4` -> exit 1 (`parity_max_abs` recorded). Artifacts per section 14;
+  resumable per (seed, fold) under `members/<m>/_work/`; exit 0 ok, 1 error, 4 no usable device (handoff then
+  skips the member: train.py marks it pending, the ladder never sees it).
+
+## 20. Artifacts, pipeline driver, report, minifull [train] [docs]
+
+New files under `artifacts/<run>/`: `knobs.json`, `knobs/<key>/` (cached cells), `folds_eras.json`,
+`search/<m>.adopted.json`, `member_corr.csv`; `members/<m>/spec.json` may carry `status: dropped_timing`; blend.json
+and metrics.json keys per sections 16-17.
+
+`scripts/run_pipeline.sh <config> <run_id> [--gpu-py PATH] [--no-mlp] [--pkl models/<run_id>.pkl]` [docs]:
+`train --resume` -> (config has an mlp member and GPU_PY set) `mlp_train.py --resume` -> `train --resume`
+(re-assembles with the external member) -> `blend` -> `bundle --require-frozen` (when
+`blend.neutralisation.select`) -> `pkl_check` -> `diag` (file only, never `--upload`) -> `report`. Every step is
+idempotent; re-running the same command resumes. MLP failure (exit 1/4) is logged and the pipeline continues
+without it.
+
+`report.py` NN-metrics.json additions [docs]: `knobs` (candidate keys + diff/p_pos/pass, chosen key), `search`
+(per searched member: gain, forward_gain, paired_cv, adopted), `ladder`, `member_corr_max_pair` (+ matrix),
+`neutralisation` (table + chosen + p_source), `final`, `dropped` (timing / redundant / pending external), the blend
+row reports `chosen` (not `ew`). Universe keys and arm names are config names; hyperparameter values never appear.
+
+`configs/minifull.yaml` [train] (sandbox, 2 threads, <= 8 min end to end incl. MLP on CPU torch) exercises every
+new path: scoring eras >= 5000, pool from 4600; 3 folds + forward (5925/5945); knobs `era_start [5000, 4600]`,
+`rows_rule [none, filter80, weight80]`, `time_decay [false, true]`; `lgbm_everest` TPE search 3 trials over a
+4-cell grid, top_k 2 (adoption gate); 2 aux (lgbm, best_of); `xgb_everest` exhaustive 2-cell grid top_k 2; 1 tiny
+cat (50 iterations); ridge; sharpe arm; 2 bags; `mlp_everest` 1 seed, `es_cap: 3`, hidden [32, 16]; fixed
+`n_estimators` <= 80 or `es_cap` <= 120 everywhere; admission order [aux, xgb, cat, ridge, sharpe, bags, mlp];
+`simulation.n_draws: 30`, `p_c_grid: [0.0, 0.25, 0.5]`; `neutralisation.select: true`; `refit.seeds: [0]`.
+`tests/test_minifull.py` (marked `slow`, skipped without data) checks that load_config accepts it.
