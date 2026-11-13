@@ -181,3 +181,21 @@
      0.0200 0.7500    mix 0.0168 0.0017 0.0117 0.0303    3725 1.0000
 2026-11-13 20:31:17,004 INFO stealth.blend: wrote /home/om/Projects/eversteer/stealth/artifacts/test01/blend.json and updated metrics.json
 ```
+
+## Operator notes
+
+```text
+CatBoost kept: timings.per_member_fit_s.cat_everest_l2_30 = 18.080725400002848 s (<= 120 s). Individual fold fits approximately 2.8-3.0 s.
+pkl_check: PASSED
+python: /home/om/Projects/eversteer/stealth/artifacts/pklcheck_venv/bin/python (3.11.18); size: 1.08 MB; eras: 51; slowest call: 0.6422959750052541s; elapsed: 3.5s
+byte scan: torch=0 stealth_total=6 non-runtime stealth refs=0
+note: missing feature column raises (ok)
+predict --offline: predicted exped=exped_8055 n=90 in 0.43s bench_used=True core_used=True unique=90; dry run ok
+Total pipeline wall: approximately 12 min 28 s (20:19:10 training launch through 20:31:38 offline prediction completion; reporting excluded); training 496.58225333099836 s; regime simulation 208 s.
+nproc: 20; configured threads: 16; mains power connected; no code/config edits.
+leak_check: pass; no member suspect flags; LightGBM baseline headline thresholds met; blend OOF difference versus baseline -0.001204930725153087 (within 0.002 allowance).
+lgbm_everest: search gain +0.0009 on OOF is NOT confirmed on the forward block (forward gain -0.0006 < 0) -> treat the search as a tie
+STOPPED on reporting ambiguity: required blend_ew versus lgbm_everest paired p_pos is absent from 02-metrics.json (blend row paired_vs_baseline is null; no corresponding paired table entry). Full handoff 02 success is therefore not established.
+The recorded p_pos=0.4425 is blend_nnls_vs_ew on 745 eras, not blend_ew versus lgbm_everest; equal weights retained. No replacement statistic calculated and no fixes attempted.
+.env verified only with test -s .env; no submissions, uploads or staking.
+```
