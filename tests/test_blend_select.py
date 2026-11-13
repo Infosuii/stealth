@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from stealth import blend as B
+from stealth import data
 
 TARGET = "target_everest"
 
@@ -362,6 +363,14 @@ def test_blend_run_full_selection(tmp_path, syn, patched_inputs) -> None:
     assert "xgb_ladder" in mets["paired"] and mets["paired"]["xgb_ladder"]["admitted"] is True
     assert "ridge_ladder" in mets["paired"] and "bags_ladder" not in mets["paired"]  # bags never tested (all redundant)
     assert any("redundant(lgbm_everest)" in n for n in mets["notes"])
+    # the chosen blend vs the baseline member (handoff 02's missing row): persisted, same numbers in both files
+    pvb = saved["paired_vs_baseline"]
+    assert pvb["baseline"] == "lgbm_everest" and 0.0 <= pvb["p_pos"] <= 1.0 and np.isfinite(pvb["fwd_diff"])
+    row = mets["paired"]["blend_vs_lgbm_everest"]
+    assert row["diff_mean"] == pvb["diff_mean"] and row["p_pos"] == pvb["p_pos"] and "baseline" not in row
+    oof = pd.read_parquet(run_dir / "oof.parquet")
+    base_fit = B.fit_series(oof["m__lgbm_everest"], oof[data.PRIMARY_TARGET], oof["era"]).mean()
+    assert pvb["diff_mean"] == pytest.approx(fin["oof"]["mean"] - base_fit, abs=1e-12)
 
 
 def test_blend_run_m1_config_keeps_old_behaviour(tmp_path, syn, patched_inputs) -> None:

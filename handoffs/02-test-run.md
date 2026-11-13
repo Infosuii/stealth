@@ -11,8 +11,9 @@ times (the CatBoost keep/drop decision). Expected 30–45 min on 16 threads, < 6
 Success = ALL of (read from `handoffs/results/02-metrics.json` → `configs[]`):
 - `lgbm_everest`: `fit_mean` in **[0.022, 0.030]** (0.026 ± 0.004), `forward_fit` **≥ 0.020**, `sharpe` **≥ 0.5**.
 - `blend_*` (the blend row): `fit_mean` ≥ `lgbm_everest.fit_mean` − 0.002 (the blend must not be worse than its
-  best member beyond noise); paired `p_pos` vs `lgbm_everest` is **recorded** (≥ 0.8 = adopt the blend; otherwise
-  tie, which is fine at this stage).
+  best member beyond noise). The blend's paired `p_pos` vs `lgbm_everest` is **informational only**: copy it into the
+  operator notes when the report shows it (≥ 0.8 = the blend beats the baseline; a tie or a loss simply means "keep
+  the baseline"). It is never a reason to stop, and neither is its absence from the report.
 - `leak_check` = `pass`; no config has `suspect: true` (any `fit_mean` > 0.030 is flagged by `train` and must be
   reported as suspect, not as a win). `lgbm_everest` is a searched member: `artifacts/test01/search/lgbm_everest.gain.json`
   records top-3 minus the base-params cell on OOF (`gain`) and on the forward block (`forward_gain`); a `gain` > 0.004 or a

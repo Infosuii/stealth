@@ -10,11 +10,11 @@
 | item | from handoff 02 (`handoffs/results/02-*`) | action |
 |---|---|---|
 | CatBoost keep/drop | `cat_everest_l2_30` took 18.1 s for the whole member (fold fits ~3 s), well under the 120 s cap | **kept**: `full.yaml` keeps the 3 `cat_*` members; `timing.catboost_max_fit_seconds: 120` still enforces `dropped_timing` |
-| `gates.baseline_fit` | `lgbm_everest` OOF fit20 **0.0238** (top-3 of the 12-cell grid; its base cell was ≈ 0.0229) | set `gates.baseline_fit: 0.0238` in `full.yaml`, which puts the SUSPECT bar at 0.0278 (requested from the train group) |
+| `gates.baseline_fit` | `lgbm_everest` OOF fit20 **0.0238** (top-3 of the 12-cell grid; its base cell was ≈ 0.0229) | DONE (integration): `gates.baseline_fit: 0.0229` in `full.yaml` = the UNSEARCHED base cell (build note 2: a searched baseline can never trip its own SUSPECT bar); SUSPECT bar 0.0269 |
 | thread count | `nproc` 20, `run.threads` 16, RAM 30.8 GB, no memory pressure | keep `run.threads: 16` |
 | per-fit timings | train 497 s in total (LGBM ≈ 20 s per grid cell incl. 5 folds + forward; aux ≈ 16 s, XGB 11–17 s, ridge 2 s); regime simulation 208 s | replace the estimates in section 5 with these scaled numbers (done below; refresh them after the minifull run) |
 | compute budget (DECISIONS #10) | 02 ran 3–4x faster than estimated | decide any extra measurement (bootstrap draws, fold offsets, slower trees, admission candidates) in `full.yaml` **before** `ready`; never more trials or seed bagging |
-| sandbox proof | `bash scripts/run_pipeline.sh configs/minifull.yaml <id>` green on the sandbox, plus the full `pytest` | record the commit here |
+| sandbox proof | `bash scripts/run_pipeline.sh configs/minifull.yaml <id>` green on the sandbox, plus the full `pytest` | green at integration 2026-11-13: run `mfpipe`, 194 s end to end incl. the MLP on CPU torch (`setup_gpu.sh` with the CPU index: exit 3 as expected); record the merge commit here |
 
 ## 1. Purpose + success criterion
 

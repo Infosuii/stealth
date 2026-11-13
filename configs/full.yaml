@@ -155,7 +155,7 @@ gates:
   p_pos_adopt: 0.8
   member_corr_max: 0.95
   max_search_trials: 25
-  baseline_fit: null     # set from handoff 02 (the fixed M1 OOF fit20 of the unsearched lgbm_everest)
+  baseline_fit: 0.0229   # handoff 02 (same scoring layout): UNSEARCHED lgbm_everest base cell = top-3 0.0238 - search gain 0.0009
 timing:
   catboost_max_fit_seconds: 120
   progress_every_seconds: 60

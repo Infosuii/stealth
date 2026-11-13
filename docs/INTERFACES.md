@@ -550,3 +550,59 @@ cat (50 iterations); ridge; sharpe arm; 2 bags; `mlp_everest` 1 seed, `es_cap: 3
 `n_estimators` <= 80 or `es_cap` <= 120 everywhere; admission order [aux, xgb, cat, ridge, sharpe, bags, mlp];
 `simulation.n_draws: 30`, `p_c_grid: [0.0, 0.25, 0.5]`; `neutralisation.select: true`; `refit.seeds: [0]`.
 `tests/test_minifull.py` (marked `slow`, skipped without data) checks that load_config accepts it.
+
+## 21. As built (integration pass, 2026-11-13) — what differs from / extends sections 11-20
+
+Implementation facts the groups reported plus the integration fixes. Nothing here changes an M1 config's behaviour.
+
+**train / knobs / cv** [train]
+* `train.per_era_fit_fast` / `per_era_spearman_fast`: vectorised `metrics.per_era_fit` / `per_era_spearman` semantics
+  (SDK parity ~1e-16, `tests/test_train_m2.py`). Used by knobs, search objectives, member metrics and (integration)
+  every fit in `blend.py` (`blend.fit_series`, `evaluate_blend`). `metrics.per_era_*` keep the SDK loop.
+* `train.validation_side_metrics(...) -> {"corr_with_bench_val", "rho_c"}` implements section 15's `rho_c`;
+  `validation_bench_corr` keeps its float return.
+* `knobs.json` extras beyond section 12: `indep_cv_folds`, `winners`, `combination_retested: false`; per candidate
+  `dimension`, `is_default`, `equivalent_to_default`, `holm_pass`, `cv_indep_ok`, `reason`, `n_eras_cv_indep`. A
+  candidate whose training rows and weights equal the default's reuses the default cell (diff 0, p_pos 0, still in m).
+* metrics.json additions: `universe {key, era_start, rows_rule, time_decay, rows_low_weight}`, `knobs {...}`,
+  `dropped [{member, status: dropped_timing|pending_external, ...}]`, `members.<m>.{rho_c, arm, universe,
+  search_adopted}`, `members.<m>.search_gain.{paired_cv, adopted, adopt_reason, n_trials, universe}`.
+* `load_config` rejects `blend.neutralisation.select: true` unless 0.0 is in both `p_b_grid` and `p_c_grid`.
+* `configs/test.yaml` sets `search.lgbm_everest.adopt_gate: false` (the gate defaults to true; M1 stays top-k).
+* `configs/full.yaml`: `gates.baseline_fit: 0.0229` = handoff 02's UNSEARCHED `lgbm_everest` base cell.
+
+**blend** [blend]
+* `blend.paired_vs_baseline` (integration): paired 20-era block bootstrap of the REPORTED blend z (cross-fitted when
+  NNLS) minus `train.baseline_member(cfg)` on CV OOF + `fwd_diff`. Written to `blend.json.paired_vs_baseline` and to
+  `metrics.json.paired["blend_vs_<baseline>"]`; report.py's blend row reads it (its recompute is then skipped).
+  Informational: the ladder already chose; a tie or loss means "keep the baseline". Post-selection, so optimistic.
+* `blend.json.forward_weights_source`: NNLS forward fit uses weights fitted on OOF eras >= 20 before the forward block.
+
+**runtime / bundle / MLP** [nn]
+* `bundle --members a b ...` bundles exactly that subset (blend weights renormalised when all positive, else equal
+  weights + WARNING; manifest `member_subset`, `weights_source`). Handoff 03 uses it for the single-LGBM baseline.
+* The pickle bytes do not contain `built_at` (manifest only) but do contain `run_id` and `git_sha`: a rebuild from
+  identical artifacts at the same commit reproduces the sha (checked on the sandbox); a new commit or any change to
+  `_runtime.py` changes it. Handoff 03 therefore checks manifest CONTENT, never a sha match with handoff 02.
+* `scripts/mlp_train.py` (integration): the loss fits STANDARDISED targets ((y - mean) / sd of the fit rows; aux the
+  same, NaN-aware). Raw [0, 1] targets spent the first epochs on the intercept, so inner early stopping picked noise
+  (minifull OOF fit 0.0003 -> 0.0160 with the same epochs). `TARGET_SCALING = "standardised_v1"` is part of the
+  resume signature, so older `_work/` caches retrain.
+* `scripts/setup_gpu.sh` (integration): installs torch's pure-Python deps (typing-extensions, filelock, sympy,
+  networkx, jinja2, fsspec) from PyPI BEFORE torch, because the CUDA index serves typing_extensions 4.16.0 only as an
+  sdist whose build backend it lacks (`No matching distribution found for flit_core`). `--help` prints the header;
+  any other argument exits 64 (it used to ignore arguments and run the whole setup).
+
+**ops / report / pipeline** [docs]
+* `stealth.diag`: `--preflight` (offline, exit 0 only when ready), `--fetch-result [--wait]` (read-only),
+  `--attach-pkl` (opt-in `model_pkl`, python 3.11), `--new-upload` (overrides the upload-once guard),
+  `--wait-timeout` (default 1800 s); `--pkl` optional with `--fetch-result`; exit 2 = uploaded, still scoring.
+  Sidecars: `<out>.meta.json` (pkl sha256, rows/eras coverage, file sha256); `<out>.upload.json` adds `panel`,
+  `result`, `result_at`, `built_from_pkl_sha256`, `attached_pkl`, `pkl_sha256`.
+* `stealth.report`: `--diag-json <file>.upload.json`, `--no-recompute`. The diag ratio is taken against the uploaded
+  pickle's single member when `models/*.manifest.json` with the recorded sha bundles exactly one member
+  (`diag.oof_reference`), else against the blend row (integration).
+* `scripts/run_pipeline.sh`: also `--py`, `--from STEP`, `--mlp-device`, `--mlp-epochs-cap`, `--mlp-seeds`,
+  `--mlp-threads`, `--pkl-check-python`, `--diag-eras`, `--no-diag`, `--report NN`, `--dry-run`; writes
+  `artifacts/<run>/pipeline.log`; exit 64 on bad usage.
+* pytest marker `slow` is registered in pyproject.toml.
