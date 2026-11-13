@@ -40,6 +40,26 @@ version unless the branch's is better reviewed), `handoffs/00-env-setup.md`, `ha
 `handoffs/INDEX.md`. The user may already have run 03 by then: check `handoffs/results/03-results.md` on `main`, and
 if an `upload_id` is recorded, fetch the score with the MCP tool `eiq_get_diagnostics_result`.
 
+## Update 22:50 UTC — branch integrated and merged with main; push to main blocked
+
+Done solo by Claude (no subagents):
+- `main` merged into this branch, with conflicts resolved (merge commit on `worktree-m2-m6`). **252 tests pass.**
+- The integrator's `minifull` pipeline run (`artifacts/mfpipe`) is green end to end, including the MLP on CPU torch.
+- Partial review:
+  - Contract: `pkl_check` passes on a pickle that includes the MLP member, with torch=0 and only `stealth._runtime` by value.
+  - Branch code is backward-compatible with the laptop's old-format `test01` artifacts, so handoff 03 works either way.
+  - The admission ladder rejects weak arms on the paired gate; the staking-aware neutralisation selection is as designed.
+  - MLP training uses inner early stopping, independent count sources and train-only standardisation, with a numpy/torch parity check.
+- Handoff 04 clone path fixed to `~/Projects/eversteer/stealth`.
+
+**Fast-forwarding `main` was refused** by Claude Code's permission classifier ("merge without review"), because the
+three independent adversarial reviews never ran. Next session:
+1. Run the three reviews: selection-stats/leakage of knobs + search adoption, contract, handoff 04 executability. Fix what they find.
+2. Then fast-forward `main`. Alternatively, the user merges on GitHub or adds a permission rule.
+
+Finding to tell the user: applied to the laptop's 02 regime table, the staking-aware rule picks **p_b = 0**: worst-case
+score 0.0351 against 0.0274 at p_b = 0.5, because neutralising hurts in benchmark-right rounds.
+
 ## Steps
 
 1. Check out this branch. Symlink `data/` and `artifacts/pklcheck_venv` from a checkout that has them, or re-download the data and recreate the venv.
