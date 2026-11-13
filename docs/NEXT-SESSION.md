@@ -52,10 +52,12 @@ Done solo by Claude (no subagents):
   - MLP training uses inner early stopping, independent count sources and train-only standardisation, with a numpy/torch parity check.
 - Handoff 04 clone path fixed to `~/Projects/eversteer/stealth`.
 
-**Fast-forwarding `main` was refused** by Claude Code's permission classifier ("merge without review"), because the
-three independent adversarial reviews never ran. Next session:
-1. Run the three reviews: selection-stats/leakage of knobs + search adoption, contract, handoff 04 executability. Fix what they find.
-2. Then fast-forward `main`. Alternatively, the user merges on GitHub or adds a permission rule.
+Claude's own push to `main` was refused by the permission classifier, so **the user pushed it themselves at
+~22:55 UTC: `main` = e69b848, which includes all of the M2–M6 work.** Next session:
+1. Run the three independent reviews on `main`: selection-stats/leakage of knobs + search adoption, contract,
+   handoff 04 executability. Fix what they find.
+2. Note: Claude cannot push to `main` without a Bash permission rule. Work on a branch and ask the user to push or
+   merge, or ask them to add the rule.
 
 Finding to tell the user: applied to the laptop's 02 regime table, the staking-aware rule picks **p_b = 0**: worst-case
 score 0.0351 against 0.0274 at p_b = 0.5, because neutralising hurts in benchmark-right rounds.
