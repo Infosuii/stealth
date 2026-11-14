@@ -637,6 +637,8 @@ def packaging_doc(run_id: str, models_dir: Path, pipe: dict[str, Any] | None) ->
     pkl_path = mpath.with_name(str(man.get("pkl") or f"{mpath.name[: -len('.manifest.json')]}.pkl"))
     file_sha = _sha256(pkl_path) if pkl_path.exists() else None
     size = man.get("size_bytes")
+    from stealth.pkl_check import check_evidence_problems
+
     return {
         "present": True, "manifest": mpath.name, "pkl": pkl_path.name, "sha256": man.get("sha256"),
         "file_present": pkl_path.exists(), "file_sha_matches": None if file_sha is None else file_sha == man.get("sha256"),
@@ -646,6 +648,7 @@ def packaging_doc(run_id: str, models_dir: Path, pipe: dict[str, Any] | None) ->
         "members": [str(m.get("name")) for m in man.get("members") or [] if isinstance(m, dict)],
         "pkl_check": {**(_pick(rec, _PKL_CHECK_KEYS) or {}), "problems": list(rec.get("problems") or [])[:5]} if rec else None,
         "pkl_check_bound": bool(rec.get("sha256")) and rec.get("sha256") == man.get("sha256") if rec else False,
+        "pkl_check_evidence_problems": check_evidence_problems(rec, man.get("sha256")),
     }
 
 
@@ -727,6 +730,8 @@ def evidence_items(pipe: dict[str, Any] | None, packaging: dict[str, Any], diag_
         elif not packaging.get("pkl_check_bound"):
             add("pkl_check", "fail", "the pass record does not name these bytes (sha256 absent or different): re-run pkl_check",
                 req["pkl_check"])
+        elif packaging.get("pkl_check_evidence_problems"):
+            add("pkl_check", "fail", "; ".join(packaging["pkl_check_evidence_problems"]), req["pkl_check"])
         else:
             add("pkl_check", "ok", f"PASSED on these bytes (python {rec.get('python')}, {rec.get('eras')} eras, slowest call "
                 f"{_fmt(rec.get('seconds_per_era_max'), 2)} s)", req["pkl_check"])

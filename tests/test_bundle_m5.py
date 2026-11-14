@@ -322,7 +322,10 @@ def test_declared_full_blobs_are_enforced(tmp_path: Path, live_frame: pd.DataFra
     for bad in ([{"file": "fold0.bin"}], ["full_s0.bin", "full_s0.bin"], "full_s0.bin"):
         with pytest.raises(ValueError):
             bd.declared_full_files({"full_blobs": bad})
-    assert bd.declared_full_files({"full_blobs": []}) is None and bd.declared_full_files({}) is None
+    for empty in ([], None, ""):
+        with pytest.raises(ValueError):
+            bd.declared_full_files({"full_blobs": empty})
+    assert bd.declared_full_files({}) is None
 
 
 def test_non_finite_constants_and_weights_are_refused(tmp_path: Path, live_frame: pd.DataFrame):

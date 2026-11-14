@@ -86,12 +86,9 @@ def check_local(manifest_file: Path, active: dict | None) -> tuple[dict, list[st
             problems.append(f"{pkl.name} hashes to {actual[:12]} but manifest says {str(sha)[:12]} (rebuild manifest or pickle)")
     else:
         log.info("%s not present locally (expected on a machine that did not build it)", pkl.name)
-    check = manifest.get("pkl_check") or {}
-    if not check.get("passed"):
-        problems.append("manifest.pkl_check has not passed")
-    elif check.get("sha256") != sha:  # the pass must be bound to these bytes (contract review 2)
-        problems.append(f"manifest.pkl_check passed for other bytes ({str(check.get('sha256'))[:12]}) than the manifest's "
-                        f"sha256 ({str(sha)[:12]}): re-run stealth.pkl_check")
+    from stealth.pkl_check import check_evidence_problems
+
+    problems.extend(check_evidence_problems(manifest.get("pkl_check"), sha))
     if active is not None:
         if active.get("sha256") != sha:
             problems.append(f"active.json sha256 ({str(active.get('sha256'))[:12]}) != manifest sha256 ({str(sha)[:12]})")

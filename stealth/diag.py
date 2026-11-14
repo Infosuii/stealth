@@ -34,6 +34,7 @@ within ``--wait-timeout`` -- never re-upload then; run ``--fetch-result --wait``
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import logging
@@ -47,7 +48,7 @@ import numpy as np
 import pandas as pd
 
 from stealth import data as sdata
-from stealth.predict import (BANNER, BENCH_SERIES_NAME, ENV_DIAG, PKL_PYTHON_VERSION, approval_gate, check_upload_artifact,
+from stealth.predict import (BANNER, BENCH_SERIES_NAME, ENV_DIAG, PKL_PYTHON_VERSION, approval_gate, artifact_snapshot, check_upload_artifact,
                              load_predict, resolve_model_id, validate_predictions)
 
 log = logging.getLogger("stealth.diag")  # explicit: under `python -m` __name__ is __main__
@@ -254,34 +255,49 @@ def _pkl_required(exc: BaseException) -> bool:
 
 
 def upload_diagnostics(client: Any, model_id: str, path: Path, *, wait: bool = False,
-                       timeout: float = DEFAULT_WAIT_TIMEOUT, model_pkl: Path | None = None) -> dict:
+                       timeout: float = DEFAULT_WAIT_TIMEOUT, model_pkl: Path | None = None,
+                       source_pkl: Path | None = None) -> dict:
     """``submit_validation_diagnostics`` for ``path`` (+ ``model_pkl`` when attached); writes ``<path>.upload.json``.
 
     Returns the accept dict (+ ``result`` and ``exit_code`` when ``wait``). A server answer that a model .pkl is
     required raises ``RuntimeError('MODEL PKL REQUIRED ...')``: the handoff stops and reports, nothing is retried.
     """
     path = Path(path)
-    n = len(pd.read_parquet(path, columns=[]))
-    kwargs: dict[str, Any] = {}
-    if model_pkl is not None:
-        check_upload_artifact(model_pkl)  # an attached pickle passes the same gate as a lane upload (before any client call)
-        kwargs = {"model_pkl": str(model_pkl), "model_pkl_python_version": PKL_PYTHON_VERSION}
-    try:
-        res = client.submit_validation_diagnostics(model_id, str(path), tournament="futures", target="target_everest",
-                                                   wait=False, **kwargs) or {}
-    except Exception as exc:  # noqa: BLE001 - the SDK raises its own error types
-        if _pkl_required(exc) and model_pkl is None:
-            raise RuntimeError(f"MODEL PKL REQUIRED: the server refused the upload without a model .pkl ({exc}). "
-                               "Stop and report; do not retry.") from exc
-        raise
+    source_pkl = source_pkl or model_pkl
+    meta = _read_json(meta_path(path)) or {}
+    gate = check_upload_artifact(source_pkl) if source_pkl is not None else None
+    if source_pkl is not None:
+        ready, reason, _ = file_status(path, source_pkl)
+        if not ready:
+            raise RuntimeError(f"{path.name} not uploadable: {reason}")
+        if meta.get("pkl_sha256") != gate["sha256"]:
+            raise RuntimeError("diagnostics source pickle changed after validation; nothing was sent")
+    with ExitStack() as stack:
+        snapshot, file_sha = stack.enter_context(artifact_snapshot(path, meta.get("file_sha256")))
+        n = len(pd.read_parquet(snapshot, columns=[]))
+        kwargs: dict[str, Any] = {}
+        attached_sha = None
+        if model_pkl is not None:
+            attached = check_upload_artifact(model_pkl)
+            if gate and attached["sha256"] != gate["sha256"]:
+                raise RuntimeError("attached pickle differs from the diagnostics source; nothing was sent")
+            pkl_snapshot, attached_sha = stack.enter_context(artifact_snapshot(model_pkl, attached["sha256"]))
+            kwargs = {"model_pkl": str(pkl_snapshot), "model_pkl_python_version": PKL_PYTHON_VERSION}
+        try:
+            res = client.submit_validation_diagnostics(model_id, str(snapshot), tournament="futures", target="target_everest",
+                                                       wait=False, **kwargs) or {}
+        except Exception as exc:  # noqa: BLE001 - the SDK raises its own error types
+            if _pkl_required(exc) and model_pkl is None:
+                raise RuntimeError(f"MODEL PKL REQUIRED: the server refused the upload without a model .pkl ({exc}). "
+                                   "Stop and report; do not retry.") from exc
+            raise
     upload_id = res.get("upload_id")
     log.warning("DIAGNOSTICS UPLOADED model=%s file=%s rows=%d upload_id=%s status=%s attached_pkl=%s", model_id,
                 path.name, n, upload_id, res.get("status"), model_pkl is not None)
-    meta = _read_json(meta_path(path)) or {}
     rec: dict[str, Any] = {"model_id": model_id, "upload_id": upload_id, "file": path.name, "rows": n,
-                           "file_sha256": sha256_file(path), "built_from_pkl_sha256": meta.get("pkl_sha256"),
+                           "file_sha256": file_sha, "built_from_pkl_sha256": meta.get("pkl_sha256"),
                            "attached_pkl": model_pkl is not None,
-                           "pkl_sha256": None if model_pkl is None else sha256_file(Path(model_pkl)),
+                           "pkl_sha256": attached_sha,
                            "uploaded_at": _now(), "accept": res}
     jpath = upload_json_path(path)
     _write_json(jpath, rec)
@@ -419,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         client = sdata.make_client()
         log.warning(BANNER, "UPLOAD VALIDATION DIAGNOSTICS", model_id, args.out.name, ENV_DIAG)
         res = upload_diagnostics(client, model_id, args.out, wait=args.wait, timeout=args.wait_timeout,
-                                 model_pkl=args.pkl if args.attach_pkl else None)
+                                 model_pkl=args.pkl if args.attach_pkl else None, source_pkl=args.pkl)
         log.info("diag upload done: %d rows, upload_id=%s (%s)", len(df), res.get("upload_id"), upload_json_path(args.out).name)
         return int(res.get("exit_code", EXIT_OK))
     except PermissionError as exc:

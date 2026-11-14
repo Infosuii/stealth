@@ -18,6 +18,7 @@ import pytest
 from stealth import _runtime as rt
 from stealth import bundle as bd
 from stealth import pkl_check
+from tests.contract_helpers import record_test_check, valid_check_report
 
 
 def _ridge_blob(columns: list[str], coef: np.ndarray, intercept: float) -> bytes:
@@ -230,14 +231,14 @@ def test_pkl_check_main_never_leaves_a_stale_pass(built: dict, tmp_path: Path, m
     mpath = bd.manifest_path(out)
     man = json.loads(built["manifest"].read_text())
     mpath.write_text(json.dumps({**man, "pkl": out.name}))
-    pkl_check.update_manifest(out, True)
+    record_test_check(out)
     assert json.loads(mpath.read_text())["pkl_check"]["passed"] is True
     # setup/data error: the live parquet is missing
     assert pkl_check.main([str(out), "--data-dir", str(tmp_path / "no_data"), "--venv-python", sys.executable]) == 1
     rec = json.loads(mpath.read_text())["pkl_check"]
     assert rec["passed"] is False and rec["status"] == "error" and "futures_live.parquet" in rec["error"]
     # the venv cannot be built
-    pkl_check.update_manifest(out, True)
+    record_test_check(out)
 
     def boom(*a, **k):
         raise subprocess.CalledProcessError(1, ["pip"])
@@ -246,7 +247,7 @@ def test_pkl_check_main_never_leaves_a_stale_pass(built: dict, tmp_path: Path, m
     assert pkl_check.main([str(out), "--venv", str(tmp_path / "venv")]) == 1
     assert json.loads(mpath.read_text())["pkl_check"]["passed"] is False
     # an unexpected exception inside the check
-    pkl_check.update_manifest(out, True)
+    record_test_check(out)
 
     def explode(*a, **k):
         raise KeyError("surprise")
@@ -263,12 +264,63 @@ def test_check_record_is_bound_to_the_checked_bytes(built: dict, tmp_path: Path)
     out = tmp_path / "rec.pkl"
     shutil.copy(built["out"], out)
     sha = bd.sha256_file(out)
-    rec = pkl_check.check_record(out, True, {"sha256": sha, "python": "3.11.2", "libs": {"numpy": "2.4.6"}, "problems": []})
+    rec = pkl_check.check_record(out, True, {**valid_check_report(out), "python": "3.11.2"})
     assert rec["passed"] is True and rec["sha256"] == sha and rec["python"] == "3.11.2"
     stale = pkl_check.check_record(out, True, {"sha256": "0" * 64, "problems": []})  # a report for other bytes
     assert stale["passed"] is False and stale["status"] == "failed"
     running = pkl_check.check_record(out, False, status="running")
     assert running == {"passed": False, "status": "running", "at": running["at"], "sha256": sha}
+
+
+def test_pass_cannot_be_minted_without_full_checker_report(built):
+    for report in (None, {"passed": True, "sha256": built["sha"]}):
+        record = pkl_check.check_record(built["out"], True, report)
+        assert record["passed"] is False and record["status"] == "failed"
+        assert record["problems"]
+
+
+def test_ensure_venv_never_removes_an_unrelated_directory(tmp_path, monkeypatch):
+    foreign = tmp_path / "important"
+    foreign.mkdir()
+    sentinel = foreign / "keep.txt"
+    sentinel.write_text("user data")
+    monkeypatch.setattr(pkl_check.subprocess, "run", lambda *a, **k: pytest.fail("must refuse before subprocess"))
+    with pytest.raises(ValueError, match="unrelated directory"):
+        pkl_check.ensure_check_venv(foreign)
+    assert sentinel.read_text() == "user data"
+    link = tmp_path / "link"
+    link.symlink_to(foreign, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        pkl_check.ensure_check_venv(link)
+    assert sentinel.read_text() == "user data"
+
+
+def test_failed_owned_venv_can_be_retried(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    venv = tmp_path / "check"
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if "-m" in cmd and "venv" in cmd:
+            raise subprocess.CalledProcessError(1, cmd)
+        return SimpleNamespace(stdout="3.11\n")
+
+    monkeypatch.setattr(pkl_check.subprocess, "run", run)
+    for _ in range(2):
+        with pytest.raises(subprocess.CalledProcessError):
+            pkl_check.ensure_check_venv(venv)
+        assert (venv / ".stealth-pklcheck-owner").is_file()
+    assert len([cmd for cmd in calls if "venv" in cmd]) == 2
+
+
+@needs_clean_venv
+def test_checker_python_bare_command_preserves_venv(built, data_dir, monkeypatch):
+    monkeypatch.setenv("PATH", str(PKLCHECK_PY.parent))
+    report = pkl_check.run_check(built["out"], python=Path("python"), data_dir=data_dir, eras=0)
+    assert report["passed"], pkl_check.format_report(report)
+    assert report["checker"] == str(PKLCHECK_PY)
 
 
 def test_run_check_fails_on_bad_pickle(tmp_path: Path, data_dir: Path):

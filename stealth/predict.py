@@ -26,11 +26,14 @@ Needs ``EIQ_API_KEY`` for anything online (``RuntimeError`` otherwise); ``--offl
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import logging
 import os
 import pickle
+import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -303,7 +306,8 @@ def check_upload_artifact(pkl: Path) -> dict[str, Any]:
     Raises ``RuntimeError`` naming the failed condition unless ALL hold: the pickle exists; ``<stem>.manifest.json``
     exists next to it; the manifest's ``sha256`` equals the file's; ``manifest.pkl_check.passed`` is true AND its
     ``sha256`` equals the file's (a pass recorded for other bytes, or a legacy pass without a hash, does not count);
-    the manifest's ``python`` (and the checker's, when recorded) is 3.11.x, the version every upload declares.
+    the manifest and checker Python are 3.11.x; the checker status is passed, both import-isolation flags are false,
+    exact lane pins were verified, no problems were recorded, and nonempty era/timing evidence meets the contract.
     Purely local: callers run it BEFORE creating a client, so a refusal sends nothing.
     Returns ``{"pkl", "sha256", "manifest", "manifest_path"}``.
     """
@@ -322,9 +326,13 @@ def check_upload_artifact(pkl: Path) -> dict[str, Any]:
         manifest = json.loads(mpath.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"{mpath.name} is unreadable ({exc}); rebuild it with `python -m stealth.bundle`") from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"{mpath.name} must contain a manifest object")
     if manifest.get("sha256") != sha:
         raise RuntimeError(f"{pkl.name} sha256 {sha[:12]} != manifest {str(manifest.get('sha256'))[:12]}; rebuild the manifest")
     check = manifest.get("pkl_check") or {}
+    if not isinstance(check, dict):
+        raise RuntimeError("manifest.pkl_check must contain a checker record object")
     if not check.get("passed"):
         raise RuntimeError(f"manifest.pkl_check has not passed (status {check.get('status', 'none')}); run "
                            "`python -m stealth.pkl_check` first")
@@ -335,10 +343,30 @@ def check_upload_artifact(pkl: Path) -> dict[str, Any]:
     if not built_py.startswith(PKL_PYTHON_VERSION + "."):
         raise RuntimeError(f"manifest says the pickle was built under Python {built_py or '?'}, but the upload declares "
                            f"python_version={PKL_PYTHON_VERSION}; rebuild the pickle in the 3.11 train venv")
-    checked_py = check.get("python")
-    if checked_py is not None and not str(checked_py).startswith(PKL_PYTHON_VERSION + "."):
-        raise RuntimeError(f"pkl_check ran under Python {checked_py}, not {PKL_PYTHON_VERSION}.x; re-run it in the lane venv")
+    from stealth.pkl_check import MAX_PKL_MB, check_evidence_problems
+
+    failures = check_evidence_problems(check, sha)
+    if pkl.stat().st_size / 1e6 >= MAX_PKL_MB:
+        failures.append(f"pickle exceeds the {MAX_PKL_MB} MB lane limit")
+    if failures:
+        raise RuntimeError("; ".join(failures) + "; re-run `python -m stealth.pkl_check` in the clean lane venv")
     return {"pkl": pkl, "sha256": sha, "manifest": manifest, "manifest_path": mpath}
+
+
+@contextmanager
+def artifact_snapshot(path: Path, expected_sha: str | None = None):
+    """Give the SDK a private copy; a concurrent rebuild of the original cannot change the bytes it reads."""
+    from stealth.bundle import sha256_file
+
+    path = Path(path)
+    before = expected_sha or sha256_file(path)
+    with tempfile.TemporaryDirectory(prefix="stealth_upload_") as tmp:
+        snapshot = Path(tmp) / path.name
+        shutil.copyfile(path, snapshot)
+        if sha256_file(snapshot) != before:
+            raise RuntimeError(f"{path.name} changed while preparing upload; nothing was sent")
+        snapshot.chmod(0o400)
+        yield snapshot, before
 
 
 def upload(client: Any, model_id: str, pkl: Path, *, poll_seconds: float = 10.0, timeout: float = 900.0,
@@ -348,16 +376,24 @@ def upload(client: Any, model_id: str, pkl: Path, *, poll_seconds: float = 10.0,
     :func:`check_upload_artifact` runs first; nothing reaches ``client`` when it refuses."""
     gate = check_upload_artifact(pkl)
     pkl, sha, mpath, manifest = Path(pkl), gate["sha256"], gate["manifest_path"], gate["manifest"]
-    res = client.upload_model(model_id, str(pkl), python_version=PKL_PYTHON_VERSION)
+    with artifact_snapshot(pkl, sha) as (snapshot, _):
+        res = client.upload_model(model_id, str(snapshot), python_version=PKL_PYTHON_VERSION)
     upload_id = res.get("upload_id") or res.get("id")
     log.warning("UPLOADED %s (%.2f MB, sha256 %s) to model %s: upload_id=%s", pkl.name, pkl.stat().st_size / 1e6, sha[:12],
                 model_id, upload_id)
     status = poll_upload_status(client, model_id, poll_seconds=poll_seconds, timeout=timeout)
     upload_id = upload_id or status.get("upload_id") or status.get("id")
     write_active(model_id, upload_id, sha, pkl, active_path)
-    manifest["upload_id"] = upload_id
-    manifest["uploaded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    mpath.write_text(json.dumps(manifest, indent=2) + "\n")
+    # A rebuild during the SDK call must not be overwritten with the old manifest after the upload completes.
+    current = json.loads(mpath.read_text()) if mpath.exists() else {}
+    from stealth.bundle import sha256_file
+
+    if current.get("sha256") == sha and pkl.exists() and sha256_file(pkl) == sha:
+        current["upload_id"] = upload_id
+        current["uploaded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        mpath.write_text(json.dumps(current, indent=2) + "\n")
+    else:
+        log.warning("local artifact changed during upload; preserved the new manifest; uploaded sha256=%s", sha)
     log.info("recorded %s (upload_id=%s)", active_path, upload_id)
     return {"upload": res, "status": status, "upload_id": upload_id, "sha256": sha}
 

@@ -229,11 +229,13 @@ def check_fold_fallback(name: str, spec: dict, folds: list[str] | int) -> None:
 def declared_full_files(spec: dict | None) -> list[str] | None:
     """File names of the full refits a spec DECLARES (``spec["full_blobs"]``: ``[{"file": "full_s0.bin", ...}]`` from
     train.py / mlp_train.py, or plain names), in declared order; ``None`` when nothing is declared (legacy spec)."""
-    declared = (spec or {}).get("full_blobs")
-    if not declared:
+    if spec is None or "full_blobs" not in spec:
         return None
+    declared = spec["full_blobs"]
     if not isinstance(declared, list):
         raise ValueError(f"spec full_blobs must be a list (got {type(declared).__name__})")
+    if not declared:
+        raise ValueError("spec full_blobs is empty: declared refits are incomplete; refusing legacy fallback")
     names: list[str] = []
     for entry in declared:
         fname = entry.get("file") if isinstance(entry, dict) else entry
@@ -572,6 +574,9 @@ def write_manifest(out_pkl: Path, bundle: dict, sha256: str) -> Path:
         "admitted_arms": bundle.get("admitted_arms"),
         "member_subset": bundle.get("member_subset"),
         "weights_source": bundle.get("weights_source"),
+        "artifact_source": bundle.get("artifact_source", "selected_blend"),
+        "source_run_fingerprint": bundle.get("source_run_fingerprint"),
+        "source_universe": bundle.get("source_universe"),
         "blob_files": bundle.get("blob_files"),
         "core_proxy_cols": bundle.get("core_proxy_cols", []),
         "n_features": len(bundle["feature_cols"]),
@@ -585,10 +590,58 @@ def write_manifest(out_pkl: Path, bundle: dict, sha256: str) -> Path:
     return mpath
 
 
+def build_audit_baseline_bundle(run_dir: Path) -> dict:
+    """Export the exact unsearched, pre-audit comparator refits, with neutralisation off. Never trains or selects.
+
+    This is distinct from ``--members lgbm_everest``: that member may use a knob-selected universe and searched
+    params. Retaining the pre-registered comparator after a challenger loses does not make its already-seen
+    audit scores fresh evidence for future tuning.
+    """
+    import yaml
+    from stealth._runtime import make_predict
+    from stealth.knobs import default_universe
+
+    run_dir = Path(run_dir)
+    spec = json.loads((run_dir / "baseline" / "spec.json").read_text())
+    cfg = yaml.safe_load((run_dir / "config.yaml").read_text())
+    fingerprint = json.loads((run_dir / "run_fingerprint.json").read_text())["fingerprint"]
+    if not ((cfg.get("cv") or {}).get("audit") or {}).get("enabled"):
+        raise ValueError("--audit-baseline requires a run with a reserved audit partition")
+    if spec.get("status") != "done" or spec.get("run_fingerprint") != fingerprint:
+        raise ValueError("audit baseline is incomplete or belongs to another run fingerprint")
+    if spec.get("universe") != default_universe(cfg).key():
+        raise ValueError("audit baseline does not use the unsearched default universe")
+    if spec.get("family") != "lgbm" or not any(m.get("name") == spec.get("name") and m.get("family") == "lgbm"
+                                               for m in cfg.get("members", [])):
+        raise ValueError("--audit-baseline requires the registered LightGBM comparator")
+    if declared_full_files(spec) is None:
+        raise ValueError("audit baseline must declare its complete full-refit blobs")
+    files, source = member_blob_files(run_dir / "baseline", spec)
+    name, cols = spec["name"], list(spec["feature_cols"])
+    result = {"version": VERSION, "git_sha": git_sha(), "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "run_id": run_dir.name, "feature_cols": cols, "missing_cols": [],
+              "members": [{"name": name, "family": "lgbm", "target": spec.get("target", "target_everest"),
+                           "group": "everest", "arm": "lgbm", "input": "nan", "feature_cols": cols,
+                           "blobs": [(run_dir / "baseline" / f).read_bytes() for f in files]}],
+              "weights": {name: 1.0}, "p_b": 0.0, "p_c": 0.0, "p_source": "override",
+              "p_reason": "exact unneutralised unsearched audit comparator; no post-audit tuning or refit",
+              "blend_rule": "audit_baseline", "admitted_arms": ["lgbm"], "core_proxy_cols": [],
+              "min_bench_coverage": DEFAULT_MIN_BENCH_COVERAGE, "blob_source": {name: source}, "blob_files": {name: files},
+              "member_subset": [name], "weights_source": "unsearched audit baseline",
+              "artifact_source": "audit_baseline", "source_run_fingerprint": fingerprint, "source_universe": spec["universe"]}
+    assert_plain(result)
+    make_predict(result)
+    return result
+
+
 def build_and_write(run_dir: Path, out: Path, *, p_b: float | None = None, p_c: float | None = None,
-                    require_frozen: bool = False, members: list[str] | None = None) -> tuple[dict, str, Path]:
+                    require_frozen: bool = False, members: list[str] | None = None,
+                    audit_baseline: bool = False) -> tuple[dict, str, Path]:
     """build_bundle -> write_pickle -> write_manifest; returns (bundle, sha256, manifest_path)."""
-    bundle = build_bundle(run_dir, p_b=p_b, p_c=p_c, require_frozen=require_frozen, members=members)
+    if audit_baseline and (p_b is not None or p_c is not None or require_frozen or members is not None):
+        raise ValueError("--audit-baseline exports the exact raw comparator; do not combine it with member or neutralisation overrides")
+    bundle = build_audit_baseline_bundle(run_dir) if audit_baseline else build_bundle(
+        run_dir, p_b=p_b, p_c=p_c, require_frozen=require_frozen, members=members)
     sha = write_pickle(bundle, out)
     mpath = write_manifest(out, bundle, sha)
     return bundle, sha, mpath
@@ -606,12 +659,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="refuse unless p_b/p_c were frozen by the regime simulation (blend.json neutralisation)")
     parser.add_argument("--members", nargs="+", default=None,
                         help="bundle exactly these members (e.g. the single-LGBM baseline for a diag upload)")
+    parser.add_argument("--audit-baseline", action="store_true",
+                        help="export the exact unsearched pre-audit LightGBM comparator, with neutralisation off; no retraining")
     parser.add_argument("--artifacts-dir", type=Path, default=ARTIFACTS_DIR)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         bundle, sha, mpath = build_and_write(args.artifacts_dir / args.run_id, args.out, p_b=args.p_b, p_c=args.p_c,
-                                             require_frozen=args.require_frozen, members=args.members)
+                                             require_frozen=args.require_frozen, members=args.members, audit_baseline=args.audit_baseline)
     except (FileNotFoundError, ValueError, KeyError, TypeError) as exc:
         log.error("bundle failed: %s", exc)
         return 1

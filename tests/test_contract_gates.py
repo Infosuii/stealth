@@ -17,6 +17,7 @@ import pytest
 from stealth import bundle as bd
 from stealth import diag, pkl_check, predict
 from tests.test_ops import FakeClient
+from tests.contract_helpers import record_test_check
 from tests.test_pkl_contract import make_fake_run
 
 
@@ -27,7 +28,7 @@ def good_pkl(tmp_path_factory: pytest.TempPathFactory, live_frame: pd.DataFrame)
     make_fake_run(run_dir, live_frame)
     out = root / "models" / "gates.pkl"
     bd.build_and_write(run_dir, out)
-    pkl_check.update_manifest(out, True)  # a pass bound to these bytes
+    record_test_check(out)
     return out
 
 
@@ -97,6 +98,27 @@ CASES = {
     "built under 3.12": (_built_under_312, "Python 3.12.4"),
     "checked under 3.12": (_checked_under_312, "pkl_check ran under Python 3.12.4"),
 }
+
+
+def _check_field(key, value):
+    def mutate(out, mpath, man):
+        mpath.write_text(json.dumps({**man, "pkl_check": {**man["pkl_check"], key: value}}))
+    return mutate
+
+
+CASES.update({
+    "truthy pass string": (_check_field("passed", "yes"), "has not passed"),
+    "true pass with running status": (_check_field("status", "running"), "has not passed"),
+    "missing checker python": (_check_field("python", None), "pkl_check ran under Python"),
+    "missing isolation": (_check_field("isolation", None), "isolation"),
+    "torch importable": (_check_field("isolation", {"stealth_importable": False, "torch_importable": True}), "isolation"),
+    "missing isolation flag": (_check_field("isolation", {"torch_importable": False}), "isolation"),
+    "missing lane pins": (_check_field("libs", None), "lane pins"),
+    "wrong lane pins": (_check_field("libs", {"numpy": "0.0.0"}), "lane pins"),
+    "reported problems": (_check_field("problems", ["checker failure"]), "empty list"),
+    "no eras": (_check_field("eras", 0), "at least one era"),
+    "nonfinite timing": (_check_field("seconds_per_era_max", float("nan")), "timing"),
+})
 
 
 class Recorder:
@@ -178,13 +200,14 @@ def test_upload_diagnostics_gates_an_attached_pickle(good_pkl: Path, small_val_d
     res = diag.upload_diagnostics(fake, "slot", vfile, model_pkl=good_pkl)  # positive control
     assert res["upload_id"] == "diag-1"
     kw = [c for c in fake.calls if c[0] == "submit_validation_diagnostics"][0][2]
-    assert kw == {"model_pkl": str(good_pkl), "model_pkl_python_version": "3.11"}
+    assert Path(kw["model_pkl"]).name == good_pkl.name
+    assert kw["model_pkl_python_version"] == "3.11"
 
 
 def test_positive_controls_upload_through_the_gate(good_pkl: Path, data_dir: Path, small_val_dir: Path, tmp_path: Path,
                                                    monkeypatch: pytest.MonkeyPatch):
     out, _, _ = _copy(good_pkl, tmp_path / "m")
-    pkl_check.update_manifest(out, True)
+    record_test_check(out)
     rec = Recorder(data_dir)
     monkeypatch.setattr(predict.sdata, "make_client", rec)
     monkeypatch.setenv(predict.ENV_UPLOAD, "1")
@@ -212,3 +235,60 @@ def test_preflight_reports_the_gate(good_pkl: Path, small_val_dir: Path, tmp_pat
     ok, lines = diag.preflight(out, vfile, "slot")
     assert not ok and any("artifact gate REFUSES" in ln for ln in lines)
     assert any("NOT passed for these bytes" in ln for ln in lines)
+
+
+def test_lane_upload_reads_checked_snapshot_during_concurrent_rebuild(good_pkl, data_dir, tmp_path, monkeypatch):
+    out, mpath, man = _copy(good_pkl, tmp_path / "m")
+    original = out.read_bytes()
+
+    class RebuildingClient(FakeClient):
+        def upload_model(self, model_id, file_path, python_version=None):
+            out.write_bytes(b"new unchecked build")
+            mpath.write_text(json.dumps({"sha256": "new-build", "pkl_check": None}))
+            assert Path(file_path) != out
+            assert Path(file_path).read_bytes() == original
+            return super().upload_model(model_id, file_path, python_version)
+
+    monkeypatch.setattr(predict.time, "sleep", lambda _: None)
+    result = predict.upload(RebuildingClient(data_dir), "slot", out, active_path=tmp_path / "active.json")
+    assert result["sha256"] == man["sha256"]
+    assert json.loads((tmp_path / "active.json").read_text())["sha256"] == man["sha256"]
+    assert json.loads(mpath.read_text())["sha256"] == "new-build"  # never restore a stale manifest
+
+
+def test_changed_snapshot_refuses_before_sdk_call(good_pkl, data_dir, tmp_path, monkeypatch):
+    out, _, _ = _copy(good_pkl, tmp_path / "m")
+    copy = shutil.copyfile
+
+    def corrupt(src, dst):
+        copy(src, dst)
+        Path(dst).write_bytes(b"different bytes")
+
+    monkeypatch.setattr(predict.shutil, "copyfile", corrupt)
+    client = FakeClient(data_dir)
+    with pytest.raises(RuntimeError, match="changed while preparing upload"):
+        predict.upload(client, "slot", out, active_path=tmp_path / "active.json")
+    assert client.calls == []
+    assert not (tmp_path / "active.json").exists()
+
+
+def test_diag_upload_reads_snapshots_and_records_sent_hashes(good_pkl, small_val_dir, tmp_path):
+    out, _, man = _copy(good_pkl, tmp_path / "m")
+    vfile = tmp_path / "validation.parquet"
+    diag.make_validation_predictions(out, data_dir=small_val_dir, out=vfile)
+    expected_pkl, expected_predictions = out.read_bytes(), vfile.read_bytes()
+    meta = json.loads(diag.meta_path(vfile).read_text())
+
+    class RebuildingClient(FakeClient):
+        def submit_validation_diagnostics(self, model_id, predictions, **kwargs):
+            out.write_bytes(b"new pickle")
+            vfile.write_bytes(b"new predictions")
+            diag.meta_path(vfile).write_text(json.dumps({"file_sha256": "new-file"}))
+            assert Path(predictions).read_bytes() == expected_predictions
+            assert Path(kwargs["model_pkl"]).read_bytes() == expected_pkl
+            return {"upload_id": "sent-once", "status": "pending"}
+
+    diag.upload_diagnostics(RebuildingClient(small_val_dir), "slot", vfile, model_pkl=out, source_pkl=out)
+    rec = json.loads(diag.upload_json_path(vfile).read_text())
+    assert rec["file_sha256"] == meta["file_sha256"]
+    assert rec["pkl_sha256"] == rec["built_from_pkl_sha256"] == man["sha256"]

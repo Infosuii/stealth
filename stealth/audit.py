@@ -117,6 +117,18 @@ def audit_run(run_dir: Path) -> tuple[dict, int]:
         raise ValueError("metrics.json and run_fingerprint.json disagree: re-run stealth.train --resume")
     blend_path = run_dir / "blend.json"
     blend = json.loads(blend_path.read_text())
+    audit_path = run_dir / "audit.json"
+    if audit_path.exists():
+        previous = json.loads(audit_path.read_text())
+        if previous.get("status") == "ok":
+            if previous.get("run_fingerprint") != fingerprint or previous.get("blend_sha256") != _sha256(blend_path):
+                raise ValueError("audit already scored a different frozen model: preserve the original evidence; "
+                                 "do not reuse these eras to tune or replace it")
+            recorded_data = previous.get("audit_data_sha256")
+            if recorded_data is not None and recorded_data != _sha256(run_dir / "audit.parquet"):
+                raise ValueError("audit input bytes changed after scoring: preserve the original evidence")
+            log.info("audit %s: reusing the completed frozen audit; labels are not scored again", run_dir.name)
+            return previous, EXIT_OK
     weights = {str(k): float(v) for k, v in (blend.get("weights") or {}).items() if float(v) > 0.0}
     if not weights:
         raise ValueError("blend.json has no member with a positive weight")
@@ -137,6 +149,7 @@ def audit_run(run_dir: Path) -> tuple[dict, int]:
     fit_base = per_era_fit_fast(audit[base_col], y, era) if base_col else None
     doc: dict = {"schema": SCHEMA, "run_id": run_dir.name, "status": "ok", "created_at": _now(), "run_fingerprint": fingerprint,
                  "blend_sha256": _sha256(blend_path),
+                 "audit_data_sha256": _sha256(run_dir / "audit.parquet"),
                  "partition": {"train_end": int(acfg["train_end"]), "test_start": int(acfg["test_start"]),
                                "eras": [int(era.min()), int(era.max())], "n_eras": int(era.nunique()), "n_rows": int(len(audit))},
                  "frozen": {"rule": blend.get("rule"), "members": sorted(weights),
@@ -240,8 +253,11 @@ def main(argv: list[str] | None = None) -> int:
         return code
     except Exception as exc:  # noqa: BLE001 - CLI boundary: a failed audit is recorded, never silently skipped
         log.exception("audit failed")
-        write_json(run_dir / "audit.json", {"schema": SCHEMA, "run_id": run_dir.name, "status": "failed", "created_at": _now(),
-                                            "error": f"{type(exc).__name__}: {exc}"})
+        destination = run_dir / "audit.json"
+        if destination.exists() and json.loads(destination.read_text()).get("status") == "ok":
+            destination = run_dir / "audit-error.json"  # never erase a completed evaluation on a later refusal
+        write_json(destination, {"schema": SCHEMA, "run_id": run_dir.name, "status": "failed", "created_at": _now(),
+                                 "error": f"{type(exc).__name__}: {exc}"})
         return EXIT_ERROR
     finally:
         logging.getLogger("stealth").removeHandler(fh)

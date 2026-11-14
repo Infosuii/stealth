@@ -185,6 +185,7 @@ def test_audit_refuses_inconsistent_inputs(runs: dict, tmp_path: Path) -> None:
 
     run_dir = tmp_path / "copy"
     shutil.copytree(runs["a"], run_dir)
+    (run_dir / "audit.json").unlink(missing_ok=True)  # this case tests the first evaluation's input validation
     bl = json.loads((run_dir / "blend.json").read_text())
     bl["weights"]["not_a_member"] = 0.5
     (run_dir / "blend.json").write_text(json.dumps(bl))
@@ -192,6 +193,63 @@ def test_audit_refuses_inconsistent_inputs(runs: dict, tmp_path: Path) -> None:
         audit.audit_run(run_dir)
     assert audit.main(["--run-id", "copy", "--artifacts", str(tmp_path)]) == 1
     assert json.loads((run_dir / "audit.json").read_text())["status"] == "failed"
+
+
+def test_completed_audit_is_not_rescored_or_replaced(runs, tmp_path, monkeypatch):
+    import shutil
+
+    run_dir = tmp_path / "frozen"
+    shutil.copytree(runs["a"], run_dir)
+    audit.audit_run(run_dir)
+    original = (run_dir / "audit.json").read_bytes()
+    monkeypatch.setattr(audit.pd, "read_parquet", lambda *a, **kw: pytest.fail("completed audit must not reread labels"))
+    doc, code = audit.audit_run(run_dir)
+    assert code == 0 and doc["status"] == "ok"
+    assert (run_dir / "audit.json").read_bytes() == original
+    selection = json.loads((run_dir / "blend.json").read_text())
+    selection["p_b"] = 0.75
+    (run_dir / "blend.json").write_text(json.dumps(selection))
+    with pytest.raises(ValueError, match="already scored a different frozen model"):
+        audit.audit_run(run_dir)
+    assert audit.main(["--run-id", run_dir.name, "--artifacts", str(tmp_path)]) == 1
+    assert (run_dir / "audit.json").read_bytes() == original
+    assert json.loads((run_dir / "audit-error.json").read_text())["status"] == "failed"
+
+
+def test_exported_audit_baseline_matches_the_comparator(runs, tmp_path):
+    run_dir = runs["a"]
+    out = tmp_path / "baseline.pkl"
+    b, _, manifest = bundle.build_and_write(run_dir, out, audit_baseline=True)
+    assert b["artifact_source"] == "audit_baseline" and b["source_universe"] == "e6000-none-d0"
+    assert b["p_b"] == b["p_c"] == 0 and b["p_source"] == "override"
+    assert json.loads(manifest.read_text())["source_run_fingerprint"] == b["source_run_fingerprint"]
+    aud = pd.read_parquet(run_dir / "audit.parquet")
+    feats = data.load_split("train", columns=b["feature_cols"])
+    predict = _runtime.make_predict(b)
+    for _, rows in aud.groupby("era"):
+        actual = predict(feats.loc[rows.index])["prediction"].to_numpy()
+        expected = _runtime.rank01(rows["baseline__lgbm_everest"].to_numpy())
+        np.testing.assert_allclose(actual, expected, atol=1e-12)
+    with pytest.raises(ValueError, match="exact raw comparator"):
+        bundle.build_and_write(run_dir, out, audit_baseline=True, members=["lgbm_everest"])
+    with pytest.raises(ValueError, match="exact raw comparator"):
+        bundle.build_and_write(run_dir, out, audit_baseline=True, require_frozen=True)
+
+
+def test_audit_baseline_export_refuses_stale_or_incomplete_refits(runs, tmp_path):
+    import shutil
+
+    run_dir = tmp_path / "baseline-copy"
+    shutil.copytree(runs["a"], run_dir)
+    spec_path = run_dir / "baseline" / "spec.json"
+    good = json.loads(spec_path.read_text())
+    for edits, message in (({"run_fingerprint": "wrong"}, "another run fingerprint"),
+                           ({"status": "running"}, "incomplete"),
+                           ({"universe": "wrong"}, "default universe"),
+                           ({"full_blobs": []}, "empty")):
+        spec_path.write_text(json.dumps({**good, **edits}))
+        with pytest.raises(ValueError, match=message):
+            bundle.build_audit_baseline_bundle(run_dir)
 
 
 def test_audit_config_validation(repo_root: Path, tmp_path: Path) -> None:

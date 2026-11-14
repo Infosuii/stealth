@@ -14,6 +14,7 @@ from stealth import bundle as bd
 from stealth import diag, monitor, predict
 from stealth import pkl_check
 from tests.test_pkl_contract import make_fake_run
+from tests.contract_helpers import record_test_check
 
 
 class FakeClient:
@@ -181,7 +182,7 @@ def test_predict_submit_and_upload_with_fake_client(pkl: Path, data_dir: Path, t
     # upload refuses while the manifest's pkl_check has not passed
     assert predict.main([*base, "--upload"]) == predict.EXIT_ERROR
     assert not any(c[0] == "upload_model" for c in fake.calls)
-    pkl_check.update_manifest(pkl, True)
+    record_test_check(pkl)
     rc = predict.main([*base, "--submit", "--upload"])
     assert rc == predict.EXIT_OK
     sub = [c for c in fake.calls if c[0] == "submit_futures_predictions"]
@@ -287,7 +288,7 @@ def checked_pkl(pkl: Path, tmp_path: Path) -> Path:
     man = json.loads(pkl.with_name(f"{pkl.stem}.manifest.json").read_text())
     man.update({"pkl": out.name, "pkl_check": None})
     out.with_name("m01.manifest.json").write_text(json.dumps(man))
-    pkl_check.update_manifest(out, True)
+    record_test_check(out)
     return out
 
 
@@ -392,7 +393,8 @@ def test_diag_pkl_required_and_attach(checked_pkl: Path, small_val_dir: Path, tm
     fake.diag_error = None
     assert diag.main([*args, "--attach-pkl"]) == 0
     kw = [c for c in fake.calls if c[0] == "submit_validation_diagnostics"][-1][2]
-    assert kw == {"model_pkl": str(checked_pkl), "model_pkl_python_version": "3.11"}
+    assert Path(kw["model_pkl"]).name == checked_pkl.name
+    assert kw["model_pkl_python_version"] == "3.11"
     rec = json.loads(diag.upload_json_path(out).read_text())
     assert rec["attached_pkl"] is True and rec["pkl_sha256"] == diag.sha256_file(checked_pkl)
 
@@ -420,7 +422,7 @@ def test_monitor_offline_local_checks(pkl: Path, tmp_path: Path):
     alert = tmp_path / "ALERT.md"
     rc = monitor.main(["--offline", "--models-dir", str(models_dir), "--active", str(tmp_path / "none.json"), "--alert", str(alert)])
     assert rc == 1 and alert.exists() and "pkl_check has not passed" in alert.read_text()
-    pkl_check.update_manifest(models_dir / pkl.name, True)
+    record_test_check(models_dir / pkl.name)
     alert.unlink()
     rc = monitor.main(["--offline", "--models-dir", str(models_dir), "--active", str(tmp_path / "none.json"), "--alert", str(alert)])
     assert rc == 0 and not alert.exists()
@@ -441,7 +443,7 @@ def test_monitor_refuses_a_pass_bound_to_other_bytes(pkl: Path, tmp_path: Path):
     models_dir.mkdir()
     for f in pkl.parent.iterdir():
         shutil.copy(f, models_dir / f.name)
-    pkl_check.update_manifest(models_dir / pkl.name, True)
+    record_test_check(models_dir / pkl.name)
     mpath = models_dir / bd.manifest_path(pkl).name
     manifest = json.loads(mpath.read_text())
     assert monitor.check_local(mpath, None)[1] == []
@@ -533,7 +535,7 @@ def test_upload_requires_manifest_and_python_311(pkl: Path, data_dir: Path, tmp_
     mdir.mkdir()
     for f in pkl.parent.iterdir():
         shutil.copy(f, mdir / f.name)
-    pkl_check.update_manifest(mdir / pkl.name, True)
+    record_test_check(mdir / pkl.name)
     mpath = mdir / bd.manifest_path(pkl).name
     manifest = json.loads(mpath.read_text())
     assert manifest["python"].startswith("3.11.")

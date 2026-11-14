@@ -1,5 +1,19 @@
 # Next session — state after the M2–M6 fix pass (2026-11-14)
 
+## Current follow-up (read before the historical checkpoint below)
+
+Handoff 04 completed on the laptop and was pushed as `c66d0cd`, `da2ff1c`, `a329cb3`: technical status ok;
+**no audit win**. Primary-agent follow-up verification and the contract fixes are documented in
+`docs/reviews/bot-followup-2026-11-14.md`. This solo follow-up does not claim the stopped independent agents finished.
+Do not rerun the full search or rescore an altered model on the audit.
+
+The conservative candidate is the exact unsearched `full01/baseline` comparator, exported with
+`stealth.bundle --audit-baseline`, not a member subset of the selected blend. No M7 full-data refit is authorised
+by this artifact export. The optional next calibration step is `handoffs/05-diag-upload-2.md`; it needs its own
+explicit approval and never automatically promotes full01. No new platform writes have occurred.
+
+The remaining sections below describe the earlier checkpoint and are historical where they conflict with this update.
+
 Read this first, then `docs/DECISIONS.md` (#11–#15 are new), `handoffs/INDEX.md`, `docs/INTERFACES.md` section 22 and
 the "Fix verification" sections of `docs/reviews/m2-m6-{statistics,contract,handoff}.md`. Older history is in git
 (`git show 6c719d6:docs/NEXT-SESSION.md`).

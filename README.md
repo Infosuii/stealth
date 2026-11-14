@@ -21,6 +21,13 @@ pass and the audit); decisions in `docs/DECISIONS.md`; review findings and their
 
 ## Quickstart (Linux)
 
+Current model decision: handoff 04 finished technically, but the selected blend did not beat its unsearched
+baseline on the reserved audit. Keep the baseline as the conservative candidate; see
+[`docs/reviews/bot-followup-2026-11-14.md`](docs/reviews/bot-followup-2026-11-14.md).
+To export the exact already-fitted comparator, use the absolute train interpreter with
+`-m stealth.bundle --run-id full01 --audit-baseline --out models/baseline01.pkl`, then run `stealth.pkl_check`.
+This does not train or upload anything. `--members lgbm_everest` exports a different, knob-selected model.
+
 ```bash
 git clone https://github.com/Infosuii/stealth "$HOME/stealth" && cd "$HOME/stealth"   # any path works; handoffs call it REPO
 bash scripts/setup.sh                 # python 3.11 venv (with pip), exact pins, pre-commit hook, selfcheck; prints PY=...

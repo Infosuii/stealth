@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from stealth import report
+from stealth.pkl_check import lane_pins
 from tests.test_report_selfcheck import _make_run, fake_repo  # noqa: F401  (fixture re-export)
 
 SHA = "ab" * 32
@@ -43,7 +44,8 @@ def _manifest(repo: Path, run_id: str, *, passed: bool = True, check_sha: str | 
     if pkl_bytes is not None:
         (repo / "models" / f"{run_id}.pkl").write_bytes(pkl_bytes)
         check_sha = sha if check_sha == SHA else check_sha
-    rec = {"passed": passed, "at": "t", "python": "3.11.2", "eras": 50, "seconds_per_era_max": 0.41,
+    rec = {"passed": passed, "status": "passed" if passed else "failed", "at": "t", "python": "3.11.2", "eras": 50,
+           "seconds_per_era_max": 0.41, "libs": dict(pin.split("==", 1) for pin in lane_pins()),
            "isolation": {"stealth_importable": False, "torch_importable": False}, "problems": [] if passed else ["boom"]}
     if check_sha is not None:
         rec["sha256"] = check_sha
@@ -154,6 +156,16 @@ def test_report_inside_pipeline_sees_compute_result(fake_repo: Path) -> None:  #
     run = _full_ok(fake_repo, "f4")
     _pipeline(run, status="ok", report_step={"name": "report", "status": "running"})
     assert report.write_results("f4", "04", repo=fake_repo)["status"] == "ok"
+
+
+@pytest.mark.parametrize("field,value", [("status", "running"), ("python", None), ("libs", {}), ("isolation", {})])
+def test_report_refuses_incomplete_checker_evidence(fake_repo, field, value):
+    _full_ok(fake_repo, "incomplete_check")
+    path = fake_repo / "models" / "incomplete_check.manifest.json"
+    man = json.loads(path.read_text())
+    man["pkl_check"][field] = value
+    path.write_text(json.dumps(man))
+    assert report.write_results("incomplete_check", "04", repo=fake_repo)["status"] == "failed"
 
 
 @pytest.mark.parametrize("case", ["no_sha", "other_sha", "file_bytes_differ", "check_failed"])

@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -366,12 +367,19 @@ def venv_python(venv_dir: Path) -> Path:
 def ensure_check_venv(venv_dir: Path = DEFAULT_VENV, lock_file: Path = LOCK_FILE, *, timeout: int = 540) -> Path:
     """Create (or reuse) the throwaway venv with ONLY the lane pins installed; returns its python.
 
-    Reuse requires a ``.pins.txt`` marker equal to the pins we would install; otherwise the venv is rebuilt.
+    Reuse requires a ``.pins.txt`` marker equal to the pins we would install. Only a directory owned by this
+    checker may be rebuilt; an unrelated directory or a symlink is never removed.
     ``stealth`` is never installed here. Creation can take minutes (pip downloads); ``timeout`` bounds it.
     """
     venv_dir = Path(venv_dir)
+    if venv_dir.is_symlink():
+        raise ValueError(f"refusing symlink check venv {venv_dir}; pass its interpreter with --venv-python instead")
     pins = lane_pins(lock_file)
     marker = venv_dir / ".pins.txt"
+    owner = venv_dir / ".stealth-pklcheck-owner"
+    if venv_dir.exists() and not (marker.is_file() or owner.is_file()):
+        raise ValueError(f"refusing to replace unrelated directory {venv_dir}: no checker ownership marker; "
+                         "choose a new --venv directory or pass --venv-python")
     py = venv_python(venv_dir)
     if py.exists() and marker.exists() and marker.read_text().split() == pins:
         log.info("reusing check venv %s", venv_dir)
@@ -386,6 +394,8 @@ def ensure_check_venv(venv_dir: Path = DEFAULT_VENV, lock_file: Path = LOCK_FILE
     if ver != EXPECT_PYTHON:
         raise ValueError(f"base interpreter {base} is Python {ver}, not {EXPECT_PYTHON}; pass --venv-python <clean python{EXPECT_PYTHON}>")
     log.info("creating check venv %s from %s (python %s)", venv_dir, base, ver)
+    venv_dir.mkdir(parents=True, exist_ok=True)
+    owner.write_text("stealth.pkl_check/1\n")
     subprocess.run([base, "-m", "venv", str(venv_dir)], check=True, timeout=120)
     py = venv_python(venv_dir)
     t0 = time.perf_counter()
@@ -404,6 +414,16 @@ def _abs(path: Path | str) -> Path:
     """Absolute path WITHOUT resolving symlinks (a venv's ``bin/python`` is a symlink to the base interpreter: resolving
     it would silently swap the clean venv for the base installation)."""
     return Path(os.path.abspath(os.fspath(path)))
+
+
+def checker_python(path: Path | str) -> Path:
+    """Resolve a PATH command or a relative interpreter path, preserving the venv symlink itself."""
+    candidate = Path(path)
+    if not candidate.exists() and len(candidate.parts) == 1:
+        found = shutil.which(str(path))
+        if found:
+            return _abs(found)
+    return _abs(candidate)
 
 
 def _sha256(path: Path) -> str:
@@ -441,7 +461,7 @@ def run_check(
     ``seconds_per_era_max``, ``stats``, ``isolation``, ``libs``, ``sha256`` and ``stdout``/``stderr`` tails. Needs
     ``data/futures_live.parquet``; validation files are optional (eras skipped when absent).
     """
-    pkl, python, data_dir = _abs(pkl), _abs(python), _abs(data_dir)
+    pkl, python, data_dir = _abs(pkl), checker_python(python), _abs(data_dir)
     pins = lane_pins() if pins is None else list(pins)
     live = data_dir / "futures_live.parquet"
     if not live.exists():
@@ -505,14 +525,44 @@ def run_check(
     return report
 
 
+def check_evidence_problems(check: dict | None, sha: str | None) -> list[str]:
+    """Validate the complete portability evidence used by upload and monitoring gates (no network)."""
+    if not isinstance(check, dict):
+        return ["manifest.pkl_check has not passed (missing checker record)"]
+    problems: list[str] = []
+    if check.get("passed") is not True or check.get("status") != "passed":
+        problems.append("manifest.pkl_check has not passed with status passed")
+    if not sha or check.get("sha256") != sha:
+        problems.append("manifest.pkl_check passed for other bytes than the artifact sha256")
+    python = check.get("python")
+    if not isinstance(python, str) or not python.startswith(EXPECT_PYTHON + "."):
+        problems.append(f"pkl_check ran under Python {python or '?'}, not {EXPECT_PYTHON}.x")
+    isolation = check.get("isolation")
+    if not isinstance(isolation, dict) or any(isolation.get(k) is not False for k in
+                                             ("stealth_importable", "torch_importable")):
+        problems.append("pkl_check isolation must certify stealth and torch are not importable")
+    expected = dict(pin.split("==", 1) for pin in lane_pins())
+    if check.get("libs") != expected:
+        problems.append("pkl_check library versions do not equal the lane pins")
+    if check.get("problems") != []:
+        problems.append("pkl_check problems must be an empty list")
+    eras = check.get("eras")
+    if type(eras) is not int or eras < 1:
+        problems.append("pkl_check must certify at least one era")
+    seconds = check.get("seconds_per_era_max")
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or not 0 <= seconds < MAX_SECONDS_PER_ERA:
+        problems.append("pkl_check timing is missing, non-finite or exceeds the lane limit")
+    return problems
+
+
 def check_record(pkl: Path, passed: bool, report: dict | None = None, *, status: str | None = None,
                  error: str | None = None) -> dict:
     """The manifest's ``pkl_check`` record (docs/INTERFACES.md section 22.F), bound to the sha256 of the bytes checked.
 
     ``{"passed", "status", "at", "sha256", "python", "libs", "checker", "eras", "seconds_per_era_max", "isolation",
     "problems"}``; without a ``report`` (the ``running`` marker, an error before the checker ran, a legacy caller) only
-    the first four (+ ``error``) are set and ``sha256`` is the file's current hash. ``passed`` is True only when the
-    checked hash equals the file's hash right now.
+    the first four (+ ``error``) are set and ``sha256`` is the file's current hash. A passing record requires a
+    complete, successful checker report for the bytes present right now; a boolean alone cannot mint a pass.
     """
     pkl = Path(pkl)
     sha = _sha256(pkl) if pkl.exists() else None
@@ -529,10 +579,16 @@ def check_record(pkl: Path, passed: bool, report: dict | None = None, *, status:
             "isolation": report.get("isolation"),
             "problems": list(report.get("problems") or [])[:20],
         })
-    rec["passed"] = bool(passed) and rec["sha256"] is not None and rec["sha256"] == sha
+    if passed:
+        failures = check_evidence_problems({**rec, "passed": True}, sha)
+        if report is None or report.get("passed") is not True:
+            failures.append("a successful checker report is required to record a pass")
+        if report is not None and report.get("sha256") != sha:
+            failures.append("pickle bytes differ from the checked bytes")
+        rec["passed"] = not failures
     if passed and not rec["passed"]:
         rec["status"] = "failed"
-        rec["problems"] = [*rec.get("problems", []), "pickle bytes differ from the checked bytes"]
+        rec["problems"] = [*rec.get("problems", []), *failures]
     if error is not None:
         rec["error"] = str(error)[:500]
     return rec
@@ -612,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     update_manifest(pkl, False, status="running")  # invalidate any earlier pass before this attempt can fail
     try:
-        python = _abs(args.venv_python) if args.venv_python else ensure_check_venv(_abs(args.venv), timeout=args.timeout)
+        python = checker_python(args.venv_python) if args.venv_python else ensure_check_venv(_abs(args.venv), timeout=args.timeout)
         report = run_check(pkl, python=python, data_dir=_abs(args.data_dir), eras=args.eras, seed=args.seed,
                            timeout=args.timeout)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, ValueError, OSError) as exc:
