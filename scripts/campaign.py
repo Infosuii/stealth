@@ -66,6 +66,10 @@ def fitted(spec,X,y,era,columns,directory):
         from stealth.representation_models import fit_latent,grouped_prediction
         models,info=fit_latent(spec,X,y,era,columns,r.CONFIG['inner'],seed=r.CONFIG['seed'],threads=r.CONFIG['threads'],storage=directory/'search.sqlite')
         return 'basis',[to_bytes(m) for m in models],lambda xx,eras:grouped_prediction(models,xx,eras),info
+    if spec['kind']=='stable_signal':
+        from stealth.stability_models import fit_stability
+        model,info=fit_stability(spec,X,y,era,columns,r.CONFIG['inner'])
+        return 'basis',[to_bytes(model)],lambda xx,eras=None:basis_forward(model,xx),info
     raise ValueError('external GPU recipe requires campaign_gpu.py')
 
 
