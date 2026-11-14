@@ -40,7 +40,7 @@ No old audit eras, platform writes or staking. No candidate is an independently 
 
 All 27 CPU fits and all three GPU fold ensembles completed; each neural ensemble used the three registered seeds. All 30 serialized fold models reproduced their cached predictions (maximum absolute error 7.22e-16). The shared FIT kernel matched the SDK path, including missing/constant cases. Full suite: 430 passed, 3 skipped in 116.83s with the optional GPU interpreter unset; the seven GPU-training tests then passed with its absolute path supplied.
 
-No candidate was eligible, so confirmation was not scored and no challenger pickle was exported. Baseline discovery FIT was 0.02181061; the best challenger blend reached 0.02158644, a negative paired gain of -0.00022417. These are selection estimates on historical development data.
+No candidate was eligible, so confirmation was not scored and no challenger pickle was exported. Baseline discovery FIT was 0.02181070; the best challenger blend reached 0.02158582, a negative paired gain of -0.00022488. These are selection estimates on historical development data.
 
 The first background launch was cleaned up by its short-lived shell before training began. A persistent supervisor fixed orchestration. The first supervised CPU run hit its numerical iteration ceiling; that run remains private in artifacts/research01-solver-limit. After increasing only the solver iteration limit, every fit was rerun under a new source-bound plan before any discovery comparison. No failed fit was treated as a valid result.
 
