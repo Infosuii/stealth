@@ -1,0 +1,34 @@
+# Architectural research, not another hyperparameter search. Frozen before the first scores.
+name: research01
+seed: 17
+threads: 8
+workers: 2
+train_min_era: 2800
+excluded_from_research: [5925, 6524]
+discovery:
+  - {name: early, train_end: 3960, test_start: 4000, test_end: 4499}
+  - {name: middle, train_end: 4460, test_start: 4500, test_end: 4999}
+  - {name: late, train_end: 4960, test_start: 5000, test_end: 5299}
+confirmation: {name: confirmation, train_end: 5300, test_start: 5340, test_end: 5924}
+bootstrap: {block: 20, n_boot: 5000, seed: 17}
+promotion: {alpha: 0.10, p_pos: 0.90, min_discovery_gain: 0.0005, min_positive_windows: 2, worst_window_gain: -0.002}
+baseline:
+  num_leaves: 8
+  learning_rate: 0.03
+  min_data_in_leaf: 2000
+  feature_fraction: 0.3
+  lambda_l2: 10
+  bagging_fraction: 0.7
+  bagging_freq: 1
+  max_bin: 16
+  cap: 1500
+candidates:
+  - {name: gaussian_ridge, kind: linear, alpha: 10000}
+  - {name: gaussian_shrink, kind: linear, alpha: 100000}
+  - {name: cubic_additive, kind: polynomial, alpha: 10000}
+  - {name: bin_additive, kind: gam, alpha: 10000}
+  - {name: bin_shrink, kind: gam, alpha: 100000}
+  - {name: smooth_additive, kind: gam, alpha: 1000, smooth: 200000}
+  - {name: quadratic_sketch, kind: quadratic, alpha: 10000, projections: 24}
+  - {name: ridge_residual, kind: residual, alpha: 10000, rounds: 200}
+  - {name: era_neural, kind: net, alpha: 10000, hidden: 128, dropout: 0.25, weight_decay: 0.01, lr: 0.0003, epochs: 60, patience: 8, batch_eras: 64, seeds: [17, 29, 43]}
