@@ -1,0 +1,248 @@
+{
+  "run_id": "research02",
+  "label": "historical development selection estimates; not a fresh holdout",
+  "comparisons": [
+    {
+      "name": "era_mse",
+      "blend_with_baseline": false,
+      "fit_mean": 0.020725617482143698,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.49836362588068117,
+      "paired": {
+        "diff_mean": -0.0010850801166536514,
+        "diff_se": 0.0004107165740632613,
+        "p_pos": 0.0028,
+        "ci90": [
+          -0.0017797769449180356,
+          -0.00042419605898389134
+        ],
+        "n_eras": 1300,
+        "p_value": 0.9948010397920416,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": -0.00018899942804195054,
+        "middle": -0.0020016987092641484,
+        "late": -0.0010508502766556577
+      },
+      "holm_threshold": 0.05,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "era_mse",
+      "blend_with_baseline": true,
+      "fit_mean": 0.02131503332191512,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.510627680444887,
+      "paired": {
+        "diff_mean": -0.0004956642768822286,
+        "diff_se": 0.00020455585647231124,
+        "p_pos": 0.0054,
+        "ci90": [
+          -0.0008402338593186251,
+          -0.00016806161667236994
+        ],
+        "n_eras": 1300,
+        "p_value": 0.9892021595680864,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": -0.0001111960589859129,
+        "middle": -0.0008693524036190467,
+        "late": -0.0005136310954813907
+      },
+      "holm_threshold": 0.025,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "fit_stop",
+      "blend_with_baseline": false,
+      "fit_mean": 0.019594150214758167,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.46482438857686675,
+      "paired": {
+        "diff_mean": -0.002216547384039179,
+        "diff_se": 0.001106251998895564,
+        "p_pos": 0.0244,
+        "ci90": [
+          -0.00403740110309304,
+          -0.0003530674400166637
+        ],
+        "n_eras": 1300,
+        "p_value": 0.9812037592481504,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": -0.0025431795565464934,
+        "middle": 0.0,
+        "late": -0.005366406069925622
+      },
+      "holm_threshold": 0.016666666666666666,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "fit_stop",
+      "blend_with_baseline": true,
+      "fit_mean": 0.02082202305425673,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.4980829214390764,
+      "paired": {
+        "diff_mean": -0.000988674544540617,
+        "diff_se": 0.000551129613335124,
+        "p_pos": 0.0414,
+        "ci90": [
+          -0.0018868739001307558,
+          -7.712714421192464e-05
+        ],
+        "n_eras": 1300,
+        "p_value": 0.9654069186162767,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": -0.0011448055266592636,
+        "middle": 0.0,
+        "late": -0.002376247148577233
+      },
+      "holm_threshold": 0.0125,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "era_fit",
+      "blend_with_baseline": false,
+      "fit_mean": 0.020285023897560372,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.4824113593628838,
+      "paired": {
+        "diff_mean": -0.0015256737012369777,
+        "diff_se": 0.0011863129024803074,
+        "p_pos": 0.1008,
+        "ci90": [
+          -0.003493675157580074,
+          0.0003761989977676701
+        ],
+        "n_eras": 1300,
+        "p_value": 0.9028194361127775,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": -0.0018100560001032078,
+        "middle": -0.0006316599307049356,
+        "late": -0.0025417261540133323
+      },
+      "holm_threshold": 0.01,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "era_fit",
+      "blend_with_baseline": true,
+      "fit_mean": 0.021268143605752424,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.5074739774976559,
+      "paired": {
+        "diff_mean": -0.0005425539930449238,
+        "diff_se": 0.0005908316627540927,
+        "p_pos": 0.1776,
+        "ci90": [
+          -0.001508597892490013,
+          0.0004193526229940953
+        ],
+        "n_eras": 1300,
+        "p_value": 0.8212357528494301,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": -0.000867985683697017,
+        "middle": -1.7375005977184553e-05,
+        "late": -0.000875466153737667
+      },
+      "holm_threshold": 0.008333333333333333,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "era_bag",
+      "blend_with_baseline": false,
+      "fit_mean": 0.021349515677567682,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.47502071284365455,
+      "paired": {
+        "diff_mean": -0.000461181921229667,
+        "diff_se": 0.0013693517680698445,
+        "p_pos": 0.3768,
+        "ci90": [
+          -0.002700621745309949,
+          0.0017658976533969097
+        ],
+        "n_eras": 1300,
+        "p_value": 0.6464707058588283,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": -0.0001696348707852977,
+        "middle": -6.412010688791004e-05,
+        "late": -0.0016088633625398767
+      },
+      "holm_threshold": 0.0071428571428571435,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "era_bag",
+      "blend_with_baseline": true,
+      "fit_mean": 0.021777377963169232,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.5015250135982577,
+      "paired": {
+        "diff_mean": -3.331963562811236e-05,
+        "diff_se": 0.0007325519307467469,
+        "p_pos": 0.4936,
+        "ci90": [
+          -0.001231737198058388,
+          0.001167226667359706
+        ],
+        "n_eras": 1300,
+        "p_value": 0.5320935812837433,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": -0.00015651219842398678,
+        "middle": 0.00037186118046490926,
+        "late": -0.0005033000577900241
+      },
+      "holm_threshold": 0.00625,
+      "holm_pass": false,
+      "eligible": false
+    }
+  ],
+  "selected": null,
+  "confirmation": {
+    "promoted": false,
+    "reason": "no candidate passed discovery gates; baseline retained",
+    "plan_sha256": "439e48dee94a1126e9234cbac0d08c9b9556adbf20f1544b85ee6344bc5fe8fe"
+  },
+  "plan_sha256": "439e48dee94a1126e9234cbac0d08c9b9556adbf20f1544b85ee6344bc5fe8fe",
+  "validation": {
+    "pytest": "438 passed, 1 skipped in 111.26s",
+    "skip_reason": "no-device path cannot be exercised on a CUDA-capable host",
+    "serialized_fold_ensembles": 15,
+    "export_parity_max_abs_error": 0.0,
+    "all_finite": true,
+    "confirmation_scored": false,
+    "new_model_exported": false
+  },
+  "research_context": "adaptive follow-up on viewed discovery data; within-round Holm correction is not global independent evidence",
+  "platform_writes": false
+}

@@ -1,4 +1,4 @@
-# Research research01
+# Research round 01 — architectural diversity
 
 historical development selection estimates; not a fresh holdout
 
@@ -45,3 +45,5 @@ No candidate was eligible, so confirmation was not scored and no challenger pick
 The first background launch was cleaned up by its short-lived shell before training began. A persistent supervisor fixed orchestration. The first supervised CPU run hit its numerical iteration ceiling; that run remains private in artifacts/research01-solver-limit. After increasing only the solver iteration limit, every fit was rerun under a new source-bound plan before any discovery comparison. No failed fit was treated as a valid result.
 
 Implementation commits: 71f481c (protocol), 8270334 (models and runtime), aefeb6e (numerical correction and compute preference). Hardware: 20-core Core Ultra 7 255HX; RTX 5070 Ti Laptop GPU, 12 GB VRAM. Model training ran concurrently on CPU and GPU.
+
+Final combined validation after the objective follow-up: **438 passed, 1 skipped in 111.26s**, with the absolute GPU interpreter supplied. The skip is the no-device failure path on the CUDA-capable host. See `research02-results.md` for the final decision across both rounds.

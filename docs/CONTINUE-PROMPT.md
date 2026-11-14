@@ -1,5 +1,10 @@
 # Development continuation prompt (after the M2–M6 fix pass)
 
+**Latest checkpoint:** the user subsequently authorised autonomous model development and extensive local
+CPU/GPU compute. Read the current section of `docs/NEXT-SESSION.md` first. Handoff 04 and research rounds
+01/02 have finished; neither research round promoted a challenger. The historical prompt below must not
+trigger a rerun or override the latest compute/development preference. Platform-write restrictions remain.
+
 This prompt is for the next **development agent**, not for the laptop GPT (that one gets `handoffs/GPT-KICKOFF.md`).
 
 ---

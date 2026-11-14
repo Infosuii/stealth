@@ -2,6 +2,20 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+The user's latest instruction authorises autonomous model development and prioritises powerful local CPU/GPU
+compute over compute cost. This supersedes the old laptop-operator-only prohibition on code changes for new
+research. The preference is recorded in `docs/DECISIONS.md` and `docs/RESEARCH-01.md`. Always use the absolute
+training and GPU venv interpreters, and never display `.env`.
+
+Research rounds `research01` and `research02` are complete: nine architectures plus four objective/stopping
+recipes, each tested alone and in a fixed baseline blend. Every challenger failed discovery; no confirmation
+was scored, no challenger was promoted, and the exact unsearched `baseline01` artifact remains the conservative
+candidate. Results and full failed-candidate tables are in `handoffs/results/research01-*` and `research02-*`.
+Source-bound private checkpoints live in `artifacts/research01` and `artifacts/research02`; the first numerical
+failure is preserved in `artifacts/research01-solver-limit`. Do not silently reuse a run ID after changing code,
+data, recipes or seeds. Historical discovery/confirmation data are not a fresh holdout. Neither round made a
+platform write. Their reports describe the actual tests and serialization checks.
+
 Handoff 04 completed on the laptop and was pushed as `c66d0cd`, `da2ff1c`, `a329cb3`: technical status ok;
 **no audit win**. Primary-agent follow-up verification and the contract fixes are documented in
 `docs/reviews/bot-followup-2026-11-14.md`. This solo follow-up does not claim the stopped independent agents finished.

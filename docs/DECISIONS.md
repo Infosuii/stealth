@@ -44,6 +44,21 @@ All newly inspected diagnostics would be additional selection evidence, never a 
 diagnostics #2 gets handoff 05; M7 refit/deployment remains separately specified and authorised. This follow-up
 performs no uploads, submissions, model-slot changes or staking. See `docs/reviews/bot-followup-2026-11-14.md`.
 
+## 2026-11-14 — autonomous model research and compute preference
+
+The user explicitly authorised substantial model improvements, code changes and autonomous local research,
+and asked that powerful local compute be treated as abundant. For new research, this supersedes the earlier
+handoff-only restriction on code changes and compute expansion. Prioritise predictive quality, reproducibility
+and robust evaluation over local compute cost. Use CPU and GPU concurrently when useful, measure available
+memory, and freeze recipes/seeds/gates before looking at their scores. The machine has a 20-core Core Ultra 7
+255HX and an RTX 5070 Ti Laptop GPU with 12 GB VRAM. Compute is not a substitute for independent data.
+
+Two registered research rounds tested 13 recipes and their 13 fixed baseline blends. Neither round passed
+discovery. Preserve the exact unsearched baseline; no confirmation was scored and no new candidate was promoted.
+Protocols: `docs/RESEARCH-01.md`, `docs/RESEARCH-02.md`. Complete results: `handoffs/results/research01-*` and
+`handoffs/results/research02-*`. These are historical selection estimates. New research remains separate from
+platform uploads, live submissions, model-slot changes, staking and any separately specified M7 refit.
+
 ## Standing rules (unchanged)
 
 - Nothing is submitted, uploaded, or staked without a handoff carrying a **USER MUST APPROVE** banner.
