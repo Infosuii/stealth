@@ -1,0 +1,30 @@
+name: campaign03
+seed: 17
+threads: 6
+workers: 3
+train_min_era: 2800
+excluded_from_research: [5925, 6524]
+discovery:
+  - {name: early, train_end: 3960, test_start: 4000, test_end: 4499}
+  - {name: middle, train_end: 4460, test_start: 4500, test_end: 4999}
+  - {name: late, train_end: 4960, test_start: 5000, test_end: 5299}
+confirmation: {name: confirmation, train_end: 5300, test_start: 5340, test_end: 5924}
+bootstrap: {block: 20, n_boot: 10000, seed: 17}
+promotion: {alpha: 0.05, p_pos: 0.95, min_discovery_gain: 0.001, min_positive_windows: 2, worst_window_gain: -0.001}
+major_relative_gain: 0.15
+inner: {windows: 3, width: 200, gap: 40, min_train: 400, stability_penalty: 0.25}
+baseline:
+  num_leaves: 8
+  learning_rate: 0.03
+  min_data_in_leaf: 2000
+  feature_fraction: 0.3
+  lambda_l2: 10
+  bagging_fraction: 0.7
+  bagging_freq: 1
+  max_bin: 16
+  cap: 1500
+candidates:
+  - {name: calibrated_ridge, kind: calibrated, lambdas: [0.01, 0.0316227766, 0.1, 0.316227766, 1, 3.16227766, 10, 31.6227766, 100, 316.227766, 1000, 3162.27766, 10000], histories: [null, 1024, 512]}
+  - {name: nested_trees, kind: tuned_trees, trials: 64, cap: 6000, patience: 300, top_k: 3}
+  - {name: long_mse, kind: long_net, hidden: 256, dropout: 0.4, weight_decay: 0.03, lr: 0.0003, epochs: 600, batch_eras: 256, eval_every: 5, ema: 0.99, aux_weight: 0.0, skip_alpha: 10000000, seeds: [17, 29, 43]}
+  - {name: long_multi, kind: long_net, hidden: 512, dropout: 0.5, weight_decay: 0.03, lr: 0.0003, epochs: 600, batch_eras: 256, eval_every: 5, ema: 0.99, aux_weight: 0.3, skip_alpha: 10000000, seeds: [17, 29, 43]}
