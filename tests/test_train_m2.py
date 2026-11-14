@@ -387,7 +387,8 @@ def test_load_config_m2_validation(tmp_path: Path, repo_root: Path) -> None:
 
 
 # ------------------------------------------------------------------------------------------ fast per-era kernels
-def test_fast_kernels_match_sdk_path(train_slice: pd.DataFrame) -> None:
+@pytest.mark.parametrize('fast_fit', [trainmod.per_era_fit_fast, metrics.per_era_fit_fast], ids=['train', 'shared'])
+def test_fast_kernels_match_sdk_path(train_slice: pd.DataFrame, fast_fit) -> None:
     sub = train_slice.loc[train_slice["era"] >= 6400]
     rng = np.random.default_rng(1)
     pred = pd.Series(rng.normal(size=len(sub)) + sub["target_everest"].to_numpy(), index=sub.index)
@@ -396,7 +397,7 @@ def test_fast_kernels_match_sdk_path(train_slice: pd.DataFrame) -> None:
     tgt = sub["target_everest"].astype(np.float64).copy()
     tgt.iloc[-3:] = np.nan
     a = metrics.per_era_fit(pred, tgt, sub["era"])
-    b = trainmod.per_era_fit_fast(pred, tgt, sub["era"])
+    b = fast_fit(pred, tgt, sub["era"])
     assert a.index.equals(b.index) and b.index.dtype == np.int32 and b.name == "fit"
     np.testing.assert_allclose(b.to_numpy(), a.to_numpy(), atol=1e-12)
     assert b.iloc[0] == 0.0
