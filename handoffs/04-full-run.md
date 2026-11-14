@@ -22,7 +22,8 @@ Every development number (OOF, forward, knobs, search, ladder, NNLS, neutralisat
 same eras chose and scored, so it is optimistic. The audit is the only number that no choice of this run has seen.
 It is still not "fresh": handoff 02 looked at those eras.
 
-**Technical success** = ALL of the following, read from `handoffs/results/04-metrics.json` and the step outputs:
+**Technical success** = ALL of the following, read from `handoffs/results/04-metrics.json` and the step outputs.
+The step 3b re-checks must pass first: the full run starts only after them.
 - The pipeline ends with `PIPELINE OK run_id=full01 ...`, exit 0. `04-metrics.json` `status` is `ok` (the reporter
   derives it from the evidence) and `leak_check` is `pass`.
 - `knobs.status` is `done`, with a `chosen` key and one candidate row per alternative.
@@ -96,6 +97,50 @@ if [ "$GPU_RC" -eq 0 ]; then export STEALTH_GPU_PY="$GPU_PY"; fi
 ```
 Expected: `pytest exit 0` and `N passed` (a few skips are fine). On a non-zero exit, stop, copy the last 30 lines of
 `/tmp/04-pytest.txt` into the operator notes, and go to section 7.
+
+The suite includes the fix-pass regression tests: the audit labels never reach a decision
+(`tests/test_audit.py`), count sources, purged NNLS, simulation/runtime parity, the upload gates, and pipeline
+signals and states.
+
+**Step 3b — re-checks on this laptop before the real run (10–20 min).** The development agent's independent
+statistics and handoff re-checks were stopped before they finished. These checks repeat the pipeline evidence on this
+machine. Run them in the same shell, in order. **If any expectation fails, stop, do NOT start step 4, write what failed
+into the operator notes, and go to section 7.**
+```bash
+if [ "$GPU_RC" -eq 0 ]; then MLP_FLAGS=(--gpu-py "$GPU_PY"); else MLP_FLAGS=(--no-mlp); fi
+mkdir -p artifacts
+# (1) toy-scale rehearsal of every stage (MLP on the GPU when step 2 passed); nothing goes into models/
+bash scripts/run_pipeline.sh configs/minifull.yaml recheck01 "${MLP_FLAGS[@]}" --pkl artifacts/recheck01.pkl > artifacts/recheck01.out 2>&1; echo "rehearsal exit $?"
+tail -n 1 artifacts/recheck01/pipeline.log
+"$PY" -c "import json; p = json.load(open('artifacts/recheck01/pipeline.json')); a = json.load(open('artifacts/recheck01/audit.json')); m = json.load(open('artifacts/recheck01.manifest.json')); c = m['pkl_check']; print('pipeline', p['status'], '| mlp', p.get('mlp'), '| audit', a['status'], a['partition']['eras'], '| p_source', m['p_source'], '| pkl_check', c['passed'], 'bound', c['sha256'] == m['sha256'], 'isolation', c['isolation'])"
+```
+Expected:
+- `rehearsal exit 0` and `PIPELINE OK run_id=recheck01 ...`;
+- `pipeline ok`, with `mlp ok` after step 2 passed (`n/a` or `skipped (--no-mlp)` otherwise);
+- `audit ok [5945, 6524]`;
+- `p_source simulation`;
+- `pkl_check True bound True isolation {'stealth_importable': False, 'torch_importable': False}`.
+
+The toy-scale numbers mean nothing; only the pass marks matter.
+```bash
+# (2) a stale external member is refused (only meaningful when the MLP ran in (1))
+if [ "$GPU_RC" -eq 0 ]; then bash scripts/run_pipeline.sh configs/minifull.yaml recheck01 --no-mlp --from blend > /tmp/04-stale.txt 2>&1; echo "stale-MLP check exit $? (expect 64)"; tail -n 1 /tmp/04-stale.txt; fi
+# (3) interrupt + resume: TERM the driver mid-train, then the same command must finish OK with both attempts recorded
+nohup bash scripts/run_pipeline.sh configs/minifull.yaml recheck02 --no-mlp --no-diag --pkl artifacts/recheck02.pkl > artifacts/recheck02.out 2>&1 &
+RP=$!; sleep 40; kill -TERM "$RP"; wait "$RP"; echo "interrupted attempt exit $? (expect 143)"
+pgrep -f 'run-id recheck02' > /dev/null && echo "STRAY PROCESS LEFT (problem)" || echo "no stray processes"
+bash scripts/run_pipeline.sh configs/minifull.yaml recheck02 --no-mlp --no-diag --pkl artifacts/recheck02.pkl > artifacts/recheck02b.out 2>&1; echo "resume exit $? (expect 0)"
+"$PY" -c "import json; p = json.load(open('artifacts/recheck02/pipeline.json')); print('attempts', [a['status'] for a in p['attempts']], '| final', p['status'])"
+```
+Expected:
+- `stale-MLP check exit 64`, with a line saying `oof.parquet still contains external member(s) mlp_everest` (only after
+  step 2 passed);
+- `interrupted attempt exit 143` and `no stray processes`;
+- `resume exit 0`, then `attempts ['interrupted', 'ok'] | final ok`.
+
+If the 40 s sleep missed the train step (the first attempt already finished, exit 0), write that down; it is not a
+failure. Write every printed line of step 3b into the operator notes. The `recheck*` artifacts stay in `artifacts/`;
+never commit them.
 
 **Step 4 — start the pipeline in the background (seconds). Run exactly ONE of 4a / 4b.**
 
@@ -217,7 +262,7 @@ On **PUSH FAILED — …** or **GIT COMMIT FAILED — …**, repeat the message 
 
 Then append the operator notes and push them. Write only what happened; leave a field `n/a` rather than guess.
 ```bash
-printf '\n## Operator notes\n\n```text\n%s\n```\n' "<commit: <git log -1 --oneline>; GPU: OK|FAIL (<step 2 tail>); pytest: <N passed / failed>; MLP: ok|skipped (why); step exits + seconds: <step 6 grep>; step 7: <paste both lines>; step 8: <ok|error>; total wall: H h MM min; nproc: N, threads: 16; deviations: none|<what>>" >> handoffs/results/04-results.md
+printf '\n## Operator notes\n\n```text\n%s\n```\n' "<commit: <git log -1 --oneline>; GPU: OK|FAIL (<step 2 tail>); pytest: <N passed / failed>; step 3b re-checks: <every printed line>; MLP: ok|skipped (why); step exits + seconds: <step 6 grep>; step 7: <paste both lines>; step 8: <ok|error>; total wall: H h MM min; nproc: N, threads: 16; deviations: none|<what>>" >> handoffs/results/04-results.md
 git add handoffs/results && git commit -m "results: 04 full-run (notes)" && git push
 ```
 Commit the manifest and its sha only if step 7 showed `pkl_check passed True | on these bytes True`. Never commit the

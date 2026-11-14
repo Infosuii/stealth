@@ -29,7 +29,9 @@ It trains, checks and packages a model locally and builds a diagnostics file tha
 2. Read `"$REPO"/handoffs/INDEX.md`, then open `"$REPO"/handoffs/04-full-run.md` and follow it section by section.
    Set `REPO` in its section 4 to your clone's path. Run section 4's block and every later block in the same bash
    shell.
-3. The pipeline runs in the background for about 1–2 hours (step 4). Poll it as step 5 says, every 5–10 minutes,
+3. Step 3b re-checks the fix pass on this laptop (a toy rehearsal with the GPU MLP, a stale-MLP refusal, an
+   interrupt + resume). It takes 10–20 min. If any expectation fails, do NOT start the real run: report and stop.
+4. The pipeline runs in the background for about 1–2 hours (step 4). Poll it as step 5 says, every 5–10 minutes,
    until it prints `STATUS ok`, `failed` or `interrupted`. Do not start a second copy while one is running. If your
    session restarts, check `STATUS` first: re-run the step 4 command only if it says `interrupted` or `failed` and
    section 6 tells you to.

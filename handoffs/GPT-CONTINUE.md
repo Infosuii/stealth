@@ -6,7 +6,8 @@ fix-pass commits, then running handoff 04. Writing new code is out of scope.
 ## A. Publish (one time; the user's prompt gives the patch URL and its sha256)
 
 The fix-pass commits were built on `worktree-m2-m6` at `6c719d6` and travel as a `git am` patch. After applying it:
-- `git log --oneline -1` shows the commit titled "handoff: continuation note for the laptop GPT" (it adds this file);
+- `git log --oneline -1` shows the commit titled "handoff 04: step 3b re-checks (GPU rehearsal, stale-MLP refusal,
+  interrupt+resume) before the real run";
 - push `worktree-m2-m6`;
 - fast-forward `main` to it with `git push origin worktree-m2-m6:main` (a fast-forward; never force);
 - verify with `git ls-remote origin main worktree-m2-m6`: both must show the same sha.
@@ -16,7 +17,8 @@ If the sha256 check or `git am` fails, stop and tell the user. Do not edit the p
 ## B. Run handoff 04
 
 In the laptop clone that ran 00–03, `git pull` on `main`, then follow `handoffs/GPT-KICKOFF.md` exactly. 04 is
-`ready` and uploads, submits and stakes nothing.
+`ready` and uploads, submits and stakes nothing. Its step 3b re-checks the fix pass on the laptop BEFORE the real
+training; the training starts only when every re-check passes.
 
 ## C. What is open (for the user, not for you to fix)
 
