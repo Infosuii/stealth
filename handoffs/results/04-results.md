@@ -450,3 +450,65 @@ max pair: cat_everest_l2_3 / cat_everest_l2_30 corr 0.967 (24 members; full matr
 2026-11-14 02:07:13,087 INFO stealth.metrics: regime grid: 1000 draws x 3 means x 1 cells (1 p_b x 1 p_c) on 580 eras in 10.6s
 2026-11-14 02:07:13,088 INFO stealth.audit: audit full01 eras 5945..6524: blend fit20 0.0266 (se 0.0070, sharpe 0.557) vs baseline 0.0308 (diff -0.0042, p_pos 0.041); drawdown 1.5745; no audit win: tie or loss against the unsearched baseline on the reserved eras (diff -0.0042, p_pos 0.041, p_value 0.948): technical completion only
 ```
+
+## Operator notes
+
+```text
+Summary:
+Step 3b: GPU rehearsal passed every stage; stale-MLP refusal exit 64 as expected; TERM interruption exit 143, no stray processes; resume exit 0 with attempts [interrupted, ok], final ok.
+GPU: OK on NVIDIA GeForce RTX 5070 Ti Laptop GPU (sm_120). MLP: trained successfully on CUDA in 73 s, parity max 8.742886604129474e-07; not admitted by the ladder.
+Pytest: 360 passed, 1 skipped in 108.14s (0:01:48); exit 0.
+Chosen knobs universe: e3-none-d0.
+LightGBM search: 25 distinct trials, not adopted; negative development forward gain, base cell retained. XGBoost search: 12 distinct trials, not adopted for the same gate outcome.
+Admitted arms: lgbm, ridge; members lgbm_everest and ridge_everest; rule nnls with cross-fitted development OOF predictions.
+p_b: 0.0; p_c: 0.0; p_source: simulation.
+Selection estimates (reused for selection; optimistic): final OOF fit20 0.022570161315259105, block SE 0.003047143311984256; forward fit 0.021879666795741777; central score Sharpe 0.35988967073801414; W 0.03621411516307345.
+verdict: no audit win: tie or loss against the unsearched baseline on the reserved eras (diff -0.0042, p_pos 0.041, p_value 0.948): technical completion only
+Report status: ok; leak_check pass; pkl_check PASSED on the actual pickle bytes; validation diagnostics file 125931 rows, 1392 eras, not uploaded.
+Total wall: real pipeline 47 min 21 s (2841 s, 01:19:57Z to 02:07:18Z); pipeline launch through offline dry run 47 min 56 s; preparation, re-checks and pipeline through offline dry run 57 min 01 s (3421 s), excluding reporting/commits.
+Every fix made: none. No source-code or config edits; no unexpected failures. The deliberate stale-MLP refusal and TERM interruption are the required successful re-checks. Main pipeline completed in one attempt with zero resumes.
+
+Detailed evidence:
+Code commit: 1a0a969 (main at launch); same persistent Bash shell for all runbook blocks; nproc 20, configured threads 16; mains connected; selfcheck exit 0, PINS OK.
+GPU setup tail:
+device: NVIDIA GeForce RTX 5070 Ti Laptop GPU  compute capability sm_120  arch list ['sm_75', 'sm_80', 'sm_86', 'sm_90', 'sm_100', 'sm_120']
+4096^2 matmul 3.444s (incl. transfer + first-call init), rel max err vs CPU 2.58e-06
+
+GPU_PY=/home/om/Projects/eversteer/stealth/.venv-gpu/bin/python
+GPU OK
+
+Step 3b printed lines:
+rehearsal exit 0
+2026-11-14T01:17:38Z pipeline[recheck01]: PIPELINE OK run_id=recheck01 pkl=/home/om/Projects/eversteer/stealth/artifacts/recheck01.pkl mlp: ok
+pipeline ok | mlp ok | audit ok [5945, 6524] | p_source simulation | pkl_check True bound True isolation {'stealth_importable': False, 'torch_importable': False}
+stale-MLP check exit 64 (expect 64)
+run_pipeline: --no-mlp --from blend: /home/om/Projects/eversteer/stealth/artifacts/recheck01/oof.parquet still contains external member(s) mlp_everest from an earlier attempt; re-run with --from retrain --no-mlp so it is re-assembled without them
+interrupted attempt exit 143 (expect 143)
+no stray processes
+resume exit 0 (expect 0)
+attempts ['interrupted', 'ok'] | final ok
+
+Pipeline step exits:
+2026-11-14T01:53:15Z pipeline[full01]: step train: exit 0 after 1998 s
+2026-11-14T01:54:28Z pipeline[full01]: step mlp: exit 0 after 73 s
+2026-11-14T01:54:51Z pipeline[full01]: step retrain: exit 0 after 23 s
+2026-11-14T02:07:01Z pipeline[full01]: step blend: exit 0 after 730 s
+2026-11-14T02:07:13Z pipeline[full01]: step audit: exit 0 after 12 s
+2026-11-14T02:07:13Z pipeline[full01]: step bundle: exit 0 after 0 s
+2026-11-14T02:07:14Z pipeline[full01]: step pkl_check: exit 0 after 1 s
+2026-11-14T02:07:18Z pipeline[full01]: step diag: exit 0 after 4 s
+2026-11-14T02:07:18Z pipeline[full01]: PIPELINE OK run_id=full01 pkl=/home/om/Projects/eversteer/stealth/models/full01.pkl mlp: ok
+
+Step 7 packaging and audit:
+p_source simulation | p_b 0.0 | p_c 0.0 | rule nnls | arms ['lgbm', 'ridge'] | MB 0.19
+pkl_check passed True | on these bytes True | slowest s 0.3216879949977738 | isolation {'stealth_importable': False, 'torch_importable': False}
+audit ok [5945, 6524] | blend fit20 0.0266 | baseline 0.0308 | diff -0.004206266635333212 | p_pos 0.0412
+verdict: no audit win: tie or loss against the unsearched baseline on the reserved eras (diff -0.0042, p_pos 0.041, p_value 0.948): technical completion only
+
+Step 8 offline dry run:
+2026-11-14 02:07:53,565 INFO stealth.data: loaded futures_live.parquet: 90 rows, 1 eras (8055..8055)
+2026-11-14 02:07:53,898 INFO stealth.predict: predicted exped=exped_8055 n=90 in 0.33s bench_used=False core_used=False unique=90
+2026-11-14 02:07:53,900 INFO stealth.predict: dry run ok: exped=exped_8055 n=90 -> /home/om/Projects/eversteer/stealth/artifacts/predictions/exped_8055.parquet
+
+Deviations: none. Read-only progress-log checks supplemented the scheduled status polls. .env presence checked only with test -s .env; its contents were never displayed. Nothing was uploaded, submitted or staked; no model slots or auto-submit settings changed. Re-check artifacts remain local and uncommitted.
+```
