@@ -59,7 +59,7 @@ def tensors(design,y,era,skip,mean,std):
     return [torch.as_tensor(a,device='cuda') for a in (features,target,mask,base)]
 
 
-def train(spec,X,y,era,columns,seed,epochs,valid=None):
+def train(spec,X,y,era,columns,seed,epochs,valid=None,selection=None):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.cuda.reset_peak_memory_stats()
@@ -144,7 +144,8 @@ def train(spec,X,y,era,columns,seed,epochs,valid=None):
     return result,info
 
 
-def fit_window(window,spec,full=False):
+def fit_window(window,spec,full=False,trainer=None):
+    trainer=trainer or train
     r=c.r
     if r.cached(window,spec['name']):return
     start=time.perf_counter()
@@ -155,7 +156,7 @@ def fit_window(window,spec,full=False):
         Xt=X[:0]
     else:columns,tr,te,X,Xt=r.arrays(window)
     targets_cols=['target_everest']
-    if spec['aux_weight']:
+    if spec.get('aux_weight',0):
         targets_cols+=[x for x in tr if x.startswith('target_') and x!='target_everest']
     y,era=tr[targets_cols].to_numpy(dtype=float),tr.era.to_numpy()
     unique=np.unique(era);cut=unique[int(len(unique)*.8)]
@@ -170,9 +171,9 @@ def fit_window(window,spec,full=False):
             info=json.loads((folder/'done.json').read_text())
             count=info['epochs']
         else:
-            _,inner_info=train(spec,X[inner],y[inner],era[inner],columns,seed,spec['epochs'],valid=(X[valid],y[valid,0],era[valid]))
+            _,inner_info=trainer(spec,X[inner],y[inner],era[inner],columns,seed,spec['epochs'],valid=(X[valid],y[valid,0],era[valid]))
             count=inner_info['best_epoch']
-            model,full_info=train(spec,X,y,era,columns,seed,count)
+            model,full_info=trainer(spec,X,y,era,columns,seed,count,selection=inner_info)
             pred=basis_forward(model,Xt) if len(Xt) else np.empty(0)
             blob=to_bytes(model)
             folder.mkdir(parents=True,exist_ok=True)

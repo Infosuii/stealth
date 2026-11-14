@@ -28,13 +28,13 @@ from stealth.research_models import to_bytes
 log=logging.getLogger('campaign')
 
 
-def load(phase='discovery'):
-    r.CONFIG=yaml.safe_load((REPO/'configs/campaign.yaml').read_text())
+def load(phase='discovery',*,config_path=None,additional_sources=()):
+    r.CONFIG=yaml.safe_load(Path(config_path or REPO/'configs/campaign.yaml').read_text())
     r.RUN=REPO/'artifacts'/r.CONFIG['name']
     r.RUN.mkdir(parents=True,exist_ok=True)
     files=['scripts/campaign.py','scripts/campaign_gpu.py','scripts/research_run.py','scripts/research_gpu.py',
            'stealth/campaign_models.py','stealth/research_models.py','stealth/models/lgbm.py','stealth/era_boost.py',
-           'stealth/metrics.py','stealth/cv.py','stealth/_runtime.py','stealth/bundle.py']
+           'stealth/metrics.py','stealth/cv.py','stealth/_runtime.py','stealth/bundle.py',*additional_sources]
     source=REPO/'data/futures_train.parquet'
     plan={'protocol':'sustained-campaign-v1','config':r.CONFIG,'data_sha256':r.sha(source),
           'code_sha256':{f:r.sha(REPO/f) for f in files}}
@@ -57,11 +57,15 @@ def load(phase='discovery'):
 def fitted(spec,X,y,era,columns,directory):
     if spec['kind']=='calibrated':
         model,info=fit_calibrated(spec,X,y,era,columns,r.CONFIG['inner'])
-        return 'basis',[to_bytes(model)],lambda xx:basis_forward(model,xx),info
+        return 'basis',[to_bytes(model)],lambda xx,eras=None:basis_forward(model,xx),info
     if spec['kind']=='tuned_trees':
         from stealth.models import lgbm
         models,info=fit_trees(spec,X,y,era,r.CONFIG['inner'],seed=r.CONFIG['seed'],threads=r.CONFIG['threads'],storage=directory/'search.sqlite')
-        return 'lgbm',[lgbm.to_bytes(m) for m in models],lambda xx:np.mean([lgbm.predict(m,xx) for m in models],axis=0),info
+        return 'lgbm',[lgbm.to_bytes(m) for m in models],lambda xx,eras=None:np.mean([lgbm.predict(m,xx) for m in models],axis=0),info
+    if spec['kind']=='latent_tree':
+        from stealth.representation_models import fit_latent,grouped_prediction
+        models,info=fit_latent(spec,X,y,era,columns,r.CONFIG['inner'],seed=r.CONFIG['seed'],threads=r.CONFIG['threads'],storage=directory/'search.sqlite')
+        return 'basis',[to_bytes(m) for m in models],lambda xx,eras:grouped_prediction(models,xx,eras),info
     raise ValueError('external GPU recipe requires campaign_gpu.py')
 
 
@@ -77,14 +81,14 @@ def fit_job(window,spec):
     with threadpool_limits(limits=r.CONFIG['threads']):
         columns,tr,te,X,Xt=r.arrays(window)
         family,blobs,predict,info=fitted(spec,X,tr.target_everest.to_numpy(),tr.era.to_numpy(),columns,directory)
-        prediction=predict(Xt)
+        prediction=predict(Xt,te.era.to_numpy())
         r.write_json(directory/'training.json',info)
         r.save_fit(window,spec['name'],family,blobs,prediction,te,time.perf_counter()-start,{'training_sha256':r.sha(directory/'training.json')})
     return f'{window["name"]}/{spec["name"]}: done in {time.perf_counter()-start:.1f}s'
 
 
 def cpu():
-    jobs=[(w,s) for w in r.CONFIG['discovery'] for s in [{'name':'baseline'},*r.CONFIG['candidates']] if s.get('kind')!='long_net']
+    jobs=[(w,s) for w in r.CONFIG['discovery'] for s in [{'name':'baseline'},*r.CONFIG['candidates']] if s.get('kind') not in ('long_net','denoised')]
     with ProcessPoolExecutor(max_workers=r.CONFIG['workers'],mp_context=multiprocessing.get_context('fork')) as pool:
         futures=[pool.submit(fit_job,w,s) for w,s in jobs]
         for future in as_completed(futures):
@@ -108,7 +112,7 @@ def confirm():
         window=r.CONFIG['confirmation']
         spec=next(s for s in r.CONFIG['candidates'] if s['name']==selected['name'])
         fit_job(window,{'name':'baseline'})
-        if spec['kind']=='long_net':
+        if spec['kind'] in ('long_net','denoised'):
             if not r.cached(window,spec['name']):
                 raise RuntimeError('train the frozen neural winner with campaign_gpu.py --confirmation first')
         else:
@@ -139,7 +143,7 @@ def package():
     full=r.RUN/'full'/spec['name']
     full.mkdir(parents=True,exist_ok=True)
     with threadpool_limits(limits=r.CONFIG['threads']):
-        if spec['kind']=='long_net':
+        if spec['kind'] in ('long_net','denoised'):
             record=json.loads((full/'done.json').read_text())
             if record['plan_sha256']!=r.PLAN_SHA:
                 raise RuntimeError('full neural fit has another plan')

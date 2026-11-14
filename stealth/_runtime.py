@@ -323,13 +323,23 @@ def load_basis(blob: bytes) -> dict:
         model = {k: archive[k] for k in archive.files}
     model["kind"] = str(np.asarray(model["kind"]).item())
     model["columns"] = [str(c) for c in model["columns"].tolist()]
-    if model["kind"] not in ("linear", "polynomial", "quadratic", "gam", "residual", "net"):
+    if model["kind"] not in ("linear", "polynomial", "quadratic", "gam", "residual", "net", "latent_tree"):
         raise ValueError("unsupported basis model kind")
     for name, value in model.items():
         if isinstance(value, np.ndarray) and np.issubdtype(value.dtype, np.number) and not np.isfinite(value).all():
             raise ValueError(f"non-finite basis array {name}")
-    coef = np.asarray(model["coef"], dtype=np.float64)
     n = len(model["columns"])
+    if model['kind'] == 'latent_tree':
+        projection = model['projection']
+        if projection.ndim != 2 or projection.shape[0] != 2*n or projection.shape[1] < 1 or model['x_mean'].shape != (2*n,):
+            raise ValueError('latent tree projection shape mismatch')
+        if model['tree_blob'].ndim != 1 or model['tree_blob'].dtype != np.uint8 or not model['tree_blob'].size:
+            raise ValueError('latent tree requires serialized booster bytes')
+        for flag in ('context', 'add_raw'):
+            if np.asarray(model[flag]).shape != () or float(model[flag]) not in (0., 1.):
+                raise ValueError('latent tree flags must be scalar booleans')
+        return model
+    coef = np.asarray(model["coef"], dtype=np.float64)
     if model["kind"] == "gam":
         if coef.shape != (n, 11):
             raise ValueError("categorical basis table shape mismatch")
@@ -351,11 +361,32 @@ def load_basis(blob: bytes) -> dict:
     return model
 
 
+def latent_design(model: dict, X: np.ndarray, era: np.ndarray | None = None) -> np.ndarray:
+    """Target-free latent inputs; the runtime receives one cross-section at a time."""
+    design = basis_design(X, 'linear')
+    latent = (design-model['x_mean']) @ model['projection']
+    if bool(model['context']):
+        if era is None:
+            latent = (latent-latent.mean(axis=0))/np.maximum(latent.std(axis=0), .1)
+        else:
+            era = np.asarray(era)
+            for e in np.unique(era):
+                keep = era == e
+                values = latent[keep]
+                latent[keep] = (values-values.mean(axis=0))/np.maximum(values.std(axis=0), .1)
+    return np.concatenate([design, latent], axis=1) if bool(model['add_raw']) else latent
+
+
 def basis_forward(model: dict, X: np.ndarray) -> np.ndarray:
     """Stateless additive / interaction / residual inference, shared with research evaluation."""
     raw = np.asarray(X, dtype=np.float64)
     if raw.ndim != 2 or raw.shape[1] != len(model["columns"]):
         raise ValueError("basis feature shape mismatch")
+    if model['kind'] == 'latent_tree':
+        if '_tree' not in model:
+            import lightgbm as lgb
+            model['_tree'] = lgb.Booster(model_str=model['tree_blob'].tobytes().decode())
+        return np.asarray(model['_tree'].predict(latent_design(model, raw), num_threads=1), dtype=np.float64)
     if model["kind"] == "gam":
         valid = np.isfinite(raw) & (raw >= 0) & (raw <= 9)
         bins = np.where(valid, np.rint(np.where(valid, raw, 0)), 10).astype(np.int64)
