@@ -384,3 +384,76 @@ def test_paired_sharpe_bootstrap_sign_and_p_pos() -> None:
     assert M.paired_sharpe_bootstrap(a, b, n_boot=300, seed=5) == M.paired_sharpe_bootstrap(a, b, n_boot=300, seed=5)
     with pytest.raises(ValueError):
         M.paired_sharpe_bootstrap(a.iloc[:2], b.iloc[:2])
+    short = M.paired_sharpe_bootstrap(a.iloc[:30], b.iloc[:30], n_boot=200)  # one 20-era block: no inference
+    assert not short["inference_valid"] and short["n_blocks"] == 1 and short["p_pos"] == 0.5
+
+
+# ------------------------------------------------------------------------- simulation == deployed recipe (review 3)
+def _runtime_reference(n_eras: int = 60, n_rows: int = 90, missing_core: float = 0.2, seed: int = 742):
+    """Synthetic eras with two members, a benchmark and three core columns (a share of rows has EVERY core column -1)."""
+    rng = np.random.default_rng(seed)
+    era = np.repeat(np.arange(1, n_eras + 1, dtype=np.int32), n_rows)
+    n = len(era)
+    target = rng.integers(0, 5, n).astype(np.float64) / 4.0
+    sig = target + rng.normal(0, 2.0, n)
+    raw = {"a": sig + rng.normal(0, 1.0, n), "b": 0.5 * sig + rng.normal(0, 1.0, n)}
+    bench = target + rng.normal(0, 1.5, n)
+    core = rng.integers(0, 10, (n, 3)).astype(np.float64)
+    core[:, 0] = np.clip(np.round(target * 9 + rng.normal(0, 3, n)), 0, 9)
+    gone = rng.random(n) < missing_core
+    core[gone] = -1.0
+    idx = pd.Index([f"r{i:06d}" for i in range(n)], name="id")
+    return (idx, pd.Series(era, index=idx), pd.Series(target, index=idx), raw, pd.Series(bench, index=idx),
+            pd.DataFrame(core, index=idx, columns=["feature_c0", "feature_c1", "feature_c2"]))
+
+
+@pytest.mark.parametrize("p_b,p_c", [(0.0, 0.5), (0.5, 0.0), (0.5, 0.5), (0.75, 0.25)])
+def test_cell_scores_match_runtime_and_sdk(p_b: float, p_c: float) -> None:
+    """One simulated cell must equal the deployed recipe (``_runtime``: gaussianise members, weighted blend, neutralise vs
+    the benchmark then the core proxy, rank01) scored per era by the SDK -- including rows whose core average is missing
+    (runtime: core z = 0; SDK INOV: complete-case). The pre-fix simulation re-gaussianised the blend and filled raw
+    missing core values with 0 before ranking (statistics review finding 3)."""
+    from stealth import _runtime
+    from stealth.features import core_proxy_series
+
+    idx, era, target, raw, bench, core = _runtime_reference()
+    w = {"a": 0.7, "b": 0.3}
+    sdk_fit, sdk_unq, sdk_inov = [], [], []
+    z_blend = pd.Series(0.0, index=idx)
+    for e in np.unique(era):
+        sel = era.to_numpy() == e
+        rows = idx[sel]
+        Z = np.column_stack([_runtime.gaussianise(raw[k][sel]) for k in w])
+        z = Z @ np.array([w["a"], w["b"]])
+        z_blend.loc[rows] = z
+        zz = _runtime.neutralise(z, _runtime.gaussianise(bench.loc[rows].to_numpy()), p_b) if p_b > 0 else z
+        c = _runtime.core_proxy_values(core.loc[rows].to_numpy(dtype=np.float32), list(core.columns), list(core.columns))
+        zz = _runtime.neutralise(zz, _runtime.gaussianise(c), p_c) if p_c > 0 else zz
+        pred = pd.Series(_runtime.rank01(zz), index=rows)
+        sdk_fit.append(scoring.fit20(pred, target.loc[rows]))
+        sdk_unq.append(scoring.unq20(pred, bench.loc[rows], target.loc[rows]))
+        sdk_inov.append(scoring.inov(pred, core.loc[rows], target.loc[rows]))
+    P = M._regime_prepare(z_blend, target, era, bench, core_proxy_series(core, list(core.columns)))
+    m, _ = M.pad_by_era(bench.to_numpy(), era)
+    _, fit, unq, inv = M.cell_scores(P, M.rank_gauss_rows(m), p_b, p_c)
+    assert P["core_partial"].all()  # every era loses some rows: the complete-case INOV path is exercised
+    np.testing.assert_allclose(fit, sdk_fit, atol=1e-10)
+    np.testing.assert_allclose(unq, sdk_unq, atol=1e-10)
+    np.testing.assert_allclose(inv, sdk_inov, atol=1e-10)
+
+
+def test_regime_grid_uses_the_parity_kernel() -> None:
+    """The grid's cells are cell_scores on the shared draw: its (0, p_c) fit / inov equal the kernel's exactly."""
+    from stealth import _runtime
+    from stealth.features import core_proxy_series
+
+    idx, era, target, raw, bench, core = _runtime_reference(n_eras=40, seed=3)
+    z = pd.Series(np.concatenate([_runtime.gaussianise(raw["a"][era.to_numpy() == e]) for e in np.unique(era)]), index=idx)
+    cp = core_proxy_series(core, list(core.columns))
+    grid = M.regime_grid(z, target, era, bench, cp, p_b_grid=(0.0, 0.5), p_c_grid=(0.0, 0.5), bench_fit_means=(0.009,),
+                         n_draws=3, seed=0)
+    P = M._regime_prepare(z, target, era, bench, cp)
+    _, fit, _, inv = M.cell_scores(P, None, 0.0, 0.5)
+    cell = grid["0.009"]["p_c=0.5"]["p_b=0"]["mix"]
+    assert cell["fit"] == pytest.approx(float(fit.mean()), abs=1e-12)
+    assert cell["inov"] == pytest.approx(float(inv.mean()), abs=1e-12)

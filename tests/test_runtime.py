@@ -288,6 +288,21 @@ def test_make_predict_caps_and_weights():
     check_output(rt.make_predict(b2)(df), df.index)
 
 
+def test_make_predict_refuses_non_finite_numbers():
+    """contract review 7: NaN weights used to drop a member silently, inf weights turned every score into NaN (then a
+    constant 0.5 that passes the range checks), and a NaN p_b skipped neutralisation without a word."""
+    df = make_frame(n=40, n_feat=8, seed=9)
+    for upd in ({"weights": {"ridge_everest": float("nan"), "lgbm_everest": 0.5}},
+                {"weights": {"ridge_everest": float("inf"), "lgbm_everest": 0.5}},
+                {"weights": {"ridge_everest": -0.5, "lgbm_everest": 1.5}},
+                {"p_b": float("nan")}, {"p_c": float("inf")}, {"p_b": -0.1}, {"min_bench_coverage": float("nan")}):
+        with pytest.raises(ValueError):
+            rt.make_predict({**fake_bundle(df), **upd})
+    ok = rt.make_predict({**fake_bundle(df), "p_b": None})  # None = no neutralisation, as before
+    check_output(ok(df), df.index)
+    assert ok.last_info["p_b"] == 0.0
+
+
 def test_make_predict_edge_sizes():
     df = make_frame(n=90, n_feat=8, seed=10)
     predict = rt.make_predict(fake_bundle(df))

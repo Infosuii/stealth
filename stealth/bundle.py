@@ -13,11 +13,15 @@ Contract (docs/INTERFACES.md section 9, docs/PLAN.md "Packaging"):
 Neutralisation constants (docs/INTERFACES.md section 18), resolved in this order and recorded as ``p_source``:
 explicit ``p_b``/``p_c`` arguments (``"override"``, WARNING) > ``blend.json["neutralisation"]`` with
 ``p_source: "simulation"`` (``"simulation"``, the frozen staking-aware choice) > ``blend.json`` ``p_b``/``p_c``
-(``"config"``) > ``DEFAULT_P_B``/``DEFAULT_P_C`` (``"default"``, WARNING). ``require_frozen=True`` (CLI
-``--require-frozen``) refuses anything but ``"simulation"``. Caps 0.75 / 0.5 always apply.
+(``"config"``) > ``DEFAULT_P_B``/``DEFAULT_P_C`` (``"default"``, WARNING). A member subset (``--members``) whose
+positive-weight set or relative weights differ from the selected blend gets ``"inherited"`` (the constants were
+chosen for another prediction) unless explicit overrides are given. ``require_frozen=True`` (CLI
+``--require-frozen``) refuses anything but ``"simulation"``. Caps 0.75 / 0.5 always apply; NaN/inf constants and
+non-finite or negative weights are refused.
 
-The fold-blob fallback (no ``full_s*.bin``) is refused for a member whose per-fold feature lists differ from its
-``feature_cols`` (``sharpe_subset``): averaging fold models over one column list would feed them wrong columns.
+Blobs: a spec that DECLARES its full refits (``full_blobs``) contributes exactly those files (missing or extra
+undeclared ``full_s*.bin`` -> error). Legacy specs fall back to every ``full_s*.bin``, else the fold models; the
+fold-blob fallback is refused unless every LOADED fold was fitted on ``feature_cols`` (``check_fold_fallback``).
 ``assert_plain`` guarantees the bundle holds only plain Python values before it is pickled.
 """
 from __future__ import annotations
@@ -26,6 +30,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import platform
 import re
 import subprocess
@@ -48,7 +53,8 @@ PKL_PYTHON = (3, 11)  # the python_version declared at upload (predict.PKL_PYTHO
 MANIFEST_LIBS = ("lightgbm", "xgboost", "catboost", "scikit-learn", "numpy", "pandas", "scipy", "cloudpickle")
 _FULL_RE = re.compile(r"^full_s(\d+)\.bin$")
 _FOLD_RE = re.compile(r"^fold(\d+)\.bin$")
-P_SOURCES = ("override", "simulation", "config", "default")
+P_SOURCES = ("override", "simulation", "config", "default", "inherited")
+_WEIGHT_TOL = 1e-9  # relative-weight equality of a member subset with the selected blend
 _PLAIN_SCALARS = (str, bytes, bool, int, float, type(None))
 
 
@@ -90,6 +96,8 @@ def lib_versions(names: tuple[str, ...] = MANIFEST_LIBS) -> dict[str, str | None
 
 def _clamp(value: float | None, default: float, cap: float, name: str) -> float:
     v = default if value is None else float(value)
+    if not math.isfinite(v):
+        raise ValueError(f"{name} must be a finite number (got {value!r})")
     if v < 0.0:
         raise ValueError(f"{name} must be >= 0 (got {v})")
     if v > cap:
@@ -171,40 +179,132 @@ def member_arm(name: str, spec: dict, blend: dict) -> str:
     return "aux" if spec.get("group") == "aux" else str(name)
 
 
-def check_fold_fallback(name: str, spec: dict, n_blobs: int) -> None:
-    """Refuse averaging ``fold<k>.bin`` under ONE column list when the per-fold lists differ (``sharpe_subset``).
+_PER_FOLD_EXTRA = ("forward",)  # per-fold metadata keys that never correspond to a bundled fold blob
 
-    ``spec["feature_cols_per_fold"]`` is ``{fold_name: [cols]}`` (train.py) or a list per fold; only the CV folds
-    whose blobs are used (``fold0..fold{n_blobs-1}``) are compared with ``spec["feature_cols"]``.
+
+def check_fold_fallback(name: str, spec: dict, folds: list[str] | int) -> None:
+    """Refuse averaging ``fold<k>.bin`` under ONE column list unless every LOADED fold blob was fitted on exactly
+    ``spec["feature_cols"]`` (``sharpe_subset`` members select columns per fold).
+
+    ``folds`` = the names of the fold blobs actually loaded (``["fold0", "fold2"]``; an int ``n`` means
+    ``fold0..fold{n-1}``, the legacy contiguous form). ``spec["feature_cols_per_fold"]`` is ``{fold_name: [cols]}``
+    (train.py) or a list indexed by fold number. With per-fold metadata present, every loaded fold needs an entry
+    equal to ``feature_cols``, and the metadata may not name a CV fold that was NOT loaded (a sparse fold set, e.g. a
+    deleted ``fold1.bin``) nor carry unknown keys -- otherwise the fallback could feed a fold model the wrong columns.
+    Without per-fold metadata (legacy specs) there is nothing to compare and the call returns.
     """
     per_fold = spec.get("feature_cols_per_fold")
     if not per_fold:
         return
+    loaded = [f"fold{k}" for k in range(folds)] if isinstance(folds, int) else [str(f) for f in folds]
+    bad_names = [f for f in loaded if not re.fullmatch(r"fold\d+", f)]
+    if bad_names:
+        raise ValueError(f"member {name!r}: unexpected fold blob name(s) {bad_names}")
     cols = [str(c) for c in spec["feature_cols"]]
     if isinstance(per_fold, dict):
-        lists = [(f"fold{k}", per_fold.get(f"fold{k}")) for k in range(n_blobs)]
+        meta = {str(k): v for k, v in per_fold.items()}
+        unknown = sorted(k for k in meta if not re.fullmatch(r"fold\d+", k) and k not in _PER_FOLD_EXTRA)
+    elif isinstance(per_fold, list):
+        meta = {f"fold{k}": v for k, v in enumerate(per_fold)}
+        unknown = []
     else:
-        lists = [(f"fold{k}", per_fold[k] if k < len(per_fold) else None) for k in range(n_blobs)]
-    differ = [fname for fname, lst in lists if lst is not None and [str(c) for c in lst] != cols]
+        raise ValueError(f"member {name!r}: feature_cols_per_fold must be a mapping or a list (got {type(per_fold).__name__})")
+    if unknown:
+        raise ValueError(f"member {name!r}: feature_cols_per_fold has unknown key(s) {unknown}; refusing the fold-blob fallback")
+    without = [f for f in loaded if meta.get(f) is None]
+    not_loaded = sorted((k for k in meta if re.fullmatch(r"fold\d+", k) and k not in loaded), key=lambda k: int(k[4:]))
+    differ = [f for f in loaded if meta.get(f) is not None and [str(c) for c in meta[f]] != cols]
+    problems = []
+    if without:
+        problems.append(f"loaded fold blob(s) {without} have no feature list in feature_cols_per_fold")
+    if not_loaded:
+        problems.append(f"feature_cols_per_fold names fold(s) {not_loaded} whose blobs are missing (sparse fold set)")
     if differ:
-        raise ValueError(f"member {name!r}: no full_s*.bin refit and the fold feature lists of {differ} differ from feature_cols "
-                         "(sharpe_subset); refusing the fold-blob fallback -- re-run `stealth.train --resume` to write the full refits")
+        problems.append(f"the fold feature lists of {differ} differ from feature_cols (sharpe_subset)")
+    if problems:
+        raise ValueError(f"member {name!r}: no full refit and " + "; ".join(problems) + "; refusing the fold-blob fallback -- "
+                         "re-run `stealth.train --resume` to write the full refits")
 
 
-def member_blobs(member_dir: Path) -> tuple[list[bytes], str]:
-    """Serialised bytes of a member: ``full_s*.bin`` (sorted by seed) else ``fold*.bin`` (sorted by fold).
+def declared_full_files(spec: dict | None) -> list[str] | None:
+    """File names of the full refits a spec DECLARES (``spec["full_blobs"]``: ``[{"file": "full_s0.bin", ...}]`` from
+    train.py / mlp_train.py, or plain names), in declared order; ``None`` when nothing is declared (legacy spec)."""
+    declared = (spec or {}).get("full_blobs")
+    if not declared:
+        return None
+    if not isinstance(declared, list):
+        raise ValueError(f"spec full_blobs must be a list (got {type(declared).__name__})")
+    names: list[str] = []
+    for entry in declared:
+        fname = entry.get("file") if isinstance(entry, dict) else entry
+        if not isinstance(fname, str) or not _FULL_RE.match(fname):
+            raise ValueError(f"spec full_blobs entry {entry!r} is not a full_s<k>.bin file name")
+        if fname in names:
+            raise ValueError(f"spec full_blobs declares {fname} twice")
+        names.append(fname)
+    return names
 
-    Returns ``(blobs, source)`` with source ``"full"`` or ``"folds"``; raises FileNotFoundError when neither exists.
+
+def member_blob_files(member_dir: Path, spec: dict | None = None) -> tuple[list[str], str]:
+    """``(file names, source)`` of the blobs a member contributes; source ``"full"`` or ``"folds"``.
+
+    * ``spec["full_blobs"]`` declared -> EXACTLY those files, in declared order: a missing declared file and an extra
+      undeclared ``full_s*.bin`` are both errors (an interrupted refit must never change the average silently, and a
+      member whose declared refits are gone must never fall back to its fold models unannounced);
+    * nothing declared (legacy spec) -> every ``full_s*.bin`` sorted by number, else every ``fold*.bin`` sorted by fold.
+    Raises ``FileNotFoundError`` when nothing usable exists.
     """
-    full = sorted((p for p in member_dir.iterdir() if _FULL_RE.match(p.name)),
-                  key=lambda p: int(_FULL_RE.match(p.name).group(1)))  # type: ignore[union-attr]
-    if full:
-        return [p.read_bytes() for p in full], "full"
-    folds = sorted((p for p in member_dir.iterdir() if _FOLD_RE.match(p.name)),
-                   key=lambda p: int(_FOLD_RE.match(p.name).group(1)))  # type: ignore[union-attr]
+    member_dir = Path(member_dir)
+    present_full = sorted((p.name for p in member_dir.iterdir() if _FULL_RE.match(p.name)),
+                          key=lambda n: int(_FULL_RE.match(n).group(1)))  # type: ignore[union-attr]
+    declared = declared_full_files(spec)
+    if declared is not None:
+        missing = [f for f in declared if not (member_dir / f).is_file()]
+        if missing:
+            raise FileNotFoundError(f"{member_dir}: declared full refit(s) {missing} missing (spec.full_blobs declares {declared}); "
+                                    "re-run `stealth.train --resume` (or scripts/mlp_train.py --resume) for this member")
+        extra = [f for f in present_full if f not in declared]
+        if extra:
+            raise ValueError(f"{member_dir}: full refit file(s) {extra} are not declared in spec.full_blobs {declared} "
+                             "(stale artifacts of an earlier attempt?); refusing to guess which refits to average")
+        return list(declared), "full"
+    if present_full:
+        return present_full, "full"
+    folds = sorted((p.name for p in member_dir.iterdir() if _FOLD_RE.match(p.name)),
+                   key=lambda n: int(_FOLD_RE.match(n).group(1)))  # type: ignore[union-attr]
     if folds:
-        return [p.read_bytes() for p in folds], "folds"
+        return folds, "folds"
     raise FileNotFoundError(f"{member_dir}: no full_s*.bin or fold*.bin")
+
+
+def member_blobs(member_dir: Path, spec: dict | None = None) -> tuple[list[bytes], str]:
+    """Serialised bytes of a member per :func:`member_blob_files`; returns ``(blobs, source)``."""
+    files, source = member_blob_files(member_dir, spec)
+    return [(Path(member_dir) / f).read_bytes() for f in files], source
+
+
+def _validated_weights(weights: dict, where: str) -> dict[str, float]:
+    """``{member: float}`` with every weight finite and >= 0 (NaN would drop a member silently, inf poisons the blend)."""
+    out: dict[str, float] = {}
+    for k, v in (weights or {}).items():
+        try:
+            f = float(v)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{where}: weight of {k!r} is not a number ({v!r})") from exc
+        if not math.isfinite(f) or f < 0.0:
+            raise ValueError(f"{where}: weight of {k!r} must be finite and >= 0 (got {v!r})")
+        out[str(k)] = f
+    return out
+
+
+def _same_relative_weights(a: dict[str, float], b: dict[str, float]) -> bool:
+    """Same positive-weight member set and the same normalised weights (within ``_WEIGHT_TOL``)."""
+    pa = {k: v for k, v in a.items() if v > 0.0}
+    pb = {k: v for k, v in b.items() if v > 0.0}
+    if set(pa) != set(pb) or not pa:
+        return False
+    sa, sb = sum(pa.values()), sum(pb.values())
+    return all(abs(pa[k] / sa - pb[k] / sb) <= _WEIGHT_TOL for k in pa)
 
 
 def _ridge_missing_cols(blob: bytes) -> list[str]:
@@ -283,10 +383,7 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
         raise FileNotFoundError(f"{blend_path} missing; run `python -m stealth.blend --run-id {run_dir.name}` first")
     blend = json.loads(blend_path.read_text())
     rb, rc, p_source, p_reason = resolve_p(blend, p_b, p_c)
-    if require_frozen and p_source != "simulation":
-        raise ValueError(f"--require-frozen: neutralisation constants come from {p_source!r} ({p_reason}), not from the regime "
-                         "simulation; run `python -m stealth.blend` with blend.neutralisation.select: true and drop any --p-b/--p-c")
-    weights_in: dict[str, float] = {str(k): float(v) for k, v in blend.get("weights", {}).items()}
+    weights_in = _validated_weights(blend.get("weights", {}), f"{blend_path.name} weights")
     subset = None if members is None else list(dict.fromkeys(str(m) for m in members))
     if subset is not None:
         if not subset:
@@ -308,6 +405,20 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
         dropped = sorted(set(weights_in) - set(kept))
         if dropped:
             log.info("dropping zero-weight members: %s", dropped)
+    if subset is not None and p_source != "override" and not _same_relative_weights(kept, weights_in):
+        # the constants were chosen (simulated, or configured) for the SELECTED blend's prediction; a different member
+        # set or relative weighting is a different prediction, so they are only inherited here, never frozen for it
+        inherited_from, p_source = p_source, "inherited"
+        p_reason = (f"member subset {subset} (weights {weights_source}) differs from the selected blend "
+                    f"{sorted(k for k, v in weights_in.items() if v > 0.0)}: p_b/p_c inherited from its {inherited_from} "
+                    f"constants ({p_reason}); not frozen for this prediction -- pass explicit --p-b/--p-c or simulate it")
+        log.warning("neutralisation constants INHERITED by a member subset: %s", p_reason)
+    if require_frozen and p_source != "simulation":
+        raise ValueError(f"--require-frozen: neutralisation constants come from {p_source!r} ({p_reason}), not from the regime "
+                         "simulation of this exact blend; run `python -m stealth.blend` with blend.neutralisation.select: true, "
+                         "bundle the selected blend and drop any --p-b/--p-c")
+    if not math.isfinite(sum(kept.values())) or sum(kept.values()) <= 0.0:
+        raise ValueError(f"{blend_path}: member weights {kept} have no positive finite sum")
 
     members_out: list[dict] = []
     for name in sorted(kept):
@@ -321,10 +432,11 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
             raise ValueError(f"member {name!r}: family {family!r} is not supported by the runtime {SUPPORTED_FAMILIES}")
         if spec.get("status") not in (None, "done"):
             raise ValueError(f"member {name!r}: spec status {spec.get('status')!r} is not 'done' but blend.json weights it")
-        blobs, source = member_blobs(mdir)
+        files, source = member_blob_files(mdir, spec)
         if source == "folds":
-            check_fold_fallback(name, spec, len(blobs))
-            log.warning("member %s: no full refit; bundling the %d fold models (averaged)", name, len(blobs))
+            check_fold_fallback(name, spec, [f[: -len(".bin")] for f in files])
+            log.warning("member %s: no full refit; bundling the %d fold models %s (averaged)", name, len(files), files)
+        blobs = [(mdir / f).read_bytes() for f in files]
         members_out.append({
             "name": name,
             "family": family,
@@ -336,6 +448,7 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
             "blobs": blobs,
             "spec": spec,
             "_source": source,
+            "_files": files,
         })
         log.info("member %s: family=%s arm=%s input=%s %d blobs (%s), %d features", name, family, members_out[-1]["arm"],
                  members_out[-1]["input"], len(blobs), source, len(spec["feature_cols"]))
@@ -359,7 +472,7 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
         "run_id": run_dir.name,
         "feature_cols": feature_cols,
         "missing_cols": missing_cols,
-        "members": [{k: v for k, v in m.items() if k not in ("spec", "_source")} for m in members_out],
+        "members": [{k: v for k, v in m.items() if k not in ("spec", "_source", "_files")} for m in members_out],
         "weights": weights,
         "p_b": _clamp(rb, DEFAULT_P_B, P_B_CAP, "p_b"),
         "p_c": _clamp(rc, DEFAULT_P_C, P_C_CAP, "p_c"),
@@ -370,6 +483,7 @@ def build_bundle(run_dir: Path, *, p_b: float | None = None, p_c: float | None =
         "core_proxy_cols": core_cols,
         "min_bench_coverage": DEFAULT_MIN_BENCH_COVERAGE,
         "blob_source": {m["name"]: m["_source"] for m in members_out},
+        "blob_files": {m["name"]: list(m["_files"]) for m in members_out},
         "member_subset": subset,
         "weights_source": weights_source,
     }
@@ -453,10 +567,12 @@ def write_manifest(out_pkl: Path, bundle: dict, sha256: str) -> Path:
         "p_b": bundle["p_b"],
         "p_c": bundle["p_c"],
         "p_source": bundle.get("p_source"),
+        "p_reason": bundle.get("p_reason"),
         "blend_rule": bundle.get("blend_rule"),
         "admitted_arms": bundle.get("admitted_arms"),
         "member_subset": bundle.get("member_subset"),
         "weights_source": bundle.get("weights_source"),
+        "blob_files": bundle.get("blob_files"),
         "core_proxy_cols": bundle.get("core_proxy_cols", []),
         "n_features": len(bundle["feature_cols"]),
         "pkl_check": previous.get("pkl_check") if same else None,

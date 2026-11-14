@@ -18,6 +18,17 @@ PY = sys.executable  # the train venv (has yaml); the script only reads the conf
 STEP_TAGS = ["[train]", "[mlp]", "[retrain]", "[blend]", "[bundle]", "[pkl_check]", "[diag]", "[report]"]
 
 
+def _minifull_tags() -> list[str]:
+    """STEP_TAGS plus [audit] after [blend] when configs/minifull.yaml enables the reserved audit partition."""
+    import yaml
+
+    cfg = yaml.safe_load((REPO / "configs" / "minifull.yaml").read_text())
+    tags = list(STEP_TAGS)
+    if ((cfg.get("cv") or {}).get("audit") or {}).get("enabled"):
+        tags.insert(tags.index("[blend]") + 1, "[audit]")
+    return tags
+
+
 def _run(*args: str, env: dict | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True, cwd=REPO, timeout=120,
                           env={**os.environ, **(env or {})}, check=False)
@@ -44,7 +55,7 @@ def test_dry_run_minifull_every_step(tmp_path: Path) -> None:
                "--report", "99", "--dry-run")
     assert res.returncode == 0, res.stdout + res.stderr
     out = res.stdout
-    assert _dry_steps(out) == STEP_TAGS
+    assert _dry_steps(out) == _minifull_tags()
     assert "--resume" in _dry_line(out, "[train]") and str(REPO / "configs" / "minifull.yaml") in _dry_line(out, "[train]")
     mlp = _dry_line(out, "[mlp]")
     assert "scripts/mlp_train.py --run-id pytest_dry --resume --device cpu --seeds 0 1" in mlp
@@ -68,7 +79,8 @@ def test_dry_run_m1_config_and_no_mlp() -> None:
     assert "--require-frozen" not in res.stdout
     res = _run("configs/minifull.yaml", "pytest_dry", "--py", PY, "--no-mlp", "--no-diag", "--dry-run")
     assert res.returncode == 0, res.stderr
-    assert _dry_steps(res.stdout) == ["[train]", "[blend]", "[bundle]", "[pkl_check]"]
+    expect = [t for t in _minifull_tags() if t not in ("[mlp]", "[retrain]", "[diag]", "[report]")]
+    assert _dry_steps(res.stdout) == expect
     assert "MLP skipped: skipped (--no-mlp)" in res.stdout and "step diag: skipped (--no-diag)" in res.stdout
     res = _run("configs/minifull.yaml", "pytest_dry", "--py", PY, "--dry-run")  # no --gpu-py
     assert "MLP skipped: skipped (no --gpu-py)" in res.stdout and "[mlp]" not in res.stdout
@@ -76,7 +88,8 @@ def test_dry_run_m1_config_and_no_mlp() -> None:
 
 def test_from_step_and_bad_arguments() -> None:
     res = _run("configs/minifull.yaml", "pytest_dry", "--py", PY, "--from", "blend", "--dry-run")
-    assert res.returncode == 0 and _dry_steps(res.stdout) == ["[blend]", "[bundle]", "[pkl_check]", "[diag]"]
+    tags = _minifull_tags()
+    assert res.returncode == 0 and _dry_steps(res.stdout) == tags[tags.index("[blend]"):-1]
     res = _run("configs/minifull.yaml", "pytest_dry", "--py", PY, "--from", "retrain", "--dry-run")
     assert _dry_steps(res.stdout)[0] == "[retrain]"
     assert _run("configs/minifull.yaml", "pytest_dry", "--py", PY, "--from", "nope", "--dry-run").returncode == 64
@@ -118,7 +131,7 @@ def test_mlp_failure_is_tolerated_and_other_failures_stop(tmp_path: Path, run_id
     assert res.returncode == 0, res.stdout + res.stderr
     calls = log.read_text().splitlines()
     assert calls[0].startswith("PY -m stealth.train") and calls[1].startswith("GPU ")
-    modules = [c.split()[2] for c in calls if c.startswith("PY -m ")]
+    modules = [c.split()[2] for c in calls if c.startswith("PY -m ") and "stealth.audit" not in c]  # audit: config-dependent
     # mlp exit 4 -> logged, retrain skipped, the rest runs; diag never uploads
     assert modules == ["stealth.train", "stealth.blend", "stealth.bundle", "stealth.pkl_check", "stealth.diag"]
     assert "MLP skipped: skipped (mlp_train exit 4)" in res.stdout and "PIPELINE OK" in res.stdout
@@ -130,7 +143,7 @@ def test_mlp_failure_is_tolerated_and_other_failures_stop(tmp_path: Path, run_id
     res = _run("configs/minifull.yaml", run_id, "--py", str(fake_py), "--gpu-py", str(fake_gpu), "--no-diag",
                env={**env, "FAKE_GPU_RC": "0"})
     assert res.returncode == 0, res.stdout + res.stderr
-    modules = [c.split()[2] for c in log.read_text().splitlines() if c.startswith("PY -m ")]
+    modules = [c.split()[2] for c in log.read_text().splitlines() if c.startswith("PY -m ") and "stealth.audit" not in c]
     assert modules == ["stealth.train", "stealth.train", "stealth.blend", "stealth.bundle", "stealth.pkl_check"]
     # a failing blend (exit 2 = leak gate) stops the pipeline with that exit code; later steps never run
     log.unlink()
@@ -138,5 +151,5 @@ def test_mlp_failure_is_tolerated_and_other_failures_stop(tmp_path: Path, run_id
                env={**env, "FAKE_FAIL_MATCH": "stealth.blend", "FAKE_FAIL_RC": "2"})
     assert res.returncode == 2
     assert "PIPELINE FAILED at step blend (exit 2)" in res.stdout
-    modules = [c.split()[2] for c in log.read_text().splitlines() if c.startswith("PY -m ")]
+    modules = [c.split()[2] for c in log.read_text().splitlines() if c.startswith("PY -m ") and "stealth.audit" not in c]
     assert modules == ["stealth.train", "stealth.blend"]

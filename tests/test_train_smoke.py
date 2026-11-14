@@ -224,7 +224,9 @@ def test_search_gain_recorded(smoke_run: dict) -> None:
     m = smoke_run["metrics"]
     assert m["members"]["lgbm_everest"]["search_gain"]["gain"] == pytest.approx(gain["gain"])
     assert m["members"]["ridge_everest"]["search_gain"] is None
-    assert m["baseline"]["label"] == "lgbm_everest" and _finite(m["baseline"]["fit"])
+    # the SUSPECT reference of a searched in-run baseline is its UNSEARCHED base cell, never the searched member itself
+    assert m["baseline"]["label"] == "lgbm_everest base cell (unsearched params, in-run)"
+    assert m["baseline"]["fit"] == pytest.approx(gain["base_params_fit"])
     for mm in m["members"].values():
         assert "se_block" in mm["fit"] and _finite(mm["fit"]["se_block"])
         # block SE is far above the naive std/sqrt(n) for an autocorrelated 20-day target (or at least not below it)
@@ -236,6 +238,11 @@ def test_baseline_fit_gate_and_gap_floor(repo_root: Path, tmp_path: Path) -> Non
 
     cfg = trainmod.load_config(repo_root / "configs" / "smoke.yaml")
     assert trainmod.baseline_fit(cfg, {"lgbm_everest": 0.02, "ridge_everest": 0.03}) == (0.02, "lgbm_everest")
+    # a searched baseline member: its unsearched base cell is the reference
+    assert trainmod.baseline_fit(cfg, {"lgbm_everest": 0.02}, {"lgbm_everest": 0.017}) == \
+        (0.017, "lgbm_everest base cell (unsearched params, in-run)")
+    assert trainmod.base_cell_fits({"lgbm_everest": {"search_gain": {"base_params_fit": 0.017}}, "r": {"search_gain": None}}) == \
+        {"lgbm_everest": 0.017}
     cfg["gates"]["baseline_fit"] = 0.026
     bf, label = trainmod.baseline_fit(cfg, {"lgbm_everest": 0.02})
     assert bf == 0.026 and label.startswith("gates.baseline_fit=0.0260")

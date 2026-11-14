@@ -443,7 +443,8 @@ def config_signature(mspec: dict, params: dict, seeds: list[int], cap: int, fe: 
              for f in [*fe["folds"], *([fe["forward"]] if fe.get("forward") else [])]]
     return {"member": mspec["name"], "target": mspec["target"], "params": p, "seeds": seeds, "epochs_cap": cap,
             "universe": fe["universe"], "folds": sha_of(folds), "full_train_eras": sha_of(fe["full_train_eras"]),
-            "columns": sha_of(columns), "target_scaling": TARGET_SCALING}
+            "columns": sha_of(columns), "target_scaling": TARGET_SCALING, "run_fingerprint": fe.get("run_fingerprint"),
+            "audit": sha_of(fe.get("audit"))}
 
 
 def train_member(run_dir: Path, cfg: dict, mspec: dict, fe: dict, feats: dict, args: argparse.Namespace) -> dict:
@@ -463,15 +464,21 @@ def train_member(run_dir: Path, cfg: dict, mspec: dict, fe: dict, feats: dict, a
     columns = [str(c) for c in feats["feature_cols"]]
     signature = config_signature(mspec, params, seeds, cap, fe, columns)
     sig = sha_of(signature)
-    if args.resume and spec_path.exists() and oof_path.exists():
+    audit_eras = [int(e) for e in ((fe.get("audit") or {}).get("eras") or [])]
+    audit_path = run_dir / f"audit_{name}.parquet"
+    if args.resume and spec_path.exists() and oof_path.exists() and (audit_path.exists() or not audit_eras):
         old = json.loads(spec_path.read_text())
         if old.get("status") == "done" and old.get("signature") == sig and old.get("universe") == universe.key():
             log.info("%s already done for this signature (%s); nothing to do", name, spec_path)
             return old
     folds, fw = list(fe["folds"]), fe.get("forward")
     all_folds = folds + ([fw] if fw else [])
+    # the audit eras are loaded for PREDICTION only: every fit selects its rows by explicit era lists (fit_mask), and the
+    # audit eras appear in none of them (train.py asserts the development / full-refit eras end before cv.audit.train_end)
     pool = sorted({int(e) for f in all_folds for k in ("train_eras", "test_eras", "inner_train_eras", "inner_val_eras")
-                   for e in f[k]} | {int(e) for e in fe["full_train_eras"]})
+                   for e in f[k]} | {int(e) for e in fe["full_train_eras"]} | set(audit_eras))
+    if audit_eras and max(int(e) for e in fe["full_train_eras"]) >= min(audit_eras):
+        raise ValueError("folds_eras.json: full_train_eras reach the audit eras (refusing to train)")
     torch = import_torch()
     requested = args.device or params.get("device") or "auto"
     device, device_desc = pick_device(torch, requested)
@@ -599,7 +606,21 @@ def _fit_and_export(run_dir: Path, td: TrainData, fitter: Fitter, work: Work, ms
         full_blobs.append(blob)
         full_files.append({"file": f"full_s{j}.bin", "seed": int(seed), "n_iter": int(frozen_full)})
 
-    # artifacts: blobs + OOF first, spec.json (status done) LAST
+    # reserved audit eras: predicted with the EXPORTED blobs through the numpy forward the bundle runs (mean over seeds);
+    # never used for early stopping, counts or any choice
+    audit_eras = [int(e) for e in ((fe.get("audit") or {}).get("eras") or [])]
+    audit_path = run_dir / f"audit_{name}.parquet"
+    audit_path.unlink(missing_ok=True)
+    audit_df = None
+    if audit_eras:
+        am = td.rows(audit_eras)
+        if not am.any():
+            raise ValueError("folds_eras.json lists audit eras with no rows in the train split")
+        apred = np.mean(np.vstack([_runtime.mlp_forward(_runtime.load_member("mlp", b), td.X[am]) for b in full_blobs]), axis=0)
+        audit_df = pd.DataFrame({"era": td.era[am].astype(np.int32), "pred": apred.astype(np.float64)}, index=td.ids[am])
+        audit_df.index.name = "id"
+
+    # artifacts: blobs + OOF + audit first, spec.json (status done) LAST
     for stale in mdir.glob("*.bin"):
         stale.unlink()
     for k, f in enumerate(folds):
@@ -611,6 +632,8 @@ def _fit_and_export(run_dir: Path, td: TrainData, fitter: Fitter, work: Work, ms
     oof = pd.concat(parts)
     oof.index.name = "id"
     oof.to_parquet(run_dir / f"oof_{name}.parquet")
+    if audit_df is not None:
+        audit_df.to_parquet(audit_path)
     columns = list(fitter.columns)
     spec = {**{k: v for k, v in mspec.items()}, "arm": mspec.get("arm") or ("aux" if mspec.get("group") == "aux" else name),
             "params": params, "feature_cols": columns, "all_feature_cols": columns,
@@ -625,7 +648,9 @@ def _fit_and_export(run_dir: Path, td: TrainData, fitter: Fitter, work: Work, ms
             "full_blobs": full_files, "fold_blob_seed": int(seeds[0]), "seeds": seeds, "epochs_cap": int(cap),
             "device": device_desc, "torch_version": torch_version, "parity_max_abs": parity_max, "parity_tol": PARITY_TOL,
             "corr_with_bench_val": None, "rho_c": None, "universe": universe.key(), "universe_dict": universe.to_dict(),
-            "signature": sig, "external": True, "trained_by": "scripts/mlp_train.py", "finished_at": _now(), "status": "done"}
+            "signature": sig, "external": True, "trained_by": "scripts/mlp_train.py",
+            "run_fingerprint": fe.get("run_fingerprint"), "protocol": fe.get("protocol"),
+            "audit_file": audit_path.name if audit_df is not None else None, "finished_at": _now(), "status": "done"}
     write_json(mdir / "spec.json", spec)
     log.info("%s done: frozen epochs %s / forward %s / full %d; OOF %d rows; parity max %.2e; %.0fs", name,
              spec["frozen_n_iter_per_fold"], spec["frozen_n_iter_forward"], frozen_full, len(oof), parity_max, spec["member_seconds"])

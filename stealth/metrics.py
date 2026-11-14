@@ -327,16 +327,30 @@ def fit_rows(z: np.ndarray, tc: np.ndarray) -> np.ndarray:
 
 
 def unq_rows(z: np.ndarray, m: np.ndarray, tc: np.ndarray) -> np.ndarray:
-    """UNQ per row with the zero rule: ``m`` gaussianised reference; rows where ``cov(m, t) < 0`` -> 0."""
+    """UNQ per row with the zero rule: ``m`` gaussianised reference; rows where ``cov(m, t) < 0`` -> 0. Rows with fewer than
+    5 entries -> 0 (the SDK's ``unq20`` needs >= 5 common rows). ``z``/``m``/``tc`` must share one NaN pattern."""
     n = np.sum(~np.isnan(tc), axis=1)
-    ref_fit = np.nansum((m - _nanmean_rows(m)) * tc, axis=1) / n
-    mm = np.nansum(m * m, axis=1)
-    mz = np.nansum(m * z, axis=1)
     with np.errstate(invalid="ignore", divide="ignore"):
+        ref_fit = np.nansum((m - _nanmean_rows(m)) * tc, axis=1) / n
+        mm = np.nansum(m * m, axis=1)
+        mz = np.nansum(m * z, axis=1)
         beta = np.where(mm > 0, mz / np.where(mm > 0, mm, 1.0), 0.0)
-    ortho = z - m * beta[:, None]
-    unq = np.nansum(tc * ortho, axis=1) / n
-    return np.where((ref_fit < 0) | (mm == 0), 0.0, unq)
+        ortho = z - m * beta[:, None]
+        unq = np.nansum(tc * ortho, axis=1) / n
+    return np.where((n < 5) | (ref_fit < 0) | (mm == 0) | ~np.isfinite(unq), 0.0, unq)
+
+
+def inov_rows(zg: np.ndarray, P: dict) -> np.ndarray:
+    """INOV per row with the SDK's COMPLETE-CASE semantics (``scoring.inov`` -> ``unq20`` vs ``core_feature_average``):
+    rows whose core average is missing drop out, the prediction is re-ranked and the target re-centred on the remaining
+    rows, and the core reference is the rank-gauss of the valid core values only. ``zg`` = the final (rank-gaussianised)
+    prediction rows; ``P`` = :func:`_regime_prepare` output."""
+    ok, partial = P["core_ok"], P["core_partial"]
+    zi = zg
+    if partial.any():  # re-rank only the eras that lose rows (most eras have a core average on every row)
+        zi = np.where(ok, zg, np.nan)
+        zi[partial] = rank_gauss_rows(zi[partial])
+    return unq_rows(zi, P["c_inov"], P["tc_inov"])
 
 
 def neutralise_rows(z: np.ndarray, m: np.ndarray, p: float) -> np.ndarray:
@@ -519,20 +533,38 @@ def _regime_prepare(z_pred, target, era, direction, core_proxy) -> dict:
     pad = np.isnan(t)
     z = np.where(pad, np.nan, np.nan_to_num(z))  # NaN members already handled upstream -> mid
     d = np.where(pad, np.nan, np.nan_to_num(d))
-    # Rank the valid raw core values first; missing core rows receive z=0 at runtime.
-    # Filling raw missing values with 0 before ranking makes them the lowest ranks.
-    c_g = rank_gauss_rows(c)
-    c_g = np.where(pad, np.nan, np.nan_to_num(c_g))
+    c = np.where(pad, np.nan, c)
+    # Neutralisation reference = _runtime: gaussianise the VALID raw core values (n = valid count), missing core rows
+    # get z = 0 afterwards. Filling raw missing values with 0 before ranking would make them the lowest ranks.
+    c_valid_g = rank_gauss_rows(c)                       # NaN where the core average is missing (or padding)
+    c_g = np.where(pad, np.nan, np.nan_to_num(c_valid_g))
+    core_ok = ~np.isnan(c_valid_g)
+    t_inov = np.where(core_ok, t, np.nan)                # INOV is complete-case on the core average (SDK)
     tc = t - _nanmean_rows(t)
     t_s = _standardise_rows(t)
+    with np.errstate(invalid="ignore"):
+        tc_inov = t_inov - _nanmean_quiet(t_inov, axis=1)[:, None]
     return {
         "pad": pad, "eras": eras, "n_rows": np.sum(~pad, axis=1), "tc": tc,
         "t_sd": np.sqrt(np.nanmean(tc * tc, axis=1)), "t_s": t_s,
         "d_perp": _orthogonalise_rows(rank_gauss_rows(d), t_s),
         # Runtime neutralises the weighted sum of member Gaussian scores directly.
         # A second rank transform before projection changes the recipe being tested.
-        "c_g": c_g, "z_g": z,
+        "c_g": c_g, "z_g": z, "core_ok": core_ok, "c_inov": c_valid_g, "tc_inov": tc_inov,
+        "core_partial": np.any(~core_ok & ~pad, axis=1),
     }
+
+
+def cell_scores(P: dict, m: np.ndarray | None, p_b: float, p_c: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``(zg, fit, unq, inov)`` per era of ONE neutralisation cell -- exactly the deployed recipe of ``_runtime.make_predict``
+    on the weighted member blend ``P["z_g"]``: neutralise against the benchmark ``m`` (rank-gauss rows, None -> skipped)
+    with ``p_b``, then against the core proxy with ``p_c``, then score the final ranks with SDK semantics (``fit20``;
+    ``unq20`` vs ``m`` with the zero rule; ``inov`` complete-case vs the core average). ``unq`` is 0 without ``m``."""
+    zb = P["z_g"] if (m is None or p_b == 0.0) else neutralise_rows(P["z_g"], m, p_b)
+    zg = rank_gauss_rows(neutralise_rows(zb, P["c_g"], p_c))
+    fit = fit_rows(zg, P["tc"])
+    unq = unq_rows(zg, m, P["tc"]) if m is not None else np.zeros(len(fit))
+    return zg, fit, unq, inov_rows(zg, P)
 
 
 def regime_grid(
@@ -572,7 +604,7 @@ def regime_grid(
     _validate_regime_args(p_b_grid, p_c_grid, direction_weight, n_draws)
     t_start = time.perf_counter()
     P = _regime_prepare(z_pred, target, era, direction, core_proxy)
-    pad, tc, t_s, t_sd, d_perp, c_g, z_g = P["pad"], P["tc"], P["t_s"], P["t_sd"], P["d_perp"], P["c_g"], P["z_g"]
+    pad, tc, t_s, t_sd, d_perp = P["pad"], P["tc"], P["t_s"], P["t_sd"], P["d_perp"]
     n_eras, width = pad.shape
     p_b_list = [float(p) for p in p_b_grid]
     p_c_list = [float(p) for p in p_c_grid]
@@ -580,8 +612,8 @@ def regime_grid(
     # draw-independent part of every p_b = 0 cell (prediction, fit, inov); only unq needs the draw
     static = {}
     for p_c in p_c_list:
-        zg0 = rank_gauss_rows(neutralise_rows(z_g, c_g, p_c))
-        static[p_c] = (zg0, fit_rows(zg0, tc), unq_rows(zg0, c_g, tc))
+        zg0, f0, _, i0 = cell_scores(P, None, 0.0, p_c)
+        static[p_c] = (zg0, f0, i0)
 
     w = float(direction_weight)
     w_noise = float(np.sqrt(max(0.0, 1.0 - w * w)))
@@ -604,17 +636,16 @@ def regime_grid(
             m = rank_gauss_rows(b_lin)
             realised[k] = fit_rows(m, tc)
             for p_b in p_b_list:
-                zb = None if p_b == 0.0 else neutralise_rows(z_g, m, p_b)
                 for p_c in p_c_list:
                     a = acc[(p_b, p_c)]
-                    if zb is None:
+                    if p_b == 0.0:
                         zg, f, i = static[p_c]
+                        u_ = unq_rows(zg, m, tc)
                     else:
-                        zg = rank_gauss_rows(neutralise_rows(zb, c_g, p_c))
-                        f, i = fit_rows(zg, tc), unq_rows(zg, c_g, tc)
+                        _, f, u_, i = cell_scores(P, m, p_b, p_c)
                     a["fit"][k] = f
                     a["inov"][k] = i
-                    a["unq"][k] = unq_rows(zg, m, tc)
+                    a["unq"][k] = u_
         key = f"{float(mean):g}"
         bpos = realised > 0
         everything = np.ones_like(bpos, dtype=bool)

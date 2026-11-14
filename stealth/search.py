@@ -64,8 +64,12 @@ def run_search(
     n_trials: int,
     storage: Path,
     seed: int,
+    study_name: str | None = None,
 ) -> list[tuple[dict, float]]:
-    """Maximise ``objective(params)`` over ``grid``; see the module docstring. Returns (params, value) sorted desc."""
+    """Maximise ``objective(params)`` over ``grid``; see the module docstring. Returns (params, value) sorted desc.
+
+    ``study_name`` (default ``name``) is the Optuna study identity; train.py namespaces it with the run fingerprint and
+    universe so a study recorded under another config / data / protocol is never resumed."""
     if not grid:
         raise ValueError(f"search {name!r}: empty grid")
     size = grid_size(grid)
@@ -79,7 +83,8 @@ def run_search(
         sampler = optuna.samplers.GridSampler(grid, seed=seed)
     else:
         sampler = optuna.samplers.TPESampler(seed=seed, n_startup_trials=min(10, max(n_trials // 2, 1)), multivariate=True)
-    study = optuna.create_study(study_name=name, storage=url, direction="maximize", sampler=sampler, load_if_exists=True)
+    study = optuna.create_study(study_name=study_name or name, storage=url, direction="maximize", sampler=sampler,
+                                load_if_exists=True)
     done = _completed(study, grid)
     log.info("search %s: grid=%d cells, target=%d distinct trials, %d already done (%s)",
              name, size, n_trials, len(done), "exhaustive" if exhaustive else "TPE")

@@ -181,7 +181,9 @@ def m2_resumed(m2_run: dict) -> dict:
     mdir.mkdir(parents=True, exist_ok=True)
     spec = {"name": "mlp_everest", "family": "mlp", "status": "done", "universe": key, "feature_cols": feats["feature_cols"],
             "missing_cols": feats["missing_cols"], "inner_iters": [2, 2], "frozen_n_iter": 2, "fit_seconds": 1.0,
-            "full_blobs": [], "corr_with_bench_val": 0.5, "rho_c": 0.1, "seeds": [0], "device": "cpu"}
+            "full_blobs": [{"file": "full_s0.bin", "seed": 0}], "corr_with_bench_val": 0.5, "rho_c": 0.1, "seeds": [0],
+            "epochs_cap": 2, "device": "cpu", "run_fingerprint": m2_run["metrics"]["run_fingerprint"]}
+    (mdir / "full_s0.bin").write_bytes(b"placeholder: side metrics are given, the blob is never read here")
     (mdir / "spec.json").write_text(json.dumps(spec))
     res, code = trainmod.train_run(m2_run["cfg"], RUN, resume=True, artifacts=m2_run["artifacts"])
     assert code == 0, res.get("traceback")
@@ -219,11 +221,129 @@ def test_universe_mismatch_is_not_reused(m2_resumed: dict, m2_run: dict) -> None
 
 
 def test_redecision_refused_in_run(m2_resumed: dict, m2_run: dict, tmp_path: Path, repo_root: Path) -> None:
+    """A changed config under the same run-id is refused by the run fingerprint BEFORE anything is written."""
+    run_dir = m2_run["run_dir"]
+    before = {p: p.read_bytes() for p in (run_dir / "metrics.json", run_dir / "config.yaml", run_dir / "knobs.json")}
     cfg = _tiny_cfg_dict(repo_root)
     cfg["knobs"]["time_decay"] = [False]  # candidate set changed under the same run-id
     res, code = trainmod.train_run(_load(tmp_path, cfg), RUN, resume=True, artifacts=m2_run["artifacts"])
     assert code == trainmod.EXIT_ERROR and res["status"] == "failed"
-    assert any("knobs already decided for this run-id" in n for n in res["notes"])
+    assert any("different config" in n and "start a new run-id" in n for n in res["notes"])
+    assert {p: p.read_bytes() for p in before} == before  # metrics.json / config.yaml / knobs.json untouched
+    # the one permitted handoff edit (run.threads) keeps the fingerprint
+    same = _tiny_cfg_dict(repo_root)
+    same["run"]["threads"] = 1
+    fp_a = trainmod.run_fingerprint(m2_run["cfg"], trainmod._data_dir(m2_run["cfg"]))["fingerprint"]
+    fp_b = trainmod.run_fingerprint(_load(tmp_path, same), trainmod._data_dir(m2_run["cfg"]))["fingerprint"]
+    assert fp_a == fp_b == m2_run["metrics"]["run_fingerprint"]
+
+
+def test_legacy_run_dir_without_fingerprint_refused(m2_run: dict, tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy"
+    (legacy / "members").mkdir(parents=True)
+    (legacy / "metrics.json").write_text("{}")
+    res, code = trainmod.train_run(m2_run["cfg"], "legacy", resume=True, artifacts=tmp_path)
+    assert code == trainmod.EXIT_ERROR and any("without a run fingerprint" in n for n in res["notes"])
+    assert (legacy / "metrics.json").read_text() == "{}" and not (legacy / "config.yaml").exists()
+
+
+def test_external_member_provenance_checks(m2_resumed: dict, m2_run: dict) -> None:
+    """Review finding 2: an external member is loaded only with THIS run's fingerprint, seeds, cap and blobs."""
+    run_dir = m2_resumed["run_dir"]
+    mspec = next(m for m in m2_run["cfg"]["members"] if m["name"] == "mlp_everest")
+    good = json.loads((run_dir / "members" / "mlp_everest" / "spec.json").read_text())
+    rd = type("RD", (), {})()
+    rd.universe = knobs.Universe.from_dict(m2_run["metrics"]["universe"])
+    rd.fingerprint = m2_run["metrics"]["run_fingerprint"]
+    rd.audit_eras = np.array([], dtype=np.int32)
+    assert trainmod.external_problem(rd, mspec, good, run_dir) is None
+    cases = [({"run_fingerprint": "0" * 64}, "another run fingerprint"), ({"seeds": [0, 1]}, "seeds"),
+             ({"epochs_cap": 1}, "epoch cap"), ({"full_blobs": []}, "no full_blobs"),
+             ({"full_blobs": [{"file": "full_s9.bin"}]}, "missing"), ({"status": "running"}, "status")]
+    for patch, needle in cases:
+        why = trainmod.external_problem(rd, mspec, {**good, **patch}, run_dir)
+        assert why is not None and needle in why, (patch, why)
+    rd.audit_eras = np.array([6500], dtype=np.int32)  # with an audit partition the member must carry its audit predictions
+    assert "audit_mlp_everest.parquet missing" in trainmod.external_problem(rd, mspec, good, run_dir)
+
+
+def test_skip_and_require_external(m2_resumed: dict, m2_run: dict) -> None:
+    res, code = trainmod.train_run(m2_run["cfg"], RUN, resume=True, artifacts=m2_run["artifacts"], skip_external=True)
+    assert code == 0, res.get("traceback")
+    assert res["external_members"] == {"mlp_everest": "skipped_external"}
+    assert "m__mlp_everest" not in pd.read_parquet(m2_resumed["run_dir"] / "oof.parquet").columns
+    assert next(d for d in res["dropped"] if d["member"] == "mlp_everest")["status"] == "skipped_external"
+    res, code = trainmod.train_run(m2_run["cfg"], RUN, resume=True, artifacts=m2_run["artifacts"], require_external=True)
+    assert code == 0 and res["external_members"] == {"mlp_everest": "loaded"}
+    spec_path = m2_resumed["run_dir"] / "members" / "mlp_everest" / "spec.json"
+    saved = spec_path.read_text()
+    try:
+        spec_path.write_text(json.dumps({**json.loads(saved), "seeds": [7]}))  # stale: trained with other seeds
+        res, code = trainmod.train_run(m2_run["cfg"], RUN, resume=True, artifacts=m2_run["artifacts"], require_external=True)
+        assert code == trainmod.EXIT_ERROR and any("--require-external" in n for n in res["notes"])
+        res, code = trainmod.train_run(m2_run["cfg"], RUN, resume=True, artifacts=m2_run["artifacts"])
+        assert code == 0 and res["external_members"] == {"mlp_everest": "pending"}
+        assert "m__mlp_everest" not in pd.read_parquet(m2_resumed["run_dir"] / "oof.parquet").columns
+    finally:
+        spec_path.write_text(saved)
+
+
+def test_interrupted_retrain_never_exposes_a_done_member(m2_run: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding 2 / contract 3: spec.json says 'running' from before the first new blob until 'done' is written last."""
+    run_dir = m2_run["run_dir"]
+    spec_path = run_dir / "members" / "ridge_everest" / "spec.json"
+    assert json.loads(spec_path.read_text())["status"] == "done"
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt("simulated Ctrl-C during the full refit")
+
+    monkeypatch.setattr(trainmod, "refit_full", boom)
+    rd = trainmod.RunData(m2_run["cfg"], trainmod._data_dir(m2_run["cfg"]), fingerprint=m2_run["metrics"]["run_fingerprint"])
+    rd.universe = knobs.Universe.from_dict(m2_run["metrics"]["universe"])
+    mspec = next(m for m in m2_run["cfg"]["members"] if m["name"] == "ridge_everest")
+    with trainmod.Progress(60) as prog, pytest.raises(KeyboardInterrupt):
+        trainmod.train_member(rd, mspec, m2_run["cfg"], run_dir, resume=False, prog=prog)
+    spec = json.loads(spec_path.read_text())
+    assert spec["status"] == "running" and not (run_dir / "oof_ridge_everest.parquet").exists()
+    assert trainmod._reusable_spec(rd, "ridge_everest", spec_path, run_dir / "oof_ridge_everest.parquet", True) is None
+    monkeypatch.undo()
+    with trainmod.Progress(60) as prog:  # a normal resume retrains it and ends with "done"
+        spec = trainmod.train_member(rd, mspec, m2_run["cfg"], run_dir, resume=True, prog=prog)
+    assert spec["status"] == "done" and (run_dir / "oof_ridge_everest.parquet").exists()
+
+
+def test_cell_cache_identity(m2_run: dict, tmp_path: Path) -> None:
+    """A cached search/knob cell is reused only under its own cell id (params + universe + run fingerprint + protocol)."""
+    run_dir = m2_run["run_dir"]
+    d = next(p.parent for p in (run_dir / "search" / "lgbm_everest").glob("*/result.json"))
+    cid = d.name
+    assert trainmod._load_protocol(d, cid) is not None
+    assert trainmod._load_protocol(d, "deadbeef0000") is None
+    u = knobs.Universe.from_dict(m2_run["metrics"]["universe"])
+    assert trainmod.cell_hash(LGBM, u, "a" * 64) != trainmod.cell_hash(LGBM, u, "b" * 64) != trainmod.cell_hash(LGBM, u)
+    import optuna
+
+    names = [s.study_name for s in optuna.get_all_study_summaries(f"sqlite:///{run_dir / 'optuna.db'}")]
+    assert names and all(n.startswith("lgbm_everest@" + m2_run["metrics"]["run_fingerprint"][:16]) for n in names)
+
+
+def test_fold_count_does_not_depend_on_its_own_test_labels(m2_run: dict) -> None:
+    """Review finding 1 regression: permuting fold0's TEST labels leaves fold0's tree count and predictions unchanged."""
+    cfg = m2_run["cfg"]
+    rd = trainmod.RunData(cfg, trainmod._data_dir(cfg), fingerprint="x")
+    rd.universe = knobs.Universe.from_dict(m2_run["metrics"]["universe"])
+    mspec = {**next(m for m in cfg["members"] if m["name"] == "lgbm_everest"), "params": dict(LGBM)}
+    a = trainmod.run_protocol(rd, mspec, dict(LGBM), seed=0, threads=1)
+    f0 = rd.folds[0]
+    rows = rd.rows(f0.test_eras)
+    rng = np.random.default_rng(5)
+    t = rd.df[trainmod.data.PRIMARY_TARGET].to_numpy().copy()
+    t[rows] = rng.permutation(t[rows])
+    rd.df[trainmod.data.PRIMARY_TARGET] = t
+    b = trainmod.run_protocol(rd, mspec, dict(LGBM), seed=0, threads=1)
+    assert a.count_sources["fold0"] == ["fold0"] and a.frozen_n_iter_per_fold[0] == b.frozen_n_iter_per_fold[0]
+    ids = a.oof.index[a.oof_fold.to_numpy() == 0]
+    np.testing.assert_array_equal(a.oof.loc[ids].to_numpy(), b.oof.loc[ids].to_numpy())
 
 
 # ------------------------------------------------------------------------------------------ config validation (section 11)

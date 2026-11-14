@@ -164,17 +164,111 @@ print(json.dumps({"ok": True, "n": int(len(out1)), "modules": sorted(m for m in 
     assert "catboost" not in res["modules"] and "lightgbm" in res["modules"] and "xgboost" in res["modules"]
 
 
+PKLCHECK_PY = Path(__file__).resolve().parents[1] / "artifacts" / "pklcheck_venv" / "bin" / "python"
+needs_clean_venv = pytest.mark.skipif(not PKLCHECK_PY.exists(),
+                                      reason="artifacts/pklcheck_venv missing (clean lane venv; never rebuilt by tests)")
+
+
+@needs_clean_venv
 def test_run_check_gate_passes_on_fake_bundle(built: dict, data_dir: Path):
-    """Full pkl_check.run_check with the current interpreter (stealth importable, but must not be imported)."""
-    report = pkl_check.run_check(built["out"], python=Path(sys.executable), data_dir=data_dir, eras=3, seed=1, timeout=400)
+    """Full pkl_check.run_check in the clean lane venv: exact pins verified in the subprocess, no stealth, no torch."""
+    report = pkl_check.run_check(built["out"], python=PKLCHECK_PY, data_dir=data_dir, eras=3, seed=1, timeout=400)
     assert report["passed"], pkl_check.format_report(report)
     assert report["n_eras"] == 4 and report["byte_scan"]["torch"] == 0
     assert report["byte_scan"]["stealth_non_runtime"] == []
     assert report["byte_scan"]["stealth_total"] > 0  # the by-value qualname legitimately appears
     assert report["stats"]["n_bench_eras"] == 4
     assert report["seconds_per_era_max"] < pkl_check.MAX_SECONDS_PER_ERA
-    mpath = pkl_check.update_manifest(built["out"], report["passed"])
+    assert report["isolation"] == {"stealth_importable": False, "torch_importable": False}
+    assert set(report["libs"]) == {p.split("==")[0] for p in pkl_check.lane_pins()}
+    mpath = pkl_check.update_manifest(built["out"], report["passed"], report)
+    rec = json.loads(mpath.read_text())["pkl_check"]
+    assert rec["passed"] is True and rec["sha256"] == built["sha"] and rec["checker"] == str(PKLCHECK_PY)
+
+
+def test_run_check_refuses_the_training_venv(built: dict, data_dir: Path):
+    """contract review 2: the train venv (stealth installed editable) used to PASS; the checker now certifies its own
+    environment and fails it -- the pickle itself is fine, the interpreter is not a clean lane venv."""
+    report = pkl_check.run_check(built["out"], python=Path(sys.executable), data_dir=data_dir, eras=0, timeout=400)
+    assert not report["passed"]
+    assert report["isolation"]["stealth_importable"] is True
+    assert any("stealth package is importable" in p for p in report["problems"])
+
+
+@needs_clean_venv
+def test_run_check_verifies_installed_pins(built: dict, data_dir: Path):
+    pins = [p if not p.startswith("numpy==") else "numpy==0.0.1" for p in pkl_check.lane_pins()]
+    report = pkl_check.run_check(built["out"], python=PKLCHECK_PY, data_dir=data_dir, eras=0, timeout=400, pins=pins)
+    assert not report["passed"] and any("lane pin numpy==0.0.1" in p for p in report["problems"])
+    report2 = pkl_check.run_check(built["out"], python=PKLCHECK_PY, data_dir=data_dir, eras=0, timeout=400, pins=[])
+    assert not report2["passed"] and any("no lane pins" in p for p in report2["problems"])
+
+
+@needs_clean_venv
+def test_run_check_resolves_relative_paths(built: dict, data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    """contract review 4: relative data_dir / python used to pass the existence check and then fail inside the temp cwd."""
+    repo = Path(__file__).resolve().parents[1]
+    monkeypatch.chdir(repo)
+    rel_py = PKLCHECK_PY.relative_to(repo)
+    rel_data = Path(os.path.relpath(data_dir, repo))
+    report = pkl_check.run_check(built["out"], python=rel_py, data_dir=rel_data, eras=0, timeout=400)
+    assert report["passed"], pkl_check.format_report(report)
+    assert report["checker"] == str(repo / rel_py)  # absolute, symlink NOT resolved (still the venv's own python)
+    # the CLI, all relative: pickle, --data-dir, --venv-python
+    rel_pkl = Path(os.path.relpath(built["out"], repo))
+    assert pkl_check.main([str(rel_pkl), "--data-dir", str(rel_data), "--venv-python", str(rel_py), "--eras", "0"]) == 0
+    rec = json.loads(built["manifest"].read_text())["pkl_check"]
+    assert rec["passed"] is True and rec["sha256"] == built["sha"]
+
+
+def test_pkl_check_main_never_leaves_a_stale_pass(built: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """contract review 2: a pass from an earlier attempt is invalidated BEFORE the next attempt can fail."""
+    import shutil
+
+    out = tmp_path / "copy.pkl"
+    shutil.copy(built["out"], out)
+    mpath = bd.manifest_path(out)
+    man = json.loads(built["manifest"].read_text())
+    mpath.write_text(json.dumps({**man, "pkl": out.name}))
+    pkl_check.update_manifest(out, True)
     assert json.loads(mpath.read_text())["pkl_check"]["passed"] is True
+    # setup/data error: the live parquet is missing
+    assert pkl_check.main([str(out), "--data-dir", str(tmp_path / "no_data"), "--venv-python", sys.executable]) == 1
+    rec = json.loads(mpath.read_text())["pkl_check"]
+    assert rec["passed"] is False and rec["status"] == "error" and "futures_live.parquet" in rec["error"]
+    # the venv cannot be built
+    pkl_check.update_manifest(out, True)
+
+    def boom(*a, **k):
+        raise subprocess.CalledProcessError(1, ["pip"])
+
+    monkeypatch.setattr(pkl_check, "ensure_check_venv", boom)
+    assert pkl_check.main([str(out), "--venv", str(tmp_path / "venv")]) == 1
+    assert json.loads(mpath.read_text())["pkl_check"]["passed"] is False
+    # an unexpected exception inside the check
+    pkl_check.update_manifest(out, True)
+
+    def explode(*a, **k):
+        raise KeyError("surprise")
+
+    monkeypatch.setattr(pkl_check, "run_check", explode)
+    assert pkl_check.main([str(out), "--venv-python", sys.executable]) == 1
+    rec = json.loads(mpath.read_text())["pkl_check"]
+    assert rec["passed"] is False and rec["status"] == "error" and "surprise" in rec["error"]
+
+
+def test_check_record_is_bound_to_the_checked_bytes(built: dict, tmp_path: Path):
+    import shutil
+
+    out = tmp_path / "rec.pkl"
+    shutil.copy(built["out"], out)
+    sha = bd.sha256_file(out)
+    rec = pkl_check.check_record(out, True, {"sha256": sha, "python": "3.11.2", "libs": {"numpy": "2.4.6"}, "problems": []})
+    assert rec["passed"] is True and rec["sha256"] == sha and rec["python"] == "3.11.2"
+    stale = pkl_check.check_record(out, True, {"sha256": "0" * 64, "problems": []})  # a report for other bytes
+    assert stale["passed"] is False and stale["status"] == "failed"
+    running = pkl_check.check_record(out, False, status="running")
+    assert running == {"passed": False, "status": "running", "at": running["at"], "sha256": sha}
 
 
 def test_run_check_fails_on_bad_pickle(tmp_path: Path, data_dir: Path):

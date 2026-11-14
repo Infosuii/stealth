@@ -88,6 +88,12 @@ def test_clean_results_and_sha_pass(repo: Path) -> None:
         ("notes.md", "aws " + "AKIA" + "Q" * 16),
         ("id_rsa", "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n"),
         ("remote.txt", "url = https://x-access-token:" + "z" * 20 + "@github.com/Infosuii/stealth.git"),
+        ("handoffs/results/04-log-tail.txt", "GET https://b.s3.amazonaws.com/f.parquet?X-Amz-Date=1&X-Amz-" + "Signature="
+         + "9f" * 32),
+        ("log.txt", "url ?X-Amz-" + "Credential=" + "AKIA" + "W" * 16 + "%2F20261114%2Fus-east-1"),
+        ("log.txt", "url https://storage.googleapis.com/b/o?X-Goog-" + "Signature=" + "0a" * 40),
+        ("log.txt", "url https://acct.blob.core.windows.net/c/f?sv=1&" + "sig=" + "Q" * 30),
+        ("log.txt", "url https://dl.example.com/x?" + "token=" + "t" * 32),
     ],
 )
 def test_secrets_fail(repo: Path, rel: str, line: str) -> None:
@@ -117,6 +123,9 @@ def test_forbidden_paths_fail(repo: Path, rel: str) -> None:
         "export EIQ_API_KEY=your-key-here-please",
         "X-API-Key: placeholder_value_1234",
         "regex: EIQ_API_KEY\\s*=\\s*\\S{8,}",
+        "redacted: https://b.s3.amazonaws.com/f.parquet?[REDACTED]",
+        "the X-Amz-Signature query key and ?token=<value> are redacted by stealth.report",
+        "https://api.everesteer.ai/api/v1/models?page=2&limit=50",
     ],
 )
 def test_mentions_and_placeholders_pass(repo: Path, line: str) -> None:

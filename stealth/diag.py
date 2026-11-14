@@ -17,7 +17,9 @@ such a file is refused by ``--upload``: the lane needs full coverage).
 ``pkl_check``, file coverage, any earlier upload of the same file -- and exits 0 only when everything is ready, so
 the operator can show it to the user before asking for approval.
 
-``--upload`` is USER-GATED (``--i-have-approval`` AND ``STEALTH_CONFIRM_DIAG=1``): the user approved at most five
+``--upload`` is USER-GATED (``--i-have-approval`` AND ``STEALTH_CONFIRM_DIAG=1``) and the pickle must first pass
+``predict.check_upload_artifact`` (manifest sha, a pkl_check pass bound to these bytes, python 3.11), exactly like a lane
+upload -- before the file is built or any client exists. The user approved at most five
 diagnostics uploads, each behind a USER MUST APPROVE handoff (docs/DECISIONS.md). It reuses ``--out`` when its
 meta matches this pickle with full coverage (otherwise rebuilds it), refuses when ``<out>.upload.json`` already
 records an upload (``--new-upload`` overrides; every upload consumes one of the five), logs the ``upload_id`` and
@@ -45,8 +47,8 @@ import numpy as np
 import pandas as pd
 
 from stealth import data as sdata
-from stealth.predict import (BANNER, BENCH_SERIES_NAME, ENV_DIAG, PKL_PYTHON_VERSION, approval_gate, load_predict,
-                             resolve_model_id, validate_predictions)
+from stealth.predict import (BANNER, BENCH_SERIES_NAME, ENV_DIAG, PKL_PYTHON_VERSION, approval_gate, check_upload_artifact,
+                             load_predict, resolve_model_id, validate_predictions)
 
 log = logging.getLogger("stealth.diag")  # explicit: under `python -m` __name__ is __main__
 
@@ -262,6 +264,7 @@ def upload_diagnostics(client: Any, model_id: str, path: Path, *, wait: bool = F
     n = len(pd.read_parquet(path, columns=[]))
     kwargs: dict[str, Any] = {}
     if model_pkl is not None:
+        check_upload_artifact(model_pkl)  # an attached pickle passes the same gate as a lane upload (before any client call)
         kwargs = {"model_pkl": str(model_pkl), "model_pkl_python_version": PKL_PYTHON_VERSION}
     try:
         res = client.submit_validation_diagnostics(model_id, str(path), tournament="futures", target="target_everest",
@@ -317,11 +320,18 @@ def preflight(pkl: Path, out: Path, model_id_arg: str | None = None) -> tuple[bo
             lines.append(f"  pkl             {pkl.name} sha256 {sha[:16]}  manifest MISSING")
         else:
             match = man.get("sha256") == sha
-            passed = bool((man.get("pkl_check") or {}).get("passed"))
+            check = man.get("pkl_check") or {}
+            passed = bool(check.get("passed")) and check.get("sha256") == sha
             py = str(man.get("python") or "?")
+            try:
+                check_upload_artifact(pkl)  # the gate the upload itself applies
+                gate = "artifact gate OK"
+            except RuntimeError as exc:
+                ok, gate = False, f"artifact gate REFUSES: {exc}"
             ok = ok and match and passed and py.startswith("3.11")
             lines.append(f"  pkl             {pkl.name} sha256 {sha[:16]}  manifest {'match' if match else 'MISMATCH'}, "
-                         f"pkl_check {'passed' if passed else 'NOT passed'}, python {py}, run {man.get('run_id')}")
+                         f"pkl_check {'passed' if passed else 'NOT passed for these bytes'}, python {py}, run {man.get('run_id')}")
+            lines.append(f"  gate            {gate}")
     else:
         ok = False
         lines.append(f"  pkl             {pkl} MISSING")
@@ -398,6 +408,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--upload requires full coverage; drop --eras")
         model_id = resolve_model_id(args.model_id)
         approval_gate("upload validation diagnostics", ENV_DIAG, args.i_have_approval)
+        # the file is built from this pickle, so the pickle passes the upload artifact gate (manifest, byte-bound
+        # pkl_check, python 3.11) before anything is built or sent -- with or without --attach-pkl
+        check_upload_artifact(args.pkl)
         prev = _read_json(upload_json_path(args.out))
         if prev and prev.get("upload_id") and not args.new_upload:
             raise RuntimeError(f"{args.out.name} was already uploaded (upload_id={prev['upload_id']}); use --fetch-result. "

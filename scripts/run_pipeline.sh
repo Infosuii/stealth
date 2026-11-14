@@ -1,32 +1,43 @@
 #!/usr/bin/env bash
-# stealth -- end-to-end pipeline driver (docs/INTERFACES.md section 20). Idempotent and resumable: after ANY
+# stealth -- end-to-end pipeline driver (docs/INTERFACES.md sections 20, 22). Idempotent and resumable: after ANY
 # interruption re-run the SAME command; every step resumes from its cache or repeats deterministically.
 #
 #   bash scripts/run_pipeline.sh <config> <run_id> [--gpu-py PATH] [--no-mlp] [--pkl models/<run_id>.pkl]
-#        [--py PATH] [--from STEP] [--mlp-device auto|cuda|cpu] [--mlp-epochs-cap N] [--mlp-seeds "0 1"]
+#        [--py PATH] [--from STEP] [--mlp-device cuda|cpu|auto] [--mlp-epochs-cap N] [--mlp-seeds "0 1"]
 #        [--mlp-threads N] [--pkl-check-python PATH] [--diag-eras N] [--no-diag] [--report NN] [--dry-run]
 #
 # Steps (STEP names for --from):
-#   train      $PY -m stealth.train --config C --run-id R --resume --skip-external
-#   mlp        $GPU_PY scripts/mlp_train.py --run-id R --resume      only when the config has a `family: mlp` member,
-#              --gpu-py is given and --no-mlp is not; exit != 0 (1 error, 4 no device) is logged "MLP skipped" and the
-#              pipeline continues without the member (train marks it pending; the ladder never sees it)
-#   retrain    $PY -m stealth.train ... --resume again: re-assembles OOF with the finished external member (only
-#              after mlp exited 0, or when started with --from retrain)
-#   blend      $PY -m stealth.blend --run-id R                       (the regime grid can be silent for ~15 min)
-#   audit      $PY -m stealth.audit --run-id R                       only when cv.audit.enabled
+#   train      $PY -m stealth.train --config C --run-id R --resume --skip-external   (external members never loaded)
+#   mlp        $GPU_PY scripts/mlp_train.py --run-id R --resume --device D   only when the config has a `family: mlp`
+#              member, --gpu-py is given and --no-mlp is not. D defaults to cuda (no silent CPU fallback on the
+#              laptop; the sandbox passes --mlp-device cpu). Exit 1 (error) or 4 (no usable device) is logged
+#              "MLP skipped" and the pipeline continues without the member; a signal exit (>= 128) or any other
+#              code stops the pipeline.
+#   retrain    after mlp exited 0: $PY -m stealth.train ... --resume --require-external (assemble WITH the member;
+#              a member that fails its provenance check is an error). When the MLP did not finish in this attempt
+#              and train did not run in it either (--from mlp | retrain): --resume --skip-external, so a previously
+#              assembled MLP can never survive. To include an MLP trained earlier use --from mlp (mlp_train --resume
+#              returns at once when it is already done).
+#   blend      $PY -m stealth.blend --run-id R                       (the regime grid can be silent for a while)
+#   audit      $PY -m stealth.audit --run-id R                       only when cv.audit.enabled; frozen blend only
 #   bundle     $PY -m stealth.bundle --run-id R --out PKL [--require-frozen when blend.neutralisation.select]
 #   pkl_check  $PY -m stealth.pkl_check PKL [--venv-python P]
 #   diag       $PY -m stealth.diag --pkl PKL --out artifacts/diag/<R>_validation.parquet [--eras N]   FILE ONLY:
 #              this script never passes --upload / --submit / any platform write
-#   report     $PY -m stealth.report --run-id R --handoff NN --no-git   only with --report NN (the handoff's own
-#              report step commits and pushes)
+#   report     $PY -m stealth.report --run-id R --handoff NN --no-git   only with --report NN. The compute steps'
+#              final state is recorded BEFORE it runs, so the report sees a finished pipeline; its own outcome is
+#              recorded separately (pipeline.json report_step) and a report failure still exits non-zero.
 #
+# --no-mlp with --from blend (or later) refuses (exit 64) when oof.parquet still holds an external member: re-run
+# with --from retrain --no-mlp first.
 # Defaults: PY=<repo>/.venv/bin/python, PKL=models/<run_id>.pkl. Relative paths resolve against the repo root.
-# Step lines go to stdout and artifacts/<run_id>/pipeline.log. pipeline.json records attempts and outcomes;
-# pipeline_steps/ captures each step's stdout and stderr, including errors from packaging and diagnostics.
+# Step lines go to stdout and artifacts/<run_id>/pipeline.log. artifacts/<run_id>/pipeline.json (atomic, schema
+# stealth.pipeline/1) records every attempt, its steps, exit codes and seconds; pipeline_steps/ holds each step's
+# captured stdout + stderr. Every step runs in its own process group: Ctrl-C / TERM stop that whole group (and
+# nothing else), the attempt is recorded as interrupted, and re-running the same command resumes.
 # Exit: 0 when every step succeeded (an MLP skip is tolerated), else the exit code of the first failing step
-# (train / blend 2 = leak or gate failure). --dry-run prints the commands and runs nothing. Never reads .env.
+# (train / blend 2 = leak or gate failure; 130 / 143 = interrupted). --dry-run prints the commands and runs nothing.
+# Never reads .env.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -71,7 +82,9 @@ while [ "$#" -gt 0 ]; do
     --pkl) PKL="$(resolve "${2:?--pkl needs a path}")"; shift 2 ;;
     --py) PY="$(resolve "${2:?--py needs a path}")"; shift 2 ;;
     --from) FROM="${2:?--from needs a step}"; shift 2 ;;
-    --mlp-device) MLP_DEVICE="${2:?}"; shift 2 ;;
+    --mlp-device)
+      MLP_DEVICE="${2:?--mlp-device needs cuda|cpu|auto}"; shift 2
+      case "$MLP_DEVICE" in cuda|cpu|auto) ;; *) die "--mlp-device must be cuda, cpu or auto (got '$MLP_DEVICE')" ;; esac ;;
     --mlp-epochs-cap) MLP_ARGS+=(--epochs-cap "${2:?}"); shift 2 ;;
     --mlp-threads) MLP_ARGS+=(--threads "${2:?}"); shift 2 ;;
     --mlp-seeds) read -r -a _seeds <<< "${2:?}"; MLP_ARGS+=(--seeds "${_seeds[@]}"); shift 2 ;;
@@ -90,25 +103,43 @@ for i in "${!STEPS[@]}"; do [ "${STEPS[$i]}" = "$FROM" ] && FROM_IDX=$i; done
 [ "$FROM_IDX" -ge 0 ] || die "--from must be one of: ${STEPS[*]} (got '$FROM')"
 [ -x "$PY" ] || die "python not found or not executable: $PY (run scripts/setup.sh, or pass --py)"
 
+step_index() { local i; for i in "${!STEPS[@]}"; do [ "${STEPS[$i]}" = "$1" ] && { echo "$i"; return; }; done; echo -1; }
+RETRAIN_IDX="$(step_index retrain)"
+
 cd "$REPO"
 RUN_DIR="$REPO/artifacts/$RUN_ID"
 PLOG="$RUN_DIR/pipeline.log"
+PJSON="$RUN_DIR/pipeline.json"
 DIAG_OUT="$REPO/artifacts/diag/${RUN_ID}_validation.parquet"
 
-# config facts (yaml read by the train venv's python): has a family: mlp member? neutralisation selection on?
-read -r HAS_MLP SELECT HAS_AUDIT < <("$PY" - "$CONFIG" <<'PYEOF'
+# config facts (yaml read by the train venv's python): has a family: mlp member (and their names)? neutralisation
+# selection on? audit partition on?
+read -r HAS_MLP SELECT HAS_AUDIT EXTERNALS < <("$PY" - "$CONFIG" <<'PYEOF'
 import sys
 import yaml
 with open(sys.argv[1]) as fh:
     c = yaml.safe_load(fh) or {}
-mlp = any(isinstance(m, dict) and m.get("family") == "mlp" for m in c.get("members") or [])
+ext = [str(m.get("name")) for m in c.get("members") or [] if isinstance(m, dict) and m.get("family") == "mlp"]
 sel = bool(((c.get("blend") or {}).get("neutralisation") or {}).get("select"))
 audit = bool(((c.get("cv") or {}).get("audit") or {}).get("enabled"))
-print(int(mlp), int(sel), int(audit))
+print(int(bool(ext)), int(sel), int(audit), ",".join(ext) or "-")
 PYEOF
 ) || true
-[[ "${HAS_MLP:-}" =~ ^[01]$ && "${SELECT:-}" =~ ^[01]$ && "${HAS_AUDIT:-}" =~ ^[01]$ ]] \
+[[ "${HAS_MLP:-}" =~ ^[01]$ && "${SELECT:-}" =~ ^[01]$ && "${HAS_AUDIT:-}" =~ ^[01]$ && -n "${EXTERNALS:-}" ]] \
   || die "could not read $CONFIG with $PY (yaml error?)"
+[ "$EXTERNALS" != "-" ] || EXTERNALS=""
+
+# --no-mlp from blend onwards must not blend, audit or bundle an external member that an earlier attempt assembled
+if [ "$NO_MLP" -eq 1 ] && [ -n "$EXTERNALS" ] && [ "$FROM_IDX" -gt "$RETRAIN_IDX" ] && [ -f "$RUN_DIR/oof.parquet" ]; then
+  STALE="$("$PY" - "$RUN_DIR/oof.parquet" "$EXTERNALS" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+cols = set(pq.read_schema(sys.argv[1]).names)
+print(" ".join(n for n in sys.argv[2].split(",") if n and f"m__{n}" in cols))
+PYEOF
+)" || die "could not read the schema of $RUN_DIR/oof.parquet with $PY"
+  [ -z "$STALE" ] || die "--no-mlp --from $FROM: $RUN_DIR/oof.parquet still contains external member(s) $STALE from an earlier attempt; re-run with --from retrain --no-mlp so it is re-assembled without them"
+fi
 
 # A real step gets its own process group so Ctrl-C / TERM also stops its subprocesses. Linux provides setsid.
 [ "$DRY_RUN" -eq 1 ] || command -v setsid >/dev/null || die "setsid is required to stop pipeline children safely"
@@ -120,9 +151,9 @@ log() {
   if [ "$DRY_RUN" -eq 0 ]; then mkdir -p "$RUN_DIR"; echo "$line" >> "$PLOG"; fi
 }
 
-state() {  # state <event> <fields...>; atomic, local-only attempt history for the reporter
+state() {  # state <event> <fields...>; atomic (tmp + rename), local-only attempt history for the reporter
   [ "$DRY_RUN" -eq 0 ] || return 0
-  "$PY" - "$RUN_DIR/pipeline.json" "$@" <<'PYEOF'
+  "$PY" - "$PJSON" "$@" <<'PYEOF'
 import json
 import os
 import sys
@@ -137,31 +168,69 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     doc = {"schema": "stealth.pipeline/1", "attempts": []}
 now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+att = doc["attempts"][-1] if doc["attempts"] else None
+
+
+def status_of(rc):
+    return "ok" if rc == 0 else "interrupted" if rc >= 128 else "failed"
+
+
+def step_entry(name):
+    if name == "report":  # recorded apart from the compute steps: the report must observe a FINISHED pipeline
+        return att.get("report_step")
+    return next(s for s in reversed(att["steps"]) if s["name"] == name)
+
+
 if event == "start":
-    run_id, config, pkl, from_step = args
+    run_id, config, pkl, from_step, *opts = args
     for old in doc["attempts"]:
-        if old.get("status") == "running":
+        if old.get("status") == "running":  # an earlier attempt that never recorded its end (killed / power loss)
             old["status"] = "interrupted"
-    doc.update(run_id=run_id, config=Path(config).name, pkl=pkl, status="running", finished_at=None, exit_code=None)
-    doc["attempts"].append({"started_at": now, "from_step": from_step, "status": "running", "steps": []})
+            old.setdefault("note", "no end record: the driver was killed before it could record one")
+    options = dict(o.split("=", 1) for o in opts if "=" in o)
+    doc.update(run_id=run_id, config=Path(config).name, pkl=pkl, status="running", finished_at=None, exit_code=None,
+               failed_step=None, report_step=None)
+    doc["attempts"].append({"started_at": now, "from_step": from_step, "status": "running", "steps": [],
+                            "options": options})
 elif event == "step-start":
     name, logfile = args
-    doc["attempts"][-1]["steps"].append({"name": name, "status": "running", "started_at": now, "log_file": logfile})
-    doc["last_step"] = name
+    entry = {"name": name, "status": "running", "started_at": now, "log_file": logfile}
+    if name == "report":
+        att["report_step"] = doc["report_step"] = entry
+    else:
+        att["steps"].append(entry)
+        doc["last_step"] = name
 elif event == "step-end":
     name, rc, seconds = args
     rc = int(rc)
-    step = next(s for s in reversed(doc["attempts"][-1]["steps"]) if s["name"] == name)
-    step.update(status="ok" if rc == 0 else "interrupted" if rc >= 128 else "failed", exit_code=rc,
-                seconds=int(seconds), finished_at=now)
+    step = step_entry(name)
+    step.update(status=status_of(rc), exit_code=rc, seconds=int(seconds), finished_at=now)
+    if name == "report":
+        doc["report_step"] = step
+elif event == "step-mark":  # e.g. a tolerated MLP exit: the step did not fail the pipeline
+    name, status, note = args
+    step_entry(name).update(status=status, note=note)
 elif event == "mlp":
-    doc["mlp"] = args[0]
+    att["mlp"] = doc["mlp"] = args[0]
+elif event == "compute-done":  # every compute step finished: the pipeline result, recorded BEFORE the report step
+    seconds = int(args[0])
+    result = {"status": "ok", "exit_code": 0, "finished_at": now}
+    doc.update(result, failed_step=None)
+    att.update(result, seconds=seconds)
 elif event == "finish":
-    status, rc, seconds = args
+    status, rc, seconds, step = args
     result = {"status": status, "exit_code": int(rc), "finished_at": now}
-    doc.update(result)
-    doc["attempts"][-1].update(result, seconds=int(seconds))
-tmp = p.with_suffix(".json.tmp")
+    doc.update(result, failed_step=step or None)
+    att.update(result, seconds=int(seconds), failed_step=step or None)
+elif event == "report-finish":  # the report step ended after compute-done: the pipeline result itself stays
+    status, rc = args
+    rep = att.get("report_step") or {"name": "report"}
+    if rep.get("status") == "running":
+        rep.update(status=status, exit_code=int(rc), finished_at=now)
+    att["report_step"] = doc["report_step"] = rep
+else:
+    raise SystemExit(f"unknown pipeline state event {event!r}")
+tmp = p.with_name(p.name + ".tmp")
 tmp.write_text(json.dumps(doc, indent=2) + "\n")
 os.replace(tmp, p)
 PYEOF
@@ -169,13 +238,36 @@ PYEOF
 
 RC=0
 STEP_PID=""
+TEE_PID=""
 CURRENT_STEP=""
 STEP_T0=0
 PIPE_T0=$SECONDS
 PIPELINE_FINISHED=0
-finish() {
-  state finish "$1" "$2" "$((SECONDS - PIPE_T0))"
+COMPUTE_DONE=0
+
+finish() {  # finish <status> <rc> [<step>]
+  if [ "$COMPUTE_DONE" -eq 1 ]; then
+    state report-finish "$1" "$2"
+  else
+    state finish "$1" "$2" "$((SECONDS - PIPE_T0))" "${3:-}"
+  fi
   PIPELINE_FINISHED=1
+}
+
+stop_step() {  # TERM the running step's whole process group (never anything outside it), KILL after a grace period
+  local pg="$STEP_PID" dog i
+  [ -n "$pg" ] || return 0
+  kill -TERM -- "-$pg" 2>/dev/null || true
+  # watchdog without our stdout/stderr, so a leftover sleep never holds the caller's pipe open
+  ( exec </dev/null >/dev/null 2>&1; sleep 15; kill -KILL -- "-$pg" ) &
+  dog=$!
+  wait "$pg" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 -- "-$pg" 2>/dev/null || break; sleep 0.5; done
+  kill -KILL -- "-$pg" 2>/dev/null || true
+  kill "$dog" 2>/dev/null || true
+  wait "$dog" 2>/dev/null || true
+  STEP_PID=""
+  if [ -n "$TEE_PID" ]; then wait "$TEE_PID" 2>/dev/null || true; TEE_PID=""; fi
 }
 
 unexpected_exit() {
@@ -184,28 +276,28 @@ unexpected_exit() {
   if [ "$DRY_RUN" -eq 0 ] && [ "$PIPELINE_FINISHED" -eq 0 ]; then
     set +e
     [ "$rc" -ne 0 ] || rc=1
-    if [ -n "$STEP_PID" ]; then kill -TERM -- "-$STEP_PID" 2>/dev/null; fi
+    stop_step
     if [ -n "$CURRENT_STEP" ]; then state step-end "$CURRENT_STEP" "$rc" "$((SECONDS - STEP_T0))"; fi
     log "PIPELINE FAILED at step ${CURRENT_STEP:-setup} (exit $rc)"
-    finish failed "$rc"
+    finish failed "$rc" "${CURRENT_STEP:-setup}"
   fi
   exit "$rc"
 }
 
 interrupted() {
   local signal="$1" rc="$2"
-  trap - INT TERM
+  trap - EXIT INT TERM
   set +e
   # Background commands inherit SIGINT ignored; TERM reliably stops their entire new process group.
-  if [ -n "$STEP_PID" ]; then kill -TERM -- "-$STEP_PID" 2>/dev/null; fi
+  stop_step
   if [ -n "$CURRENT_STEP" ]; then state step-end "$CURRENT_STEP" "$rc" "$((SECONDS - STEP_T0))"; fi
-  log "PIPELINE INTERRUPTED at step ${CURRENT_STEP:-setup} ($signal; exit $rc)"
-  finish interrupted "$rc"
+  log "PIPELINE INTERRUPTED at step ${CURRENT_STEP:-setup} ($signal; exit $rc). Re-run the same command to resume."
+  finish interrupted "$rc" "${CURRENT_STEP:-setup}"
   exit "$rc"
 }
 
 run() {  # run <step> <cmd...>: runs the command (or prints it with --dry-run); sets RC; never exits by itself
-  local step="$1" step_log pipe_fd tee_pid tee_rc
+  local step="$1" step_log pipe_fd tee_rc
   shift
   if [ "$DRY_RUN" -eq 1 ]; then
     printf 'DRY-RUN [%s]:' "$step"; printf ' %q' "$@"; printf '\n'
@@ -219,7 +311,7 @@ run() {  # run <step> <cmd...>: runs the command (or prints it with --dry-run); 
   state step-start "$step" "$step_log"
   log "step $step: start: $*"
   exec {pipe_fd}> >(tee -a "$RUN_DIR/$step_log")
-  tee_pid=$!
+  TEE_PID=$!
   setsid "$@" >&"$pipe_fd" 2>&1 &
   STEP_PID=$!
   exec {pipe_fd}>&-
@@ -227,8 +319,9 @@ run() {  # run <step> <cmd...>: runs the command (or prints it with --dry-run); 
   wait "$STEP_PID"
   RC=$?
   STEP_PID=""
-  wait "$tee_pid"
+  wait "$TEE_PID"
   tee_rc=$?
+  TEE_PID=""
   set -e
   [ "$RC" -ne 0 ] || RC=$tee_rc
   state step-end "$step" "$RC" "$((SECONDS - STEP_T0))"
@@ -237,8 +330,16 @@ run() {  # run <step> <cmd...>: runs the command (or prints it with --dry-run); 
 }
 
 fail() {  # fail <step> <rc>
-  log "PIPELINE FAILED at step $1 (exit $2). Follow the handoff's 'If it fails' section, then re-run the same command (or --from $1)."
-  if [ "$2" -ge 128 ]; then finish interrupted "$2"; else finish failed "$2"; fi
+  if [ "$2" -ge 128 ]; then
+    log "PIPELINE INTERRUPTED at step $1 (exit $2). Re-run the same command to resume (or --from $1)."
+    finish interrupted "$2" "$1"
+  elif [ "$COMPUTE_DONE" -eq 1 ]; then
+    log "REPORT FAILED at step $1 (exit $2); the pipeline steps themselves finished ok. Re-run with --from $1."
+    finish failed "$2" "$1"
+  else
+    log "PIPELINE FAILED at step $1 (exit $2). Follow the handoff's 'If it fails' section, then re-run the same command (or --from $1)."
+    finish failed "$2" "$1"
+  fi
   exit "$2"
 }
 
@@ -248,15 +349,18 @@ wanted() {  # wanted <step>: is <step> at or after --from?
   return 1
 }
 
-log "config=$CONFIG run_id=$RUN_ID pkl=$PKL py=$PY gpu_py=${GPU_PY:-none} from=$FROM has_mlp=$HAS_MLP select=$SELECT dry_run=$DRY_RUN"
-state start "$RUN_ID" "$CONFIG" "$PKL" "$FROM"
+log "config=$CONFIG run_id=$RUN_ID pkl=$PKL py=$PY gpu_py=${GPU_PY:-none} from=$FROM has_mlp=$HAS_MLP select=$SELECT audit=$HAS_AUDIT dry_run=$DRY_RUN"
+state start "$RUN_ID" "$CONFIG" "$PKL" "$FROM" "no_mlp=$NO_MLP" "mlp_device=$MLP_DEVICE" "gpu_py=${GPU_PY:+set}" \
+  "report=$REPORT_NN" "diag_eras=$DIAG_ERAS" "no_diag=$NO_DIAG"
 trap unexpected_exit EXIT
 trap 'interrupted INT 130' INT
 trap 'interrupted TERM 143' TERM
 
+TRAIN_RAN=0
 if wanted train; then
   run train "$PY" -m stealth.train --config "$CONFIG" --run-id "$RUN_ID" --resume --skip-external
   [ "$RC" -eq 0 ] || fail train "$RC"
+  TRAIN_RAN=1
 fi
 
 MLP_STATUS="not run in this attempt (from=$FROM)"
@@ -273,13 +377,15 @@ if wanted mlp && [ "$HAS_MLP" -eq 1 ]; then
     run mlp "$GPU_PY" "$REPO/scripts/mlp_train.py" --run-id "$RUN_ID" --resume --device "$MLP_DEVICE" ${MLP_ARGS[@]+"${MLP_ARGS[@]}"}
     if [ "$DRY_RUN" -eq 1 ]; then
       MLP_OK=1
-      MLP_STATUS="would run (retrain runs only if mlp_train exits 0)"
+      MLP_STATUS="would run (retrain assembles it only if mlp_train exits 0)"
     elif [ "$RC" -eq 0 ]; then
       MLP_OK=1
       MLP_STATUS="ok"
     elif [ "$RC" -eq 1 ] || [ "$RC" -eq 4 ]; then
       MLP_STATUS="skipped (mlp_train exit $RC)"
+      state step-mark mlp skipped "optional member: exit $RC tolerated, pipeline continues without it"
     else
+      state mlp "failed (mlp_train exit $RC)"
       fail mlp "$RC"
     fi
   fi
@@ -287,15 +393,20 @@ if wanted mlp && [ "$HAS_MLP" -eq 1 ]; then
   state mlp "$MLP_STATUS"
 fi
 
-if wanted retrain; then
-  if [ "$MLP_OK" -eq 1 ] || [ "$FROM" = "retrain" ]; then
-    RETRAIN_ARGS=()
-    [ "$NO_MLP" -eq 0 ] || RETRAIN_ARGS+=(--skip-external)
-    run retrain "$PY" -m stealth.train --config "$CONFIG" --run-id "$RUN_ID" --resume "${RETRAIN_ARGS[@]}"
+if wanted retrain && [ "$HAS_MLP" -eq 1 ]; then
+  if [ "$MLP_OK" -eq 1 ]; then
+    run retrain "$PY" -m stealth.train --config "$CONFIG" --run-id "$RUN_ID" --resume --require-external
+    [ "$RC" -eq 0 ] || fail retrain "$RC"
+  elif [ "$TRAIN_RAN" -eq 0 ]; then
+    log "step retrain: re-assembling WITHOUT external members (no MLP finished in this attempt)"
+    run retrain "$PY" -m stealth.train --config "$CONFIG" --run-id "$RUN_ID" --resume --skip-external
     [ "$RC" -eq 0 ] || fail retrain "$RC"
   else
-    log "step retrain: skipped (no newly finished external member)"
+    log "step retrain: skipped (train already assembled without external members; no MLP finished in this attempt)"
   fi
+elif wanted retrain && [ "$TRAIN_RAN" -eq 0 ]; then  # no external member at all: retrain == train --resume
+  run retrain "$PY" -m stealth.train --config "$CONFIG" --run-id "$RUN_ID" --resume --skip-external
+  [ "$RC" -eq 0 ] || fail retrain "$RC"
 fi
 
 if wanted blend; then
@@ -334,6 +445,11 @@ if wanted diag; then
 fi
 
 if wanted report && [ -n "$REPORT_NN" ]; then
+  if [ "$DRY_RUN" -eq 0 ]; then
+    state compute-done "$((SECONDS - PIPE_T0))"
+    COMPUTE_DONE=1
+    log "pipeline steps ok run_id=$RUN_ID (mlp: $MLP_STATUS); writing the report"
+  fi
   run report "$PY" -m stealth.report --run-id "$RUN_ID" --handoff "$REPORT_NN" --no-git
   [ "$RC" -eq 0 ] || fail report "$RC"
 fi

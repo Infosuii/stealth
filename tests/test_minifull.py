@@ -22,7 +22,8 @@ def mini(repo_root: Path) -> dict:
 def test_minifull_loads_and_matches_section_20(mini: dict) -> None:
     run, c, kn = mini["run"], mini["cv"], mini["knobs"]
     assert run["min_era"] == 5000 and run["threads"] == 2 and knobs.pool_min_era(mini) == 4600
-    assert c["n_folds"] == 3 and c["forward"] == {"enabled": True, "train_end": 5925, "test_start": 5945}
+    assert c["n_folds"] == 3 and c["forward"] == {"enabled": True, "train_end": 5600, "test_start": 5640}
+    assert c["audit"] == {"enabled": True, "train_end": 5925, "test_start": 5945}  # same reserved partition as full.yaml
     assert kn["era_start"] == [5000, 4600] and kn["rows_rule"] == ["none", "filter80", "weight80"]
     assert kn["time_decay"] == [False, True]
     assert len(knobs.candidates(mini)) == 5  # default + 4 one-at-a-time alternatives
@@ -68,3 +69,23 @@ def test_minifull_folds_extend_into_the_pool(mini: dict, data_dir: Path) -> None
     alt = knobs.Universe(4600)
     assert alt.train_mask(era, rd.era_n_rows).all()
     assert knobs.equivalent(knobs.Universe(5000, "filter80"), rd.universe, era, rd.era_n_rows)
+    # the reserved audit partition: development and full refits stop before 5925, the audit eras are held apart
+    rd.assert_development_only()
+    assert int(rd.full_train_eras.max()) < 5925 and int(rd.audit_eras.min()) == 5945 and int(rd.audit_eras.max()) == 6524
+    assert int(rd.forward.test_eras.min()) == 5640 and int(rd.forward.test_eras.max()) == 5924
+
+
+def test_full_config_audit_layout(repo_root: Path, data_dir: Path) -> None:
+    """full.yaml (handoff 04): development CV 2800..5924, dev forward 5340..5924, reserved audit 5945..6524, measurement
+    budget 5000 bootstrap / 1000 simulation draws, <= 25 trials, the historical baseline_fit is context only (null)."""
+    full = trainmod.load_config(repo_root / "configs" / "full.yaml")
+    assert full["cv"]["audit"] == {"enabled": True, "train_end": 5925, "test_start": 5945}
+    assert full["cv"]["forward"] == {"enabled": True, "train_end": 5300, "test_start": 5340}
+    assert full["bootstrap"]["n_boot"] == 5000 and full["blend"]["simulation"]["n_draws"] == 1000
+    assert full["gates"]["baseline_fit"] is None and full["search"]["lgbm_everest"]["n_trials"] <= 25
+    assert full["refit"]["seeds"] == [0, 1] and full["run"]["threads"] == 16
+    eras = np.arange(2800, 5925, dtype=np.int32)
+    folds = cv.purged_folds(eras, 5)
+    fw = cv.forward_block(eras, train_end=5300, test_start=5340)
+    cv.assert_fold_gaps(folds + [fw], min_gap=20)
+    assert max(int(f.test_eras.max()) for f in folds) == 5924 and int(fw.test_eras.min()) == 5340

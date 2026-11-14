@@ -218,6 +218,14 @@ def test_validate_predictions_errors(live_frame: pd.DataFrame):
         predict.validate_predictions(good.iloc[:-1], idx)
     with pytest.raises(ValueError, match="non-finite"):
         predict.validate_predictions(good.assign(prediction=np.nan), idx)
+    # contract review 7: numeric strings and integers are not a float column (pkl_check refuses them too)
+    with pytest.raises(ValueError, match="not float"):
+        predict.validate_predictions(good.assign(prediction=good["prediction"].map(lambda v: f"{v:.6f}")), idx)
+    with pytest.raises(ValueError, match="not float"):
+        predict.validate_predictions(good.assign(prediction=1), idx)
+    with pytest.raises(ValueError, match="0 columns"):
+        predict.validate_predictions(good.iloc[:, :0], idx)
+    assert predict.validate_predictions(good.astype("float32"), idx)["n"] == 90
 
 
 # --------------------------------------------------------------------------------------------------
@@ -271,14 +279,15 @@ def small_val_dir(data_dir: Path, tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def checked_pkl(pkl: Path, tmp_path: Path) -> Path:
-    """A copy of the fixture pickle whose manifest records a passed pkl_check (as handoff 02 left test01)."""
+    """A copy of the fixture pickle whose manifest records a pkl_check pass bound to its bytes (sha256)."""
     d = tmp_path / "models"
     d.mkdir()
     out = d / "m01.pkl"
     shutil.copy(pkl, out)
     man = json.loads(pkl.with_name(f"{pkl.stem}.manifest.json").read_text())
-    man.update({"pkl": out.name, "pkl_check": {"passed": True, "at": "2026-11-13T20:31:31+00:00"}})
+    man.update({"pkl": out.name, "pkl_check": None})
     out.with_name("m01.manifest.json").write_text(json.dumps(man))
+    pkl_check.update_manifest(out, True)
     return out
 
 
@@ -425,6 +434,23 @@ def test_monitor_offline_local_checks(pkl: Path, tmp_path: Path):
     assert any("hashes to" in p for p in problems)
     # no manifest -> exit 2
     assert monitor.main(["--offline", "--models-dir", str(tmp_path / "empty"), "--active", str(tmp_path / "none.json")]) == 2
+
+
+def test_monitor_refuses_a_pass_bound_to_other_bytes(pkl: Path, tmp_path: Path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    for f in pkl.parent.iterdir():
+        shutil.copy(f, models_dir / f.name)
+    pkl_check.update_manifest(models_dir / pkl.name, True)
+    mpath = models_dir / bd.manifest_path(pkl).name
+    manifest = json.loads(mpath.read_text())
+    assert monitor.check_local(mpath, None)[1] == []
+    manifest["pkl_check"]["sha256"] = "f" * 64  # a pass recorded for different bytes (or a legacy record without a hash)
+    mpath.write_text(json.dumps(manifest))
+    assert any("passed for other bytes" in p for p in monitor.check_local(mpath, None)[1])
+    manifest["pkl_check"].pop("sha256")
+    mpath.write_text(json.dumps(manifest))
+    assert any("passed for other bytes" in p for p in monitor.check_local(mpath, None)[1])
 
 
 def test_monitor_online_checks_with_fake_client(pkl: Path, data_dir: Path, tmp_path: Path):

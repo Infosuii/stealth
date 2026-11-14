@@ -121,7 +121,7 @@ def test_holm_step_down_ordering_and_stop() -> None:
     assert by["e"]["holm_pass"]  # .05 <= .2/2
     assert by["c"]["holm_pass"]  # .10 <= .2/1
     assert by["b"]["pass"] and by["a"]["pass"]
-    assert not by["d"]["pass"] and "independent CV" in by["d"]["reason"]  # CV folds disagree
+    assert not by["d"]["pass"] and "non-overlapping CV folds disagree" in by["d"]["reason"]
     assert not by["e"]["pass"]  # no independent confirmation available
     assert by["D"]["pass"] is None and by["D"]["holm_rank"] is None
     # step-down stops at the first failure: once rank j fails every later rank fails even if it is below its threshold
@@ -133,6 +133,30 @@ def test_holm_step_down_ordering_and_stop() -> None:
     rows3 = [_row("D", None, 0, 0), _row("z", "time_decay", 0.999, -0.0001, time_decay=True)]
     knobs.holm_decide(rows3, 0.2)
     assert rows3[1]["holm_pass"] and not rows3[1]["pass"] and rows3[1]["reason"] == "forward diff < 0"
+
+
+def test_holm_uses_null_centred_p_value_and_fails_closed() -> None:
+    """Review finding 6: Holm runs on p_value_fwd (null-centred), not 1 - p_pos; too few blocks never pass."""
+    rows = [_row("D", None, 0.0, 0.0),
+            # high p_pos but a weak null-centred p-value: must NOT pass at rank 1 (thr .2/3)
+            _row("a", "era_start", 0.99, 0.004, p_value_fwd=0.09, inference_valid_fwd=True, era_start=2000),
+            # modest p_pos but a strong p-value: sorted first, passes
+            _row("b", "rows_rule", 0.90, 0.003, p_value_fwd=0.01, inference_valid_fwd=True, rows_rule="filter80"),
+            # one bootstrap block: no inference even with p_pos 1 and p_value 0.0005
+            _row("c", "time_decay", 1.0, 0.01, p_value_fwd=0.0005, inference_valid_fwd=False, n_blocks_fwd=1, time_decay=True)]
+    knobs.holm_decide(rows, 0.2)
+    by = {r["key"]: r for r in rows}
+    assert by["b"]["holm_rank"] == 1 and by["b"]["holm_p"] == pytest.approx(0.01) and by["b"]["pass"]
+    assert by["a"]["holm_rank"] == 2 and by["a"]["holm_p"] == pytest.approx(0.09)
+    assert by["a"]["holm_pass"]  # .09 <= .2/2 = .1 at rank 2
+    assert by["c"]["holm_rank"] == 3 and by["c"]["holm_p"] == 1.0 and not by["c"]["holm_pass"] and not by["c"]["pass"]
+    assert "no inference" in by["c"]["reason"]
+    rows2 = [_row("D", None, 0.0, 0.0), _row("a", "era_start", 0.99, 0.004, p_value_fwd=0.15, inference_valid_fwd=True)]
+    knobs.holm_decide(rows2, 0.2)  # m = 1: threshold .2 -> passes on p .15 even though 1-p_pos would be .01 either way
+    assert rows2[1]["holm_pass"]
+    rows3 = [_row("D", None, 0.0, 0.0), _row("a", "era_start", 0.99, 0.004, p_value_fwd=0.25, inference_valid_fwd=True)]
+    knobs.holm_decide(rows3, 0.2)  # 1 - p_pos = .01 would pass; the calibrated p-value .25 does not
+    assert not rows3[1]["holm_pass"]
 
 
 def test_choose_universe_one_winner_per_dimension() -> None:

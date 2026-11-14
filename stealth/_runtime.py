@@ -447,17 +447,35 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
     feature_cols: list[str] = [str(c) for c in bundle["feature_cols"]]
     missing_cols: list[str] = [str(c) for c in bundle.get("missing_cols", [])]
     members: list[dict] = list(bundle["members"])
-    weights_in: dict[str, float] = dict(bundle["weights"])
-    p_b = float(min(max(bundle.get("p_b", 0.0) or 0.0, 0.0), P_B_CAP))
-    p_c = float(min(max(bundle.get("p_c", 0.0) or 0.0, 0.0), P_C_CAP))
+    weights_in: dict[str, float] = {}
+    for name, value in dict(bundle["weights"]).items():
+        v = float(value)
+        if not np.isfinite(v) or v < 0.0:  # NaN would silently drop a member, inf would turn every score into NaN
+            raise ValueError(f"weight of member {name!r} must be finite and >= 0 (got {value!r})")
+        weights_in[str(name)] = v
+
+    def _constant(key: str, cap: float) -> float:
+        raw = bundle.get(key, 0.0)
+        v = 0.0 if raw is None else float(raw)
+        if not np.isfinite(v) or v < 0.0:  # NaN fails every comparison and would skip the step without a word
+            raise ValueError(f"{key} must be finite and >= 0 (got {raw!r})")
+        return float(min(v, cap))
+
+    p_b = _constant("p_b", P_B_CAP)
+    p_c = _constant("p_c", P_C_CAP)
     core_cols: list[str] = [str(c) for c in bundle.get("core_proxy_cols", [])]
     min_cov = float(bundle.get("min_bench_coverage", DEFAULT_MIN_BENCH_COVERAGE))
+    if not np.isfinite(min_cov) or not 0.0 <= min_cov <= 1.0:
+        raise ValueError(f"min_bench_coverage must be in [0, 1] (got {min_cov!r})")
 
-    active = [m for m in members if float(weights_in.get(m["name"], 0.0)) > 0.0 and m.get("blobs")]
+    active = [m for m in members if weights_in.get(m["name"], 0.0) > 0.0 and m.get("blobs")]
     if not active:
         raise ValueError("bundle has no member with positive weight and at least one blob")
-    w = np.asarray([float(weights_in[m["name"]]) for m in active], dtype=np.float64)
-    w = w / w.sum()
+    w = np.asarray([weights_in[m["name"]] for m in active], dtype=np.float64)
+    total = float(w.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError(f"member weights must have a finite positive sum (got {total!r})")
+    w = w / total
     col_pos = {c: i for i, c in enumerate(feature_cols)}
     lin_cols = linear_columns(feature_cols, missing_cols)
     lin_pos = {c: i for i, c in enumerate(lin_cols)}

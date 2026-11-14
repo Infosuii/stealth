@@ -13,7 +13,16 @@ Era arithmetic (all eras are ``int32`` era numbers, see ``data.era_int``):
 
 :func:`assert_fold_gaps` is the single place that checks the gaps; tests call it on every config.
 :func:`independent_inner_folds` / :func:`assert_count_sources` decide which folds' inner early-stopping results may
-set a given fold's frozen tree count (their inner_val eras must be >= 20 from that fold's test block).
+set a given fold's frozen tree count: the source fold's COMPLETE training provenance (``train_eras``, which holds its
+inner fit, its inner validation labels and any target-dependent feature selection) must lie >= 20 eras from that
+fold's test block. With chronological two-sided folds this leaves every CV fold with its own inner split only; the
+forward block can additionally use a CV fold whose training eras all end >= 20 eras before the forward test block.
+
+:func:`paired_block_bootstrap` reports two different things: ``p_pos`` (share of bootstrap means > 0, a descriptive
+stability statistic used by the pre-registered ``p_pos >= 0.8`` gates) and ``p_value`` (a null-centred one-sided
+bootstrap p-value with the finite-draw ``(count + 1) / (n_boot + 1)`` correction, used for Holm). Fewer than
+``MIN_EFFECTIVE_BLOCKS`` whole blocks in the series means there is no usable inference: ``inference_valid`` is False,
+``p_pos`` is the neutral 0.5 and ``p_value`` is 1, and every gate fails closed.
 """
 from __future__ import annotations
 
@@ -25,6 +34,8 @@ import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+MIN_EFFECTIVE_BLOCKS = 2  # whole bootstrap blocks a series needs before any paired gate may pass
 
 
 @dataclass(frozen=True)
@@ -279,14 +290,16 @@ def paired_block_bootstrap(
     """Paired test of a per-era metric difference ``A - B`` (indexed by era int).
 
     Returns the observed mean, the bootstrap SE of the mean, ``p_pos`` = fraction of bootstrap means > 0
-    and the 5%-95% percentile interval. Gate convention (PLAN): adopt A iff ``p_pos >= 0.8`` on CV AND
-    diff >= 0 on the forward block.
+    (descriptive), the 5%-95% percentile interval, ``p_value`` = null-centred one-sided p-value for "A > B"
+    (``(1 + #{mean* - mean >= mean}) / (n_boot + 1)``: never exactly 0), ``n_blocks`` = whole ``block``-era blocks
+    in the series and ``inference_valid`` = ``n_blocks >= MIN_EFFECTIVE_BLOCKS``. Gate convention (PLAN): adopt A
+    iff ``inference_valid`` AND ``p_pos >= 0.8`` on CV AND diff >= 0 on the forward block.
     """
     v = _clean_series(diff)
     means = block_bootstrap_means(v, block=block, n_boot=n_boot, seed=seed)
     lo, hi = np.percentile(means, [5.0, 95.0])
-    n_blocks = len(v) // block
-    valid = n_blocks >= 2
+    n_blocks = len(v) // max(int(block), 1)
+    valid = n_blocks >= MIN_EFFECTIVE_BLOCKS
     # Null-centred one-sided test, separate from the descriptive percentile p_pos.
     # Add one to numerator/denominator so a finite simulation never reports exact p=0.
     null_means = means - float(v.mean())

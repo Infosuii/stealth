@@ -134,7 +134,13 @@ def test_pkl_check_gate_passes_in_clean_lane_venv(m5: dict, data_dir: Path):
     assert report["byte_scan"]["torch"] == 0 and report["byte_scan"]["stealth_non_runtime"] == []
     assert report["bundle_meta"]["families"] == {"lgbm_everest_bag0": "lgbm", "mlp_everest": "mlp", "ridge_everest": "ridge"}
     assert "torch" not in report.get("modules_loaded", [])
-    assert pkl_check.update_manifest(m5["out"], report["passed"]) is not None
+    assert report["isolation"] == {"stealth_importable": False, "torch_importable": False}
+    assert report["libs"] == {p.split("==")[0]: p.split("==")[1] for p in pkl_check.lane_pins()}
+    assert report["sha256"] == bd.sha256_file(m5["out"])
+    mpath = pkl_check.update_manifest(m5["out"], report["passed"], report)
+    rec = json.loads(mpath.read_text())["pkl_check"]
+    assert rec["passed"] is True and rec["sha256"] == m5["sha"] and rec["python"].startswith("3.11.")
+    assert rec["isolation"]["stealth_importable"] is False and rec["libs"]["numpy"] == "2.4.6"
 
 
 def test_resolve_p_precedence(caplog: pytest.LogCaptureFixture):
@@ -172,7 +178,9 @@ def test_member_subset_bundle(tmp_path: Path, live_frame: pd.DataFrame, caplog: 
     b = bd.build_bundle(run, members=["lgbm_everest_bag0"])
     assert [m["name"] for m in b["members"]] == ["lgbm_everest_bag0"] and b["weights"] == {"lgbm_everest_bag0": 1.0}
     assert b["member_subset"] == ["lgbm_everest_bag0"] and b["weights_source"].startswith("blend")
-    assert b["admitted_arms"] == ["bags"] and b["p_source"] == "config"
+    # the constants were configured for the selected 3-member blend, not for this single member: inherited, never frozen
+    assert b["admitted_arms"] == ["bags"] and b["p_source"] == "inherited" and "inherited" in b["p_reason"]
+    assert (b["p_b"], b["p_c"]) == (0.5, 0.25)
     two = bd.build_bundle(run, members=["mlp_everest", "lgbm_everest_bag0"])
     assert two["weights"] == pytest.approx({"lgbm_everest_bag0": 0.5, "mlp_everest": 0.5})  # 0.4 / 0.4 renormalised
     with caplog.at_level(logging.WARNING, logger="stealth.bundle"):
@@ -186,8 +194,31 @@ def test_member_subset_bundle(tmp_path: Path, live_frame: pd.DataFrame, caplog: 
     assert rc == 0
     man = json.loads(bd.manifest_path(out).read_text())
     assert man["member_subset"] == ["lgbm_everest_bag0"] and [m["name"] for m in man["members"]] == ["lgbm_everest_bag0"]
+    assert man["p_source"] == "inherited" and "inherited" in man["p_reason"]
     assert bd.main(["--run-id", "run_sub", "--out", str(out), "--artifacts-dir", str(tmp_path / "artifacts"), "--members",
                     "lgbm_everest_bag0", "--require-frozen"]) == 1  # config constants are never "frozen"
+    # handoff 03's path: explicit zero overrides on a member subset stay "override"
+    ov = bd.build_bundle(run, members=["lgbm_everest_bag0"], p_b=0.0, p_c=0.0)
+    assert (ov["p_b"], ov["p_c"], ov["p_source"]) == (0.0, 0.0, "override")
+
+
+def test_member_subset_inherits_simulated_constants_unless_it_is_the_selected_blend(tmp_path: Path, live_frame: pd.DataFrame):
+    """contract review 5: a subset of a SIMULATED blend never ships its constants as frozen; the selected blend does."""
+    run = tmp_path / "artifacts" / "run_sim_sub"
+    make_m5_run(run, live_frame)
+    sub = bd.build_bundle(run, members=["mlp_everest"])
+    assert sub["p_source"] == "inherited" and (sub["p_b"], sub["p_c"]) == (0.25, 0.5)
+    with pytest.raises(ValueError, match="require-frozen.*inherited"):
+        bd.build_bundle(run, members=["mlp_everest"], require_frozen=True)
+    # different relative weights over the selected members (equal weights: lgbm_ghat has weight 0) -> another prediction
+    eq = bd.build_bundle(run, members=["lgbm_everest_bag0", "mlp_everest", "ridge_everest", "lgbm_ghat"])
+    assert eq["weights_source"].startswith("equal") and eq["p_source"] == "inherited"
+    # exactly the selected positive-weight set (any order) with the blend's relative weights: still the simulated blend
+    same = bd.build_bundle(run, members=["ridge_everest", "mlp_everest", "lgbm_everest_bag0"], require_frozen=True)
+    assert same["p_source"] == "simulation" and same["weights"] == pytest.approx(
+        {"lgbm_everest_bag0": 0.4, "mlp_everest": 0.4, "ridge_everest": 0.2})
+    with pytest.raises(ValueError, match="override"):
+        bd.build_bundle(run, members=["mlp_everest"], p_b=0.0, p_c=0.0, require_frozen=True)
 
 
 def test_require_frozen_refuses_non_simulation_sources(tmp_path: Path, live_frame: pd.DataFrame):
@@ -225,9 +256,95 @@ def test_fold_fallback_refused_when_fold_feature_lists_differ(tmp_path: Path, li
     b = bd.build_bundle(ok)
     assert b["blob_source"]["lgbm_everest_sharpe"] == "folds"
     assert len(next(m for m in b["members"] if m["name"] == "lgbm_everest_sharpe")["blobs"]) == 2
-    bd.check_fold_fallback("m", {"feature_cols": ["a"], "feature_cols_per_fold": [["a"], ["b"]]}, 1)  # list form, fold1 unused
-    with pytest.raises(ValueError):
-        bd.check_fold_fallback("m", {"feature_cols": ["a"], "feature_cols_per_fold": [["a"], ["b"]]}, 2)
+    bd.check_fold_fallback("m", {"feature_cols": ["a"], "feature_cols_per_fold": [["a"], ["a"]]}, ["fold0", "fold1"])  # list form
+    with pytest.raises(ValueError, match="differ"):
+        bd.check_fold_fallback("m", {"feature_cols": ["a"], "feature_cols_per_fold": [["a"], ["b"]]}, ["fold0", "fold1"])
+    with pytest.raises(ValueError, match="sparse"):  # metadata for fold1 but fold1.bin was not loaded
+        bd.check_fold_fallback("m", {"feature_cols": ["a"], "feature_cols_per_fold": [["a"], ["b"]]}, ["fold0"])
+
+
+def test_fold_fallback_validates_the_exact_loaded_fold_names(tmp_path: Path, live_frame: pd.DataFrame):
+    """contract review 6: fold0.bin + fold2.bin must be checked as fold0 / fold2, never as fold0 / fold1."""
+    cols = ["a", "b", "c"]
+    spec = {"feature_cols": cols, "feature_cols_per_fold": {"fold0": cols, "fold1": cols, "fold2": ["a"], "forward": ["b"]}}
+    with pytest.raises(ValueError, match=r"fold2"):
+        bd.check_fold_fallback("m", spec, ["fold0", "fold2"])
+    # the old count-based form compared fold0 + fold1 only; it now also sees that fold2's metadata has no loaded blob
+    with pytest.raises(ValueError, match="sparse"):
+        bd.check_fold_fallback("m", spec, 2)
+    with pytest.raises(ValueError, match="no feature list"):
+        bd.check_fold_fallback("m", {"feature_cols": cols, "feature_cols_per_fold": {"fold0": cols}}, ["fold0", "fold3"])
+    with pytest.raises(ValueError, match="unknown key"):
+        bd.check_fold_fallback("m", {"feature_cols": cols, "feature_cols_per_fold": {"fold0": cols, "holdout": cols}}, ["fold0"])
+    bd.check_fold_fallback("m", {"feature_cols": cols, "feature_cols_per_fold": {"fold0": cols, "forward": ["x"]}}, ["fold0"])
+    bd.check_fold_fallback("m", {"feature_cols": cols}, ["fold0", "fold2"])  # legacy spec without per-fold metadata
+    # end to end: fold1.bin of a sharpe member renamed to fold2.bin -> the sparse set is refused at build time
+    run = tmp_path / "run_sparse"
+    make_m5_run(run, live_frame, sharpe_folds="same")
+    mdir = run / "members" / "lgbm_everest_sharpe"
+    (mdir / "fold1.bin").rename(mdir / "fold2.bin")
+    with pytest.raises(ValueError, match="refusing the fold-blob fallback"):
+        bd.build_bundle(run)
+
+
+def test_declared_full_blobs_are_enforced(tmp_path: Path, live_frame: pd.DataFrame):
+    """contract review 3: spec.full_blobs is the exact list of refits the bundle averages."""
+    run = tmp_path / "run_declared"
+    cols = make_m5_run(run, live_frame)
+    mdir = run / "members" / "mlp_everest"
+    spec_path = mdir / "spec.json"
+    spec = json.loads(spec_path.read_text())
+    declared = [{"file": "full_s1.bin", "seed": 2}, {"file": "full_s0.bin", "seed": 1}]
+    spec_path.write_text(json.dumps({**spec, "full_blobs": declared}))
+    b = bd.build_bundle(run)
+    mlp = next(m for m in b["members"] if m["name"] == "mlp_everest")
+    assert mlp["blobs"] == [(mdir / "full_s1.bin").read_bytes(), (mdir / "full_s0.bin").read_bytes()]  # declared order
+    assert b["blob_files"]["mlp_everest"] == ["full_s1.bin", "full_s0.bin"]
+    # one declared seed missing -> refused (the average would silently change)
+    (mdir / "full_s1.bin").rename(mdir / "full_s1.bak")
+    with pytest.raises(FileNotFoundError, match=r"full_s1\.bin.*missing"):
+        bd.build_bundle(run)
+    (mdir / "full_s1.bak").rename(mdir / "full_s1.bin")
+    # an undeclared extra refit (stale artifact of an interrupted retrain) -> refused
+    (mdir / "full_s2.bin").write_bytes((mdir / "full_s0.bin").read_bytes())
+    with pytest.raises(ValueError, match="not declared"):
+        bd.build_bundle(run)
+    (mdir / "full_s2.bin").unlink()
+    # every declared refit gone + fold blobs present -> refused, never an unannounced switch to the fold models
+    for f in ("full_s0.bin", "full_s1.bin"):
+        (mdir / f).unlink()
+    (mdir / "fold0.bin").write_bytes(mlp_blob(cols, hidden=(16, 8), seed=3))
+    with pytest.raises(FileNotFoundError, match="declared full refit"):
+        bd.build_bundle(run)
+    # a legacy spec (nothing declared) still falls back to the fold models
+    spec_path.write_text(json.dumps(spec))
+    assert bd.build_bundle(run)["blob_source"]["mlp_everest"] == "folds"
+    for bad in ([{"file": "fold0.bin"}], ["full_s0.bin", "full_s0.bin"], "full_s0.bin"):
+        with pytest.raises(ValueError):
+            bd.declared_full_files({"full_blobs": bad})
+    assert bd.declared_full_files({"full_blobs": []}) is None and bd.declared_full_files({}) is None
+
+
+def test_non_finite_constants_and_weights_are_refused(tmp_path: Path, live_frame: pd.DataFrame):
+    """contract review 7: NaN / inf / negative numbers never reach the closure."""
+    run = tmp_path / "run_nan"
+    make_m5_run(run, live_frame)
+    blend_path = run / "blend.json"
+    good = json.loads(blend_path.read_text())
+    for weights in ({**good["weights"], "ridge_everest": float("nan")}, {**good["weights"], "ridge_everest": float("inf")},
+                    {**good["weights"], "lgbm_ghat": -0.1}):
+        blend_path.write_text(json.dumps({**good, "weights": weights}))
+        with pytest.raises(ValueError, match="finite and >= 0"):
+            bd.build_bundle(run)
+    blend_path.write_text(json.dumps({**good, "neutralisation": {**NEU_SIM, "p_b": float("nan")}}))
+    with pytest.raises(ValueError, match="finite"):
+        bd.build_bundle(run)
+    blend_path.write_text(json.dumps(good))
+    with pytest.raises(ValueError, match="finite"):
+        bd.build_bundle(run, p_c=float("inf"))
+    with pytest.raises(ValueError, match="finite"):
+        bd.build_bundle(run, p_b=float("nan"))
+    assert bd.build_bundle(run)["p_source"] == "simulation"
 
 
 def test_assert_plain_and_bad_member_specs(tmp_path: Path, live_frame: pd.DataFrame):

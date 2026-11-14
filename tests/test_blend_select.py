@@ -156,14 +156,52 @@ def test_ladder_plan_order_and_unregistered(syn) -> None:
     assert unreg == ["cat"]  # "mlp" (absent from the run) is skipped; "cat" is in the run but not pre-registered
 
 
+def by_valid(rows: list[dict]) -> bool:
+    """Every tested arm carries a valid bootstrap (240 eras = 12 blocks) and a null-centred p-value in (0, 1]."""
+    tested = [r for r in rows if r["diff_mean"] is not None]
+    return bool(tested) and all(r["inference_valid"] and 0.0 < r["p_value"] <= 1.0 and r["n_blocks"] == 12 for r in tested)
+
+
+def test_admit_decision_fails_closed_without_inference() -> None:
+    kw = {"corr_max": 0.95, "p_pos_adopt": 0.8, "sharpe_gain": 0.05}
+    row = {"corr_with_incumbent": 0.5, "fwd_diff": 0.001, "p_pos": 1.0, "dsharpe": 0.3, "p_pos_sharpe": 1.0}
+    assert B.admit_decision(row, **kw)[0]
+    assert not B.admit_decision({**row, "inference_valid": False, "sharpe_inference_valid": False}, **kw)[0]
+    assert B.admit_decision({**row, "inference_valid": False}, **kw)[0]  # the Sharpe route alone still has evidence
+    assert not B.admit_decision({**row, "inference_valid": False, "dsharpe": 0.01}, **kw)[0]
+
+
+def test_nested_nnls_meta_fit_is_purged(syn) -> None:
+    """Review finding 5: the NNLS meta-fit rows lie >= 20 eras from the eval fold AND the forward block; the forward
+    diff of the gate uses those same weights; too few purged eras fail closed."""
+    cfg = ladder_cfg()
+    oof, fwd = syn["oof"], syn["fwd"]
+    names = ["lgbm_everest", "lgbm_aux1", "xgb_everest"]
+    ew = B.blend_weights({n: syn["specs"][n]["group"] for n in names}, 0.5, {n: syn["specs"][n]["arm"] for n in names})
+    nn = B.nested_nnls(syn["Z"][names], oof, syn["Zf"][names], fwd, ew, cfg)
+    lo_eval = int(oof.loc[oof["fold"] == oof["fold"].max(), "era"].min())
+    assert nn["fit_eras"][1] <= min(lo_eval, int(fwd["era"].min())) - B.FORWARD_GAP
+    # unpurged, the last fold-1 eras (adjacent to the eval fold) would have entered the fit
+    assert int(oof.loc[oof["fold"] == oof["fold"].max() - 1, "era"].max()) > nn["fit_eras"][1]
+    mask = B.purged_fit_mask(oof["era"], [np.array([1100, 1150])], gap=20)
+    kept = np.unique(oof["era"].to_numpy()[mask])
+    assert 1080 in kept and 1081 not in kept and 1169 not in kept and 1170 in kept
+    # a fold layout with almost no purged meta rows -> no NNLS
+    tiny = oof.loc[oof["era"] < 1000 + 100].copy()
+    tiny["fold"] = np.where(tiny["era"] < 1000 + 50, 0, 1).astype(np.int8)
+    nn2 = B.nested_nnls(syn["Z"].loc[tiny.index, names], tiny, None, None, ew, cfg)
+    assert nn2["adopt"] is False and nn2["nested_weights"] is None and "fail closed" in nn2["reason"]
+
+
 def test_admission_ladder_admits_signal_rejects_noise_and_redundant(syn) -> None:
     cfg = ladder_cfg()
     red: dict = {}
     admitted, rows = B.admission_ladder(syn["Z"], syn["oof"], syn["Zf"], syn["fwd"], syn["specs"], cfg, redundant=red)
     by = {r["arm"]: r for r in rows}
     keys = ["arm", "members", "admitted", "reason", "diff_mean", "diff_se", "p_pos", "fwd_diff", "dsharpe", "p_pos_sharpe",
-            "corr_with_incumbent", "dropped_redundant"]
+            "corr_with_incumbent", "dropped_redundant", "p_value", "n_blocks", "inference_valid", "sharpe_inference_valid"]
     assert all(list(r) == keys for r in rows)
+    assert by_valid(rows)
     assert [r["arm"] for r in rows] == ["lgbm", "aux", "xgb", "ridge", "bags", "cat"]
     assert by["lgbm"]["admitted"] and by["lgbm"]["reason"].startswith("base")
     for arm in ("aux", "xgb"):  # independent signal -> clear paired gain on CV and forward
@@ -391,7 +429,8 @@ def test_blend_run_m1_config_keeps_old_behaviour(tmp_path, syn, patched_inputs) 
     assert out["neutralisation"]["table"] == []  # no (0,0) cell when p_c_grid defaults to [p_c]
     assert set(out["regime"]) == {"0", "0.009", "0.02", "meta"} and out["regime"]["meta"]["p_c"] == 0.25
     assert set(out["regime_grid"]["0"]) == {"p_c=0.25"}
-    if out["rule"] == "nnls":  # NNLS: every reported number cross-fitted, the forward fit from forward-independent weights
+    if out["rule"] == "nnls":  # NNLS: every reported number cross-fitted, the forward fit with the gate's own weights
         assert out["chosen_is_crossfit"] and out["neutralisation"]["z_source"] == "crossfit"
-        assert "forward_weights" in out and "OOF eras <" in out["forward_weights_source"]
+        assert out["forward_weights"] == out["nnls"]["nested_weights"]
+        assert "gate weights" in out["forward_weights_source"]
     assert out["final"]["admitted_arms"] == ["lgbm_everest", "aux", "ridge_everest"]

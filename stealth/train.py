@@ -37,7 +37,9 @@ Hyperparameter VALUES stay under ``artifacts/`` (never in handoff results).
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as _dt
+import hashlib
 import json
 import logging
 import os
@@ -79,6 +81,13 @@ DEFAULT_MAX_SEARCH_TRIALS = 25
 P_B_CAP, P_C_CAP = 0.75, 0.5
 EXIT_OK, EXIT_ERROR, EXIT_GATE = 0, 1, 2
 MIN_GAP = 20  # floor on every train/test and early-stopping gap (PLAN: purge + embargo >= 20 eras)
+# Part of every run fingerprint, cell id and study name: bump whenever folds, count sources, cell semantics or the
+# artifacts a finished member must carry change, so nothing cached under the old protocol can be resumed.
+PROTOCOL_VERSION = "m2m6-fix1-audit"
+FINGERPRINT_DATA = ("train", "train_benchmark")  # files whose bytes training depends on (validation: side metrics only)
+SELECTION_NOTE = ("development figures (CV OOF, forward block, knobs, search adoption, admission ladder, NNLS, neutralisation "
+                  "grid) are SELECTION ESTIMATES: the same eras choose and score, so they are optimistic. The independent "
+                  "check is audit.json on the reserved eras, which never feeds back into any choice.")
 
 
 # --------------------------------------------------------------------------------------------------
@@ -111,6 +120,7 @@ def load_config(path: Path) -> dict:
         problems.append("cv.forward must be a mapping")
     if cvc.get("n_folds", 2) < 2:
         problems.append("cv.n_folds must be >= 2")
+    _validate_audit(cfg, problems)
     if all(k in cvc for k in ("purge", "embargo")) and int(cvc["purge"]) + int(cvc["embargo"]) < MIN_GAP:
         problems.append(f"cv.purge + cv.embargo must be >= {MIN_GAP} eras (target autocorrelation horizon)")
     if "inner_gap" in cvc and int(cvc["inner_gap"]) < MIN_GAP:
@@ -186,6 +196,47 @@ def load_config(path: Path) -> dict:
     cfg.setdefault("knobs", {})
     cfg["gates"].setdefault("max_search_trials", DEFAULT_MAX_SEARCH_TRIALS)
     return cfg
+
+
+def audit_config(cfg: dict) -> dict | None:
+    """``cv.audit`` when enabled (``{"enabled": True, "train_end": int, "test_start": int}``), else None."""
+    a = (cfg.get("cv") or {}).get("audit")
+    return a if isinstance(a, dict) and a.get("enabled") else None
+
+
+def _validate_audit(cfg: dict, problems: list[str]) -> None:
+    """``cv.audit`` (reserved partition, docs/INTERFACES.md section 22): development uses eras < train_end only."""
+    cvc = cfg.get("cv") or {}
+    if "audit" not in cvc or cvc["audit"] is None:
+        return
+    a = cvc["audit"]
+    if not isinstance(a, dict):
+        problems.append("cv.audit must be a mapping {enabled, train_end, test_start}")
+        return
+    for k in sorted(set(a) - {"enabled", "train_end", "test_start"}):
+        problems.append(f"cv.audit.{k}: unknown key")
+    if not isinstance(a.get("enabled"), bool):
+        problems.append("cv.audit.enabled must be true/false")
+    if not a.get("enabled"):
+        return
+    te, ts = a.get("train_end"), a.get("test_start")
+    if not (_num(te) and _num(ts)):
+        problems.append("cv.audit needs integer train_end and test_start")
+        return
+    if int(ts) - int(te) < MIN_GAP:
+        problems.append(f"cv.audit: test_start - train_end must be >= {MIN_GAP} (the target horizon)")
+    run = cfg.get("run") or {}
+    if run.get("min_era") is not None and int(run["min_era"]) >= int(te):
+        problems.append("cv.audit.train_end must lie above run.min_era (development needs scoring eras)")
+    if run.get("max_era") is not None and int(run["max_era"]) < int(ts):
+        problems.append("cv.audit.test_start lies above run.max_era: the audit partition would be empty")
+    fw = cvc.get("forward") or {}
+    if isinstance(fw, dict) and fw.get("enabled"):
+        if _num(fw.get("test_start")) and int(fw["test_start"]) >= int(te):
+            problems.append("cv.forward.test_start must lie below cv.audit.train_end (the forward block is development data)")
+    for v in ((cfg.get("knobs") or {}).get("era_start") or []):
+        if _num(v) and int(v) >= int(te):
+            problems.append(f"knobs.era_start {v} must lie below cv.audit.train_end")
 
 
 def arm_of(m: dict) -> str:
@@ -447,6 +498,66 @@ def write_json(path: Path, obj: Any) -> None:
 
 
 # --------------------------------------------------------------------------------------------------
+# run fingerprint (statistics review finding 2): config + data + protocol, checked BEFORE any mutation
+# --------------------------------------------------------------------------------------------------
+class FingerprintMismatch(ValueError):
+    """The run-id already holds artifacts made with another config, data set or protocol (or none recorded)."""
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def config_for_fingerprint(cfg: dict) -> dict:
+    """The config the fingerprint covers: everything except ``run.threads`` (the one edit a handoff permits) and
+    ``timing.progress_every_seconds`` (log cadence). Neither changes a single prediction."""
+    c = copy.deepcopy(cfg)
+    (c.get("run") or {}).pop("threads", None)
+    (c.get("timing") or {}).pop("progress_every_seconds", None)
+    return c
+
+
+def run_fingerprint(cfg: dict, data_dir: Path) -> dict:
+    """``run_fingerprint.json`` content (docs/INTERFACES.md section 22.A)."""
+    files = {"train": data.split_path("train", data_dir), "train_benchmark": data.benchmark_path("train", data_dir)}
+    data_sha = {k: (sha256_file(p) if p.exists() else None) for k, p in files.items() if k in FINGERPRINT_DATA}
+    config_sha = hashlib.sha256(json.dumps(config_for_fingerprint(cfg), sort_keys=True, default=str).encode()).hexdigest()
+    body = {"config": config_sha, "data": data_sha, "protocol": PROTOCOL_VERSION}
+    fp = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+    return {"schema": "stealth.fingerprint/1", "fingerprint": fp, "config_sha": config_sha, "data": data_sha,
+            "protocol": PROTOCOL_VERSION, "created_at": _now()}
+
+
+_LEGACY_MARKERS = ("metrics.json", "oof.parquet", "knobs.json", "folds.json", "folds_eras.json", "members")
+
+
+def check_fingerprint(run_dir: Path, fp: dict) -> bool:
+    """True when ``run_dir`` already carries this fingerprint (resume is safe), False for a fresh run dir.
+
+    Raises :class:`FingerprintMismatch` -- before anything is written -- when the run dir was made with a different
+    config / data / protocol, or holds artifacts from before fingerprints were recorded."""
+    path = Path(run_dir) / "run_fingerprint.json"
+    if path.exists():
+        old = json.loads(path.read_text())
+        if old.get("fingerprint") == fp["fingerprint"]:
+            return True
+        what = [k.replace("_sha", "") for k in ("config_sha", "protocol") if old.get(k) != fp.get(k)]
+        if old.get("data") != fp.get("data"):
+            what.append("data")
+        raise FingerprintMismatch(f"run-id {Path(run_dir).name} was created with a different {'/'.join(what) or 'fingerprint'}; "
+                                  "start a new run-id (nothing in the old run dir was changed)")
+    legacy = [n for n in _LEGACY_MARKERS if (Path(run_dir) / n).exists()]
+    if legacy:
+        raise FingerprintMismatch(f"run-id {Path(run_dir).name} holds artifacts without a run fingerprint ({', '.join(legacy)}); "
+                                  "start a new run-id (nothing in the old run dir was changed)")
+    return False
+
+
+# --------------------------------------------------------------------------------------------------
 # data context
 # --------------------------------------------------------------------------------------------------
 class RunData:
@@ -457,9 +568,10 @@ class RunData:
     (``matrix``) so no float32 copy of the whole split is ever kept.
     """
 
-    def __init__(self, cfg: dict, data_dir: Path) -> None:
+    def __init__(self, cfg: dict, data_dir: Path, *, fingerprint: str = "") -> None:
         run = cfg["run"]
         self.cfg = cfg
+        self.fingerprint = str(fingerprint)  # run_fingerprint.json["fingerprint"]: part of every cell id / member spec
         full = data.load_split("train", data_dir)
         self.feature_cols = data.feature_columns(full)
         self.target_cols = data.target_columns(full)
@@ -501,6 +613,20 @@ class RunData:
         self.pool_eras = np.unique(self.era.to_numpy()).astype(np.int32)
         min_era = run.get("min_era")
         self.eras = self.pool_eras[self.pool_eras >= int(min_era)] if min_era is not None else self.pool_eras
+        # reserved audit partition (docs/INTERFACES.md section 22.C): every development choice -- CV, forward, knobs,
+        # search, admission, NNLS, count sources -- AND the deployment full refits see only eras < train_end; the audit
+        # eras (>= test_start) are predicted by the finished full-refit blobs and scored once, after the blend is frozen
+        self.audit_cfg = audit_config(cfg)
+        if self.audit_cfg:
+            te, ts = int(self.audit_cfg["train_end"]), int(self.audit_cfg["test_start"])
+            self.audit_eras = self.pool_eras[self.pool_eras >= ts]
+            if self.audit_eras.size == 0:
+                raise ValueError(f"cv.audit: the data has no eras >= test_start {ts}")
+            self.eras = self.eras[self.eras < te]
+            self.full_train_eras = self.pool_eras[self.pool_eras < te]
+        else:
+            self.audit_eras = np.array([], dtype=np.int32)
+            self.full_train_eras = self.pool_eras
         self.scoring_min_era = int(self.eras.min())
         extra = self.pool_eras[self.pool_eras < self.scoring_min_era]
         c = cfg["cv"]
@@ -518,14 +644,31 @@ class RunData:
                 self.forward = cvmod.extend_train(self.forward, extra, gap=gap)
         self.min_gap = max(MIN_GAP, min(gap, int(c["inner_gap"])))
         cvmod.assert_fold_gaps(self.folds + ([self.forward] if self.forward else []), min_gap=self.min_gap)
+        if self.audit_cfg:
+            self.assert_development_only()
         self.universe: knobsmod.Universe = knobsmod.default_universe(cfg)
         self.sharpe_cols_cache: dict[tuple[str, str, str], list[str]] = {}
         bags = cfg.get("feature_bags") or {}
         self.bags = features.random_column_bags(self.feature_cols, n_bags=int(bags.get("n_bags", 4)),
                                                 fraction=float(bags.get("fraction", 0.5)), seed=int(bags.get("seed", 0)))
-        log.info("run data: %d rows, %d scoring eras (%d..%d), training pool %d eras from %d, %d folds%s", len(self.df), len(self.eras),
+        log.info("run data: %d rows, %d scoring eras (%d..%d), training pool %d eras from %d, %d folds%s%s", len(self.df), len(self.eras),
                  self.eras.min(), self.eras.max(), len(self.pool_eras), self.pool_eras.min(), len(self.folds),
-                 ", forward block" if self.forward else "")
+                 ", forward block" if self.forward else "",
+                 f", RESERVED audit {len(self.audit_eras)} eras ({int(self.audit_eras.min())}..{int(self.audit_eras.max())}; "
+                 f"development + full refits use eras < {int(self.audit_cfg['train_end'])})" if self.audit_cfg else "")
+
+    def assert_development_only(self) -> None:
+        """Raise ``AssertionError`` if any fold / forward / full-refit era reaches the reserved audit partition."""
+        te = int(self.audit_cfg["train_end"])
+        for f in self.folds + ([self.forward] if self.forward is not None else []):
+            for part in ("train_eras", "test_eras", "inner_train_eras", "inner_val_eras"):
+                arr = getattr(f, part)
+                if arr.size and int(arr.max()) >= te:
+                    raise AssertionError(f"{f.name}.{part} reaches era {int(arr.max())} >= audit train_end {te}")
+        if self.full_train_eras.size and int(self.full_train_eras.max()) >= te:
+            raise AssertionError("full-refit eras reach the audit partition")
+        if np.intersect1d(self.full_train_eras, self.audit_eras).size:
+            raise AssertionError("full-refit eras overlap the audit eras")
 
     # -- rows -------------------------------------------------------------------------------------------
     def rows(self, eras: np.ndarray) -> np.ndarray:
@@ -558,7 +701,7 @@ class RunData:
             key = (fold.name if fold else "full", target, self.universe.key())
             if key not in self.sharpe_cols_cache:
                 thr = float((self.cfg.get("sharpe_subset") or {}).get("threshold", 0.1))
-                mask = (self.rows(fold.train_eras) if fold else self.rows(self.pool_eras)) & self.train_mask()
+                mask = (self.rows(fold.train_eras) if fold else self.rows(self.full_train_eras)) & self.train_mask()
                 X = self.matrix(mask, self.feature_cols, "nan")
                 y = self.df.loc[mask, target]
                 ok = y.notna().to_numpy()
@@ -738,14 +881,15 @@ def frozen_counts(rd: RunData, es_iters: dict[str, int]) -> tuple[dict[str, int]
 
 def refit_full(rd: RunData, spec: dict, params: dict, n_iter: int | None, *, seeds: list[int], threads: int,
                prog: Progress | None = None, label: str = "") -> tuple[list[bytes], list[str]]:
-    """Refit on ALL training-pool eras under the current universe with the frozen count, once per seed; returns
-    (blobs, feature_cols). Without knobs the pool is exactly the run eras (M1 behaviour)."""
+    """Refit on the full-refit eras (``rd.full_train_eras``: the whole training pool, or only the eras before the reserved
+    audit partition when ``cv.audit`` is on) under the current universe with the frozen count, once per seed; returns
+    (blobs, feature_cols). Without knobs or audit the pool is exactly the run eras (M1 behaviour)."""
     cols = rd.resolve_features(spec["features"], None, spec["target"])
     blobs = []
     for s in seeds:
         if prog:
             prog.set(f"{label}: full refit seed={s}")
-        fm = _fit(rd, spec, params, cols, rd.pool_eras, n_iter, seed=int(s), threads=threads)
+        fm = _fit(rd, spec, params, cols, rd.full_train_eras, n_iter, seed=int(s), threads=threads)
         log.info("%s: full refit seed=%d n_iter=%s (%.1fs, %d bytes)", label, s, fm.n_iter, fm.fit_seconds, len(fm.blob))
         blobs.append(fm.blob)
     return blobs, cols
@@ -791,12 +935,31 @@ def _params_hash(params: dict) -> str:
     return hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
-def cell_hash(params: dict, universe: knobsmod.Universe) -> str:
-    """Search/knob cell identity: params AND the training universe (a resumed run never reuses another universe's cell)."""
-    return _params_hash({**params, "__universe__": universe.key()})
+def cell_hash(params: dict, universe: knobsmod.Universe, fingerprint: str = "") -> str:
+    """Search/knob cell identity: params, the training universe AND the run fingerprint (config + data + protocol), so a
+    resumed run never reuses a cell made under another universe, config, data set or fold protocol."""
+    key = {**params, "__universe__": universe.key()}
+    if fingerprint:
+        key["__run__"] = str(fingerprint)
+    return _params_hash(key)
 
 
-def _save_protocol(d: Path, res: ProtocolResult) -> None:
+def _predict_full(rd: RunData, spec: dict, blobs: list[bytes], cols: list[str], eras: np.ndarray) -> pd.Series:
+    """Equal-weight mean over ``blobs`` (the member's full refits, exactly the bytes the bundle averages) on the rows of
+    ``eras``. Used for the reserved audit partition: no label is read here."""
+    mask = rd.rows(eras)
+    X = rd.matrix(mask, cols, spec["input"])
+    pred = np.mean(np.vstack([models.predict_member((spec["family"], b), X) for b in blobs]), axis=0)
+    return pd.Series(pred.astype(np.float64), index=X.index, name="pred")
+
+
+def _write_audit_pred(path: Path, rd: RunData, pred: pd.Series) -> None:
+    df = pd.DataFrame({"era": rd.era.loc[pred.index].astype(np.int32), "pred": pred.astype(np.float64)}, index=pred.index)
+    df.index.name = "id"
+    df.to_parquet(path)
+
+
+def _save_protocol(d: Path, res: ProtocolResult, cell_id: str | None = None) -> None:
     d.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame({"pred": res.oof.astype(np.float32), "fold": res.oof_fold})
     if res.forward is not None:
@@ -810,11 +973,18 @@ def _save_protocol(d: Path, res: ProtocolResult) -> None:
     write_json(d / "result.json", {"inner_iters": res.inner_iters, "frozen_n_iter": res.frozen_n_iter, "fit_seconds": res.fit_seconds,
                                    "max_fit_seconds": res.max_fit_seconds, "feature_cols": res.feature_cols,
                                    "inner_iter_forward": res.inner_iter_forward, "frozen_n_iter_per_fold": res.frozen_n_iter_per_fold,
-                                   "frozen_n_iter_forward": res.frozen_n_iter_forward, "count_sources": res.count_sources})
+                                   "frozen_n_iter_forward": res.frozen_n_iter_forward, "count_sources": res.count_sources,
+                                   "cell_id": cell_id, "protocol": PROTOCOL_VERSION})
 
 
-def _load_protocol(d: Path) -> ProtocolResult | None:
+def _load_protocol(d: Path, cell_id: str | None = None) -> ProtocolResult | None:
+    """A cached cell, or None when absent, incomplete, from an older protocol or (``cell_id`` given) another cell."""
     if not (d / "oof.parquet").exists() or not (d / "result.json").exists():
+        return None
+    r = json.loads((d / "result.json").read_text())
+    if r.get("protocol") != PROTOCOL_VERSION or (cell_id is not None and r.get("cell_id") != cell_id):
+        log.info("cell cache %s: protocol/cell id %s/%s != %s/%s -> recomputed", d, r.get("protocol"), r.get("cell_id"),
+                 PROTOCOL_VERSION, cell_id)
         return None
     res = ProtocolResult()
     df = pd.read_parquet(d / "oof.parquet")
@@ -822,7 +992,6 @@ def _load_protocol(d: Path) -> ProtocolResult | None:
     res.oof, res.oof_fold = df.loc[cvm, "pred"].astype(np.float64), df.loc[cvm, "fold"].astype(np.int8)
     if (~cvm).any():
         res.forward = df.loc[~cvm, "pred"].astype(np.float64)
-    r = json.loads((d / "result.json").read_text())
     res.inner_iters, res.frozen_n_iter = r["inner_iters"], r["frozen_n_iter"]
     res.fit_seconds, res.max_fit_seconds, res.feature_cols = r["fit_seconds"], r["max_fit_seconds"], r["feature_cols"]
     if "frozen_n_iter_per_fold" not in r:  # cached cell from before the per-fold protocol: do not reuse it
@@ -881,21 +1050,34 @@ def member_order(cfg: dict) -> list[dict]:
 
 
 def _reusable_spec(rd: RunData, name: str, spec_path: Path, oof_path: Path, resume: bool) -> dict | None:
-    """A finished (or timing-dropped) member's spec.json when ``resume`` and its universe matches; else None (retrain)."""
+    """A finished (or timing-dropped) member's spec.json when ``resume``, its universe AND run fingerprint match and every
+    artifact it promises exists; else None (retrain). A spec left ``running`` by an interrupted (re)train is never
+    reused."""
     if not resume or not spec_path.exists():
         return None
     spec = json.loads(spec_path.read_text())
     if spec.get("universe") != rd.universe.key():
         log.info("member %s: spec.json universe %s != run universe %s -> retraining", name, spec.get("universe"), rd.universe.key())
         return None
+    if spec.get("run_fingerprint") != rd.fingerprint:
+        log.info("member %s: spec.json was written under another run fingerprint -> retraining", name)
+        return None
     if spec.get("status") == "dropped_timing":
         log.info("member %s: resumed as dropped_timing (first fit %.0fs > cap) -- the drop is kept", name,
                  float(spec.get("first_fit_seconds") or 0.0))
         return spec
-    if spec.get("status") == "done" and oof_path.exists():
-        log.info("member %s: resumed from %s", name, spec_path.parent)
-        return spec
-    return None
+    if spec.get("status") != "done" or not oof_path.exists():
+        return None
+    mdir = spec_path.parent
+    missing = [f["file"] for f in spec.get("full_blobs") or [] if not (mdir / f["file"]).exists()]
+    if not spec.get("full_blobs") or missing:
+        log.info("member %s: declared full refits missing (%s) -> retraining", name, missing or "none declared")
+        return None
+    if rd.audit_eras.size and not (spec_path.parents[2] / f"audit_{name}.parquet").exists():
+        log.info("member %s: audit predictions missing -> retraining", name)
+        return None
+    log.info("member %s: resumed from %s", name, spec_path.parent)
+    return spec
 
 
 def per_era_fit_fast(pred: pd.Series, target: pd.Series, era: pd.Series) -> pd.Series:
@@ -969,10 +1151,13 @@ def _average_results(runs: list[ProtocolResult]) -> ProtocolResult:
 def adoption_decision(paired_cv: dict, forward_gain: float | None, *, p_pos_adopt: float, adopt_gate: bool = True) -> tuple[bool, str]:
     """INTERFACES section 13: adopt the top-k average iff ``paired_cv.p_pos >= p_pos_adopt`` AND ``forward_gain >= 0``.
 
-    ``adopt_gate: false`` keeps the M1 behaviour (top-k always). Without a forward block only the CV gate applies.
+    ``adopt_gate: false`` keeps the M1 behaviour (top-k always). Without a forward block only the CV gate applies. A paired
+    result without enough bootstrap blocks (``inference_valid`` False) fails closed: the base cell is kept.
     """
     if not adopt_gate:
         return True, "adopt_gate: false (top-k average always used, M1 behaviour)"
+    if paired_cv.get("inference_valid") is False:
+        return False, f"tie: only {paired_cv.get('n_blocks')} bootstrap block(s) -> no inference -> base cell (simpler)"
     p = float(paired_cv["p_pos"])
     if p < float(p_pos_adopt):
         return False, f"tie: paired CV p_pos {p:.3f} < {p_pos_adopt} -> base cell (simpler)"
@@ -992,7 +1177,7 @@ def _knob_cell(rd: RunData, run_dir: Path, name: str, h: str) -> ProtocolResult 
     meta = json.loads(cj.read_text())
     if meta.get("member") != name or meta.get("params_hash") != h:
         return None
-    res = _load_protocol(d)
+    res = _load_protocol(d, h)
     if res is not None:
         log.info("%s: base cell reused from the knob decision (%s)", name, d.name)
     return res
@@ -1015,35 +1200,40 @@ def search_member(rd: RunData, mspec: dict, params: dict, cfg: dict, run_dir: Pa
     sdir = run_dir / "search" / name
     cache: dict[str, ProtocolResult] = {}
 
+    def h_of(p: dict) -> str:
+        return cell_hash(p, rd.universe, rd.fingerprint)
+
     def cell(p: dict, label: str) -> ProtocolResult:
-        h = cell_hash(p, rd.universe)
+        h = h_of(p)
         if h in cache:
             return cache[h]
-        res = _load_protocol(sdir / h) or _knob_cell(rd, run_dir, name, h)  # trial cache on disk = the resume unit
+        res = _load_protocol(sdir / h, h) or _knob_cell(rd, run_dir, name, h)  # trial cache on disk = the resume unit
         if res is None:
             res = run_protocol(rd, mspec, p, seed=seed, threads=threads, prog=prog, label=label, max_first_fit_seconds=cap)
-        if not (sdir / h / "result.json").exists():
-            _save_protocol(sdir / h, res)
+        if _load_protocol(sdir / h, h) is None:
+            _save_protocol(sdir / h, res, h)
         cache[h] = res
         return res
 
     def objective(c: dict) -> float:
         # a grid cell overrides the member's base params; everything not in the grid (bagging, max_bin, ...) stays
         p = {**params, **c}
-        return float(_mean_fit_series(rd, cell(p, f"{name}[{cell_hash(p, rd.universe)}]").oof).mean())
+        return float(_mean_fit_series(rd, cell(p, f"{name}[{h_of(p)}]").oof).mean())
 
     n_trials = min(int(search_cfg["n_trials"]), int(gates.get("max_search_trials", DEFAULT_MAX_SEARCH_TRIALS)))
+    # the Optuna study is namespaced by run fingerprint + universe: a changed protocol never resumes an old study
+    study = f"{name}@{rd.fingerprint[:16] or 'nofp'}-{rd.universe.key()}"
     results = searchmod.run_search(name, search_cfg["grid"], objective, n_trials=n_trials,
-                                   storage=run_dir / "optuna.db", seed=seed)
+                                   storage=run_dir / "optuna.db", seed=seed, study_name=study)
     # search/<name>.json carries the FULL params (base + cell) so params.best_of dependents inherit everything
     results = [({**params, **c}, v) for c, v in results]
     write_json(run_dir / "search" / f"{name}.json", [{"params": p, "value": v} for p, v in results])
     top = searchmod.top_k_params(results, int(search_cfg["top_k"]))
     runs = [cell(p, name) for p in top]
     topk_res = _average_results(runs)
-    base_h = cell_hash(params, rd.universe)
+    base_h = h_of(params)
     base_res = cell(params, f"{name}[base]")
-    gain = _search_gain(rd, topk_res, base_res, [cell_hash(p, rd.universe) for p in top], base_h,
+    gain = _search_gain(rd, topk_res, base_res, [h_of(p) for p in top], base_h,
                         float(gates["suspect_gain_over_baseline"]))
     d = (_mean_fit_series(rd, topk_res.oof) - _mean_fit_series(rd, base_res.oof)).dropna()
     paired = cvmod.paired_block_bootstrap(d, block=int(bs["block"]), n_boot=int(bs["n_boot"]), seed=int(bs["seed"])).as_dict()
@@ -1064,13 +1254,22 @@ def search_member(rd: RunData, mspec: dict, params: dict, cfg: dict, run_dir: Pa
     return res, params_list, frozen, gain
 
 
+def _mark_running(rd: RunData, mspec: dict, spec_path: Path, stale: list[Path]) -> None:
+    """spec.json ``status: running`` (+ fingerprint) and the member's assembled outputs removed, before any (re)fit."""
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    for p in stale:
+        p.unlink(missing_ok=True)
+    write_json(spec_path, {"name": mspec["name"], "family": mspec["family"], "status": "running", "universe": rd.universe.key(),
+                           "run_fingerprint": rd.fingerprint, "protocol": PROTOCOL_VERSION, "started_at": _now()})
+
+
 def _drop_for_timing(rd: RunData, mspec: dict, spec_path: Path, oof_path: Path, exc: TimingDrop) -> dict:
     """Write the ``dropped_timing`` spec.json (INTERFACES section 15): no oof file, excluded from assembly and blend."""
     spec_path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in [oof_path, *spec_path.parent.glob("*.bin")]:
+    for stale in [oof_path, oof_path.with_name(f"audit_{mspec['name']}.parquet"), *spec_path.parent.glob("*.bin")]:
         stale.unlink(missing_ok=True)
     spec = {**mspec, "arm": arm_of(mspec), "status": "dropped_timing", "first_fit_seconds": exc.seconds, "max_fit_seconds_cap": exc.cap,
-            "universe": rd.universe.key(), "dropped_at": _now()}
+            "universe": rd.universe.key(), "run_fingerprint": rd.fingerprint, "protocol": PROTOCOL_VERSION, "dropped_at": _now()}
     write_json(spec_path, spec)
     log.warning("member %s: CatBoost dropped (%.0fs > %.0fs cap on its first fit)", mspec["name"], exc.seconds, exc.cap)
     return spec
@@ -1087,6 +1286,7 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
     name = mspec["name"]
     mdir = run_dir / "members" / name
     spec_path, oof_path = mdir / "spec.json", run_dir / f"oof_{name}.parquet"
+    audit_path = run_dir / f"audit_{name}.parquet"
     spec = _reusable_spec(rd, name, spec_path, oof_path, resume)
     if spec is not None:
         return spec
@@ -1094,6 +1294,10 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
     seeds = [int(s) for s in (cfg.get("refit") or {}).get("seeds", [0])]
     params = _resolve_params(mspec, run_dir)
     cap = float(cfg["timing"]["catboost_max_fit_seconds"]) if mspec["family"] == "cat" else None
+    # Mark the member incomplete BEFORE any artifact is replaced (statistics review 2, contract review 3): an interrupted
+    # retrain then leaves status "running" (never reused, refused by the bundle) instead of an old "done" spec next to
+    # partially replaced blobs. The member's OOF / audit files go first so they cannot be assembled meanwhile.
+    _mark_running(rd, mspec, spec_path, [oof_path, audit_path])
     t0 = time.perf_counter()
     try:
         if cfg["search"].get(name):
@@ -1120,8 +1324,11 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
             (mdir / fname).write_bytes(b)
             full_files.append({"file": fname, "rank": rank, "seed": seeds[j], "n_iter": n_iter})
     prog.set(f"{name}: validation benchmark / core-proxy correlation")
-    side = validation_side_metrics(mspec, [(mdir / f["file"]).read_bytes() for f in full_files], full_cols, rd.missing_cols,
-                                   _data_dir(cfg), rd.core_proxy_cols)
+    full_bytes = [(mdir / f["file"]).read_bytes() for f in full_files]
+    side = validation_side_metrics(mspec, full_bytes, full_cols, rd.missing_cols, _data_dir(cfg), rd.core_proxy_cols)
+    if rd.audit_eras.size:  # the reserved eras, predicted by exactly the blobs the bundle averages; labels never read
+        prog.set(f"{name}: audit predictions (reserved eras)")
+        _write_audit_pred(audit_path, rd, _predict_full(rd, mspec, full_bytes, full_cols, rd.audit_eras))
     df = pd.DataFrame({"era": rd.era.loc[res.oof.index].astype(np.int32), "fold": res.oof_fold.loc[res.oof.index], "pred": res.oof.astype(np.float32)})
     if res.forward is not None:
         df = pd.concat([df, pd.DataFrame({"era": rd.era.loc[res.forward.index].astype(np.int32), "fold": np.int8(-1),
@@ -1136,8 +1343,11 @@ def train_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path, *, resume: 
             "max_fit_seconds": res.max_fit_seconds, "member_seconds": time.perf_counter() - t0, "full_blobs": full_files,
             "corr_with_bench_val": side["corr_with_bench_val"], "rho_c": side["rho_c"], "search_gain": search_gain,
             "search_adopted": None if search_gain is None else bool(search_gain["adopted"]),
-            "universe": rd.universe.key(), "universe_dict": rd.universe.to_dict(), "status": "done"}
-    write_json(spec_path, spec)
+            "universe": rd.universe.key(), "universe_dict": rd.universe.to_dict(), "run_fingerprint": rd.fingerprint,
+            "protocol": PROTOCOL_VERSION, "audit_file": audit_path.name if rd.audit_eras.size else None,
+            "full_train_eras": [int(rd.full_train_eras.min()), int(rd.full_train_eras.max()), int(len(rd.full_train_eras))],
+            "finished_at": _now(), "status": "done"}
+    write_json(spec_path, spec)  # LAST: "done" only once every blob, OOF and audit file is in place
     log.info("member %s done in %.0fs (frozen n_iter=%s, rho_b(val)=%s, rho_c(val)=%s)", name, spec["member_seconds"], res.frozen_n_iter,
              None if side["corr_with_bench_val"] is None else round(side["corr_with_bench_val"], 4),
              None if side["rho_c"] is None else round(side["rho_c"], 4))
@@ -1187,40 +1397,72 @@ def folds_eras_doc(rd: RunData) -> dict:
                 "inner_train_eras": [int(e) for e in f.inner_train_eras], "inner_val_eras": [int(e) for e in f.inner_val_eras],
                 "count_sources": src[f.name]}
 
+    audit = None
+    if rd.audit_eras.size:
+        audit = {"train_end": int(rd.audit_cfg["train_end"]), "test_start": int(rd.audit_cfg["test_start"]),
+                 "eras": [int(e) for e in rd.audit_eras], "file": "audit_<member>.parquet (index id; era int32; pred float64)",
+                 "note": "predict these eras with the exported full-refit blobs only; never early-stop, select or score on them"}
     return {"universe": rd.universe.to_dict(), "universe_key": rd.universe.key(), "scoring_min_era": int(rd.scoring_min_era),
+            "run_fingerprint": rd.fingerprint, "protocol": PROTOCOL_VERSION,
             "folds": [fold_doc(f) for f in rd.folds], "forward": fold_doc(rd.forward) if rd.forward is not None else None,
-            "full_train_eras": [int(e) for e in rd.pool_eras], "full_refit_count": "median over CV folds' inner best iterations",
-            "min_gap": int(rd.min_gap)}
+            "full_train_eras": [int(e) for e in rd.full_train_eras], "full_refit_count": "median over CV folds' inner best iterations",
+            "audit": audit, "min_gap": int(rd.min_gap)}
+
+
+def _blob_files(spec: dict) -> list[str]:
+    return [f["file"] if isinstance(f, dict) else str(f) for f in spec.get("full_blobs") or []]
 
 
 def _external_blobs(mdir: Path, spec: dict) -> list[bytes]:
-    files = []
-    for f in spec.get("full_blobs") or []:
-        files.append(f["file"] if isinstance(f, dict) else str(f))
+    return [(mdir / f).read_bytes() for f in _blob_files(spec)]
+
+
+def external_problem(rd: RunData, mspec: dict, spec: dict, run_dir: Path) -> str | None:
+    """Why a finished-looking external spec must NOT be loaded (statistics review 2): another run fingerprint, universe,
+    seeds or epoch cap than this run's config, undeclared / missing full refits, or missing OOF / audit predictions.
+    None when it is this run's member."""
+    name = mspec["name"]
+    if spec.get("status") != "done":
+        return f"spec status {spec.get('status')!r}"
+    if spec.get("universe") != rd.universe.key():
+        return f"spec universe {spec.get('universe')!r} != run universe {rd.universe.key()!r}"
+    if spec.get("run_fingerprint") != rd.fingerprint:
+        return "trained for another run fingerprint (config / data / protocol changed): retrain it with scripts/mlp_train.py"
+    want_seeds = [int(s) for s in mspec.get("seeds") or []]
+    if [int(s) for s in spec.get("seeds") or []] != want_seeds:
+        return f"trained with seeds {spec.get('seeds')} but the config says {want_seeds}"
+    if mspec.get("es_cap") is not None and spec.get("epochs_cap") is not None and int(spec["epochs_cap"]) != int(mspec["es_cap"]):
+        return f"trained with an epoch cap of {spec['epochs_cap']} but the config says {mspec['es_cap']} (--epochs-cap override)"
+    files = _blob_files(spec)
     if not files:
-        files = sorted(p.name for p in mdir.glob("full_s*.bin"))
-    return [(mdir / f).read_bytes() for f in files]
+        return "spec declares no full_blobs"
+    missing = [f for f in files if not (run_dir / "members" / name / f).exists()]
+    if missing:
+        return f"declared full refit(s) missing: {missing}"
+    if not (run_dir / f"oof_{name}.parquet").exists():
+        return f"oof_{name}.parquet missing"
+    if rd.audit_eras.size and not (run_dir / f"audit_{name}.parquet").exists():
+        return f"audit_{name}.parquet missing (the audit partition is on)"
+    return None
 
 
 def load_external_member(rd: RunData, mspec: dict, cfg: dict, run_dir: Path) -> tuple[dict | None, str | None]:
-    """``(spec, None)`` for a finished external member of THIS universe, else ``(None, reason)`` (it stays pending).
+    """``(spec, None)`` for a finished external member of THIS run, else ``(None, reason)`` (it stays pending).
 
-    Finished = ``members/<m>/spec.json`` with ``status: done``, ``universe == rd.universe.key()`` and ``oof_<m>.parquet``.
+    Finished = ``members/<m>/spec.json`` passing :func:`external_problem` (status done, same universe, same run
+    fingerprint, the config's seeds and epoch cap, declared full refits present, OOF + audit predictions present).
     Missing ``corr_with_bench_val`` / ``rho_c`` are computed via ``models.predict_member`` when the family module can
     load the blobs (best effort: a failure only logs a WARNING).
     """
     name = mspec["name"]
     mdir = run_dir / "members" / name
-    spec_path, oof_path = mdir / "spec.json", run_dir / f"oof_{name}.parquet"
+    spec_path = mdir / "spec.json"
     if not spec_path.exists():
         return None, "no members/<m>/spec.json yet"
     spec = json.loads(spec_path.read_text())
-    if spec.get("status") != "done":
-        return None, f"spec status {spec.get('status')!r}"
-    if spec.get("universe") != rd.universe.key():
-        return None, f"spec universe {spec.get('universe')!r} != run universe {rd.universe.key()!r}"
-    if not oof_path.exists():
-        return None, f"{oof_path.name} missing"
+    why = external_problem(rd, mspec, spec, run_dir)
+    if why is not None:
+        return None, why
     for k in ("name", "family", "target", "group", "input", "features"):
         spec.setdefault(k, mspec[k])
     spec.setdefault("arm", arm_of(mspec))
@@ -1277,6 +1519,91 @@ def assemble_oof(rd: RunData, names: list[str], run_dir: Path) -> tuple[pd.DataF
     return oof, fwd
 
 
+# --------------------------------------------------------------------------------------------------
+# reserved audit partition (docs/INTERFACES.md section 22.C)
+# --------------------------------------------------------------------------------------------------
+BASELINE_DIR = "baseline"
+
+
+def audit_baseline(rd: RunData, cfg: dict, run_dir: Path, *, prog: Progress | None = None) -> dict | None:
+    """The comparison line of the audit: ``knobs.member`` (``lgbm_everest``) at its CONFIG params under the DEFAULT
+    universe -- never searched, never knob-tuned -- with the frozen count from its own CV inner splits, refit on the
+    pre-audit eras with the refit seeds, predicting the audit eras (``audit_baseline.parquet``). Fitted here, before any
+    audit label is read; resumable (``baseline/spec.json`` status done + the run fingerprint). None without an audit."""
+    if not rd.audit_eras.size:
+        return None
+    name = knobsmod.knob_member(cfg)
+    mspec = next(m for m in cfg["members"] if m["name"] == name)
+    if mspec["family"] in EXTERNAL_FAMILIES or "best_of" in (mspec.get("params") or {}):
+        log.warning("audit baseline: %s has no explicit params (best_of / external) -> no baseline column", name)
+        return None
+    params = dict(mspec.get("params") or {})
+    u = knobsmod.default_universe(cfg)
+    cid = cell_hash(params, u, rd.fingerprint)
+    bdir = run_dir / BASELINE_DIR
+    spec_path, out_path = bdir / "spec.json", run_dir / "audit_baseline.parquet"
+    if spec_path.exists():
+        old = json.loads(spec_path.read_text())
+        if old.get("status") == "done" and old.get("cell_id") == cid and out_path.exists():
+            log.info("audit baseline: resumed (%s, universe %s)", name, u.key())
+            return old
+    seed, threads = int(cfg["run"]["seed"]), int(cfg["run"]["threads"])
+    seeds = [int(s) for s in (cfg.get("refit") or {}).get("seeds", [0])]
+    saved = rd.universe
+    rd.universe = u
+    try:
+        res = _knob_cell(rd, run_dir, name, cid) or _load_protocol(bdir / "cell", cid)
+        if res is None:
+            res = run_protocol(rd, mspec, params, seed=seed, threads=threads, prog=prog, label=f"audit baseline {name}")
+            _save_protocol(bdir / "cell", res, cid)
+        bdir.mkdir(parents=True, exist_ok=True)
+        _mark_running(rd, {"name": f"baseline__{name}", "family": mspec["family"]}, spec_path, [out_path])
+        for stale in bdir.glob("full_s*.bin"):
+            stale.unlink()
+        blobs, cols = refit_full(rd, mspec, params, res.frozen_n_iter, seeds=seeds, threads=threads, prog=prog,
+                                 label=f"audit baseline {name}")
+        files = []
+        for j, b in enumerate(blobs):
+            (bdir / f"full_s{j}.bin").write_bytes(b)
+            files.append({"file": f"full_s{j}.bin", "seed": seeds[j], "n_iter": res.frozen_n_iter})
+        _write_audit_pred(out_path, rd, _predict_full(rd, mspec, blobs, cols, rd.audit_eras))
+    finally:
+        rd.universe = saved
+    spec = {"name": name, "column": f"baseline__{name}", "family": mspec["family"], "target": mspec["target"],
+            "label": f"{name}: config params (unsearched), default universe {u.key()}, refit on eras < audit train_end",
+            "universe": u.key(), "cell_id": cid, "frozen_n_iter": res.frozen_n_iter, "inner_iters": res.inner_iters,
+            "full_blobs": files, "feature_cols": cols, "run_fingerprint": rd.fingerprint, "protocol": PROTOCOL_VERSION,
+            "finished_at": _now(), "status": "done"}
+    write_json(spec_path, spec)
+    log.info("audit baseline %s: refit (n_iter=%s, %d seeds) and audit predictions written", name, res.frozen_n_iter, len(seeds))
+    return spec
+
+
+def assemble_audit(rd: RunData, names: list[str], run_dir: Path, baseline: dict | None) -> pd.DataFrame:
+    """``audit.parquet``: index id over EVERY row of the audit eras; ``era`` int32, ``target_everest`` float32 (copied, never
+    scored here), ``m__<member>`` float64 per assembled member and ``baseline__<name>``. Refuses incomplete coverage."""
+    ids = rd.df.index[rd.rows(rd.audit_eras)]
+    out = pd.DataFrame({"era": rd.era.loc[ids].astype(np.int32),
+                        data.PRIMARY_TARGET: rd.df.loc[ids, data.PRIMARY_TARGET].astype(np.float32)}, index=ids)
+    out.index.name = "id"
+    sources = [(f"m__{n}", run_dir / f"audit_{n}.parquet") for n in names]
+    if baseline is not None:
+        sources.append((str(baseline["column"]), run_dir / "audit_baseline.parquet"))
+    for col, path in sources:
+        if not path.exists():
+            raise RuntimeError(f"audit: {path.name} missing for {col}")
+        p = pd.read_parquet(path)
+        if len(p) != len(ids) or not p.index.isin(ids).all():
+            raise RuntimeError(f"audit: {path.name} covers {len(p)} rows, expected exactly the {len(ids)} audit rows")
+        out[col] = p["pred"].reindex(ids).astype(np.float64)
+        if out[col].isna().any():
+            raise RuntimeError(f"audit: {path.name} has missing predictions")
+    out.to_parquet(run_dir / "audit.parquet")
+    log.info("audit.parquet: %d rows, %d eras (%d..%d), columns %s -- scored only by stealth.audit after the blend is frozen",
+             len(out), out["era"].nunique(), int(out["era"].min()), int(out["era"].max()), [c for c, _ in sources])
+    return out
+
+
 def knobs_summary(doc: dict) -> dict:
     """Config-name-level summary of ``knobs.json`` for metrics.json (keys, diffs, p_pos, pass; no hyperparameters)."""
     if doc.get("status") != "done":
@@ -1288,18 +1615,33 @@ def knobs_summary(doc: dict) -> dict:
             "candidates": [{k: c.get(k) for k in keep} for c in doc.get("candidates", [])]}
 
 
-def baseline_fit(cfg: dict, member_fit_means: dict[str, float]) -> tuple[float | None, str]:
+def baseline_fit(cfg: dict, member_fit_means: dict[str, float], base_cell_fits: dict[str, float] | None = None) -> tuple[float | None, str]:
     """``(baseline fit20, label)`` for the suspect flag: ``gates.baseline_fit`` (a FIXED M1 number recorded from an unsearched
-    run) when set, else the in-run :func:`baseline_member`'s OOF mean. Returns ``(None, label)`` when neither exists.
+    run on the SAME scoring layout) when set; else the in-run :func:`baseline_member`'s UNSEARCHED base cell
+    (``base_cell_fits[base]`` = its ``search_gain.base_params_fit``) when it was searched; else its OOF mean. Returns
+    ``(None, label)`` when none exists.
 
     A searched in-run baseline is itself selected on the scored folds, so the plan's "OOF FIT > M1 + 0.004 -> suspect"
-    banner can never fire against it; ``gates.baseline_fit`` is the honest reference once M1 (handoff 02) is known.
+    banner can never fire against it; the unsearched base cell (or a fixed M1 number) is the honest reference.
     """
     bf = (cfg.get("gates") or {}).get("baseline_fit")
     if bf is not None:
         return float(bf), f"gates.baseline_fit={float(bf):.4f}"
     base = baseline_member(cfg)
+    cell = (base_cell_fits or {}).get(base)
+    if cell is not None:
+        return float(cell), f"{base} base cell (unsearched params, in-run)"
     return member_fit_means.get(base), base
+
+
+def base_cell_fits(members: dict[str, dict]) -> dict[str, float]:
+    """``{member: search_gain.base_params_fit}`` for every searched member of a metrics.json ``members`` block."""
+    out = {}
+    for n, m in (members or {}).items():
+        sg = (m or {}).get("search_gain") if isinstance(m, dict) else None
+        if isinstance(sg, dict) and sg.get("base_params_fit") is not None:
+            out[n] = float(sg["base_params_fit"])
+    return out
 
 
 def baseline_member(cfg: dict) -> str:
@@ -1355,7 +1697,7 @@ def member_metrics(cfg: dict, oof: pd.DataFrame, fwd: pd.DataFrame | None, specs
                              f"(forward gain {sg['forward_gain']:+.4f} < 0) -> treat the search as a tie")
     base = baseline_member(cfg)
     margin = float(gates["suspect_gain_over_baseline"])
-    bmean, blabel = baseline_fit(cfg, {n: m["fit"]["mean"] for n, m in out.items()})
+    bmean, blabel = baseline_fit(cfg, {n: m["fit"]["mean"] for n, m in out.items()}, base_cell_fits(out))
     paired: dict[str, dict] = {}
     if bmean is not None:
         for n in out:
@@ -1374,31 +1716,47 @@ def member_metrics(cfg: dict, oof: pd.DataFrame, fwd: pd.DataFrame | None, specs
 # run
 # --------------------------------------------------------------------------------------------------
 def train_run(cfg: dict, run_id: str, *, resume: bool = False, config_path: Path | None = None,
-              artifacts: Path = ARTIFACTS) -> tuple[dict, int]:
-    """Train every member of ``cfg`` into ``artifacts/<run_id>``; returns (metrics dict, exit code)."""
+              artifacts: Path = ARTIFACTS, skip_external: bool = False, require_external: bool = False) -> tuple[dict, int]:
+    """Train every member of ``cfg`` into ``artifacts/<run_id>``; returns (metrics dict, exit code).
+
+    The run fingerprint (config + data + protocol) is checked FIRST: a run-id created with anything else is refused with
+    exit 1 before ``config.yaml`` / ``metrics.json`` or any artifact is touched. ``skip_external`` never loads a
+    ``family: mlp`` member (it is recorded as ``skipped_external``); ``require_external`` turns an external member that
+    cannot be loaded into an error instead of ``pending_external`` (pipeline retrain after a finished MLP)."""
     run_dir = Path(artifacts) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     fh = setup_logging(run_dir)
     started = _now()
     t0 = time.perf_counter()
     mpath = run_dir / "metrics.json"
+    data_dir = _data_dir(cfg)
+    try:
+        fp = run_fingerprint(cfg, data_dir)
+        check_fingerprint(run_dir, fp)
+    except (FingerprintMismatch, OSError) as exc:
+        log.error("train refused before touching %s: %s", run_dir, exc)
+        logging.getLogger("stealth").removeHandler(fh)
+        fh.close()
+        return {"run_id": run_id, "config_name": cfg.get("name"), "status": "failed", "started_at": started, "finished_at": _now(),
+                "notes": [f"error: {exc}"], "members": {}, "leak_check": None}, EXIT_ERROR
     result: dict = {"run_id": run_id, "config_name": cfg["name"], "git_sha": git_sha(), "status": "partial", "started_at": started,
                     "finished_at": None, "host": host_info(), "timings": {"total_s": None, "per_member_fit_s": {}}, "members": {},
-                    "blend": {}, "paired": {}, "leak_check": "pass", "notes": []}
+                    "blend": {}, "paired": {}, "leak_check": "pass", "notes": [], "run_fingerprint": fp["fingerprint"],
+                    "protocol": PROTOCOL_VERSION, "external_members": {}}
     code = EXIT_OK
     try:
+        if not (run_dir / "run_fingerprint.json").exists():
+            write_json(run_dir / "run_fingerprint.json", fp)
         if config_path is not None:
             shutil.copyfile(config_path, run_dir / "config.yaml")
         else:
             (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
         write_json(mpath, result)
-        data_dir = Path(cfg["run"]["data_dir"])
-        if not data_dir.is_absolute():
-            data_dir = REPO_ROOT / data_dir
-        log.info("run %s: config %s, resume=%s, data_dir=%s", run_id, cfg["name"], resume, data_dir)
+        log.info("run %s: config %s, resume=%s, skip_external=%s, require_external=%s, data_dir=%s, fingerprint %s", run_id,
+                 cfg["name"], resume, skip_external, require_external, data_dir, fp["fingerprint"][:16])
         with Progress(float(cfg["timing"]["progress_every_seconds"])) as prog:
             prog.set("loading data")
-            rd = RunData(cfg, data_dir)
+            rd = RunData(cfg, data_dir, fingerprint=fp["fingerprint"])
             write_json(run_dir / "folds.json", rd.folds_summary())
             write_json(run_dir / "features.json", {"feature_cols": rd.feature_cols, "missing_cols": rd.missing_cols,
                                                    "core_proxy_cols": rd.core_proxy_cols, "surrogate": rd.surrogate.to_dict()})
@@ -1408,6 +1766,10 @@ def train_run(cfg: dict, run_id: str, *, resume: bool = False, config_path: Path
             write_json(run_dir / "folds_eras.json", folds_eras_doc(rd))
             result["universe"] = {"key": universe.key(), **universe.to_dict()}
             result["knobs"] = knobs_summary(knobs_doc)
+            baseline = None
+            if rd.audit_eras.size:
+                prog.set("audit baseline (unsearched, default universe)")
+                baseline = audit_baseline(rd, cfg, run_dir, prog=prog)
             specs: dict[str, dict] = {}
             dropped: list[dict] = []
             run_notes: list[str] = []
@@ -1415,13 +1777,22 @@ def train_run(cfg: dict, run_id: str, *, resume: bool = False, config_path: Path
             for i, m in enumerate(order):
                 prog.set(f"member {i + 1}/{len(order)} {m['name']}")
                 if m["family"] in EXTERNAL_FAMILIES:
+                    if skip_external:
+                        log.info("external member %s: not loaded (--skip-external)", m["name"])
+                        result["external_members"][m["name"]] = "skipped_external"
+                        dropped.append({"member": m["name"], "status": "skipped_external", "reason": "--skip-external"})
+                        continue
                     spec, why = load_external_member(rd, m, cfg, run_dir)
                     if spec is None:
+                        if require_external:
+                            raise RuntimeError(f"--require-external: external member {m['name']} cannot be loaded ({why})")
                         msg = f"external member {m['name']} pending: run scripts/mlp_train.py --run-id {run_id} ({why})"
                         log.warning("%s", msg)
                         run_notes.append(msg)
+                        result["external_members"][m["name"]] = "pending"
                         dropped.append({"member": m["name"], "status": "pending_external", "reason": why})
                         continue
+                    result["external_members"][m["name"]] = "loaded"
                 else:
                     spec = train_member(rd, m, cfg, run_dir, resume=resume, prog=prog)
                 if spec.get("status") == "dropped_timing":
@@ -1436,14 +1807,23 @@ def train_run(cfg: dict, run_id: str, *, resume: bool = False, config_path: Path
             result["dropped"] = dropped
             prog.set("assembling OOF + metrics")
             oof, fwd = assemble_oof(rd, list(specs), run_dir)
+            if rd.audit_eras.size:
+                assemble_audit(rd, list(specs), run_dir, baseline)
+                result["audit"] = {"enabled": True, "train_end": int(rd.audit_cfg["train_end"]),
+                                   "test_start": int(rd.audit_cfg["test_start"]), "n_eras": int(len(rd.audit_eras)),
+                                   "eras": [int(rd.audit_eras.min()), int(rd.audit_eras.max())], "file": "audit.parquet",
+                                   "baseline": None if baseline is None else baseline["column"],
+                                   "note": "predictions of the reserved eras; scored only by stealth.audit after blend"}
+            elif (run_dir / "audit.parquet").exists():
+                (run_dir / "audit.parquet").unlink()
             members_m, paired, leak, notes = member_metrics(cfg, oof, fwd, specs)
-            notes = run_notes + notes
+            notes = run_notes + notes + [SELECTION_NOTE]
         result.update({"members": members_m, "paired": paired, "leak_check": leak, "notes": notes,
                        "frozen_n_iter": {n: s.get("frozen_n_iter") for n, s in specs.items()},
                        "frozen_n_iter_per_fold": {n: s.get("frozen_n_iter_per_fold") for n, s in specs.items()},
                        "frozen_n_iter_forward": {n: s.get("frozen_n_iter_forward") for n, s in specs.items()},
-                       "baseline": {"label": baseline_fit(cfg, {n: m["fit"]["mean"] for n, m in members_m.items()})[1],
-                                    "fit": baseline_fit(cfg, {n: m["fit"]["mean"] for n, m in members_m.items()})[0]},
+                       "baseline": dict(zip(("fit", "label"), baseline_fit(cfg, {n: m["fit"]["mean"] for n, m in members_m.items()},
+                                                                           base_cell_fits(members_m)))),
                        "folds": rd.folds_summary(), "n_rows_oof": int(len(oof)), "n_eras_oof": int(oof["era"].nunique())})
         result["status"] = "ok" if leak == "pass" else "failed"
         code = EXIT_OK if leak == "pass" else EXIT_GATE
@@ -1476,13 +1856,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true", help="skip members whose artifacts exist")
     parser.add_argument("--refit", action="store_true", help="accepted for compatibility; full refits are always written")
     parser.add_argument("--artifacts", type=Path, default=ARTIFACTS)
+    ext = parser.add_mutually_exclusive_group()
+    ext.add_argument("--skip-external", action="store_true",
+                     help="never load family: mlp members (assemble OOF/forward/audit without them)")
+    ext.add_argument("--require-external", action="store_true",
+                     help="an external member that cannot be loaded (missing / stale) is an error, not 'pending'")
     args = parser.parse_args(argv)
     try:
         cfg = load_config(args.config)
     except (ValueError, OSError) as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    _, code = train_run(cfg, args.run_id, resume=args.resume, config_path=args.config, artifacts=args.artifacts)
+    _, code = train_run(cfg, args.run_id, resume=args.resume, config_path=args.config, artifacts=args.artifacts,
+                        skip_external=args.skip_external, require_external=args.require_external)
     return code
 
 

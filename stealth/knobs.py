@@ -9,10 +9,15 @@ mask and weights. ``stealth.metrics`` / ``stealth.train`` are imported inside :f
   touched, so every comparison between universes is paired on identical eras.
 * candidates = the default plus ONE knob changed at a time (no factorial), in config order.
 * decision: ``knobs.member`` at its BASE params under every candidate; per alternative the forward-block paired block
-  bootstrap of per-era fit20 (alternative minus default); Holm step-down at ``alpha_total`` on ``1 - p_pos_fwd``; an
-  alternative passes iff Holm passes AND the forward diff is ``>= 0`` AND the mean per-era diff over the CV folds whose
-  test blocks lie ``>= 20`` eras from the forward test block is ``>= 0`` (independent confirmation). At most one winner
-  per dimension (largest forward diff); the combination is reported, never re-tested.
+  bootstrap of per-era fit20 (alternative minus default); Holm step-down at ``alpha_total`` on the null-centred
+  one-sided bootstrap ``p_value_fwd`` (``p_pos_fwd`` is kept as a descriptive stability statistic); an alternative
+  passes iff the bootstrap has enough blocks (``inference_valid``) AND Holm passes AND the forward diff is ``>= 0``
+  AND the mean per-era diff over the CV folds whose test blocks lie ``>= 20`` eras from the forward test block is
+  ``>= 0``. That CV check excludes overlapping TEST eras only: its models still train on the forward labels, so it is
+  a consistency check, not independent confirmation. Every number here is a development (selection) estimate; the
+  independent check is the reserved audit (``stealth.audit``), which never feeds back. At most one winner per
+  dimension (largest forward diff); the combination is reported, never re-tested. Holm is applied under unverified
+  time-series assumptions: no exact family-wise guarantee is claimed.
 * ``knobs.json`` is written once per run-id; a config whose candidates differ raises ``ValueError``.
 """
 from __future__ import annotations
@@ -168,37 +173,52 @@ def equivalent(u: Universe, default: Universe, era: np.ndarray, era_n_rows: np.n
     return bool(np.array_equal(fu[m], fd[m]))
 
 
-def holm_decide(rows: list[dict], alpha: float) -> list[dict]:
-    """Holm step-down over the alternative rows (``is_default`` False) on ``1 - p_pos_fwd``; mutates and returns ``rows``.
+def _p_value(r: dict) -> float:
+    """The Holm input of a candidate row: ``p_value_fwd`` (null-centred, finite-draw corrected); a row without inference
+    (too few bootstrap blocks) gets 1.0 so it can never pass. A legacy row without ``p_value_fwd`` falls back to
+    ``1 - p_pos_fwd`` (reading old knobs.json files only; a new decision always records ``p_value_fwd``)."""
+    if r.get("inference_valid_fwd") is False:
+        return 1.0
+    if r.get("p_value_fwd") is not None:
+        return float(r["p_value_fwd"])
+    return 1.0 - float(r["p_pos_fwd"])
 
-    Sorted by ``1 - p_pos_fwd`` (ties: config order); rank ``j`` (1-based) of ``m`` passes Holm iff
-    ``1 - p_pos_fwd <= alpha / (m - j + 1)`` and every earlier rank passed (stop at the first failure). ``pass`` =
-    Holm AND ``diff_fwd >= 0`` AND ``diff_cv_indep >= 0`` (None -> no independent confirmation -> fail).
+
+def holm_decide(rows: list[dict], alpha: float) -> list[dict]:
+    """Holm step-down over the alternative rows (``is_default`` False) on :func:`_p_value`; mutates and returns ``rows``.
+
+    Sorted by ``p_value_fwd`` (ties: config order); rank ``j`` (1-based) of ``m`` passes Holm iff
+    ``p_value_fwd <= alpha / (m - j + 1)`` and every earlier rank passed (stop at the first failure). ``pass`` =
+    ``inference_valid_fwd`` AND Holm AND ``diff_fwd >= 0`` AND ``diff_cv_indep >= 0`` (None -> fail).
     """
     alts = [(i, r) for i, r in enumerate(rows) if not r.get("is_default")]
     m = len(alts)
-    order = sorted(alts, key=lambda ir: (1.0 - float(ir[1]["p_pos_fwd"]), ir[0]))
+    order = sorted(alts, key=lambda ir: (_p_value(ir[1]), ir[0]))
     stopped = False
     for j, (_, r) in enumerate(order, start=1):
         thr = float(alpha) / (m - j + 1)
-        holm_ok = (not stopped) and (1.0 - float(r["p_pos_fwd"]) <= thr + 1e-12)
+        pv = _p_value(r)
+        valid = r.get("inference_valid_fwd") is not False
+        holm_ok = (not stopped) and valid and (pv <= thr + 1e-12)
         stopped = stopped or not holm_ok
         cv_ok = r.get("diff_cv_indep") is not None and float(r["diff_cv_indep"]) >= 0.0
         fwd_ok = float(r["diff_fwd"]) >= 0.0
-        r.update({"holm_rank": j, "holm_threshold": thr, "holm_pass": bool(holm_ok), "cv_indep_ok": bool(cv_ok),
+        r.update({"holm_rank": j, "holm_threshold": thr, "holm_p": pv, "holm_pass": bool(holm_ok), "cv_indep_ok": bool(cv_ok),
                   "pass": bool(holm_ok and cv_ok and fwd_ok)})
         if r["pass"]:
-            r["reason"] = "Holm pass + forward diff >= 0 + independent CV folds confirm"
+            r["reason"] = "Holm pass + forward diff >= 0 + non-overlapping CV folds agree (selection estimate)"
+        elif not valid:
+            r["reason"] = f"too few bootstrap blocks on the forward block (n_blocks {r.get('n_blocks_fwd')}): no inference"
         elif not holm_ok:
-            r["reason"] = f"Holm: 1-p_pos {1.0 - float(r['p_pos_fwd']):.3f} > {thr:.3f}" + (" (step-down stopped)" if 1.0 - float(r["p_pos_fwd"]) <= thr else "")
+            r["reason"] = f"Holm: p_value {pv:.3f} > {thr:.3f}" + (" (step-down stopped)" if pv <= thr else "")
         elif not fwd_ok:
             r["reason"] = "forward diff < 0"
         else:
-            r["reason"] = "independent CV folds do not confirm (diff_cv_indep < 0 or unavailable)"
+            r["reason"] = "non-overlapping CV folds disagree (diff_cv_indep < 0 or unavailable)"
     for r in rows:
         if r.get("is_default"):
-            r.update({"holm_rank": None, "holm_threshold": None, "holm_pass": None, "cv_indep_ok": None, "pass": None,
-                      "reason": "default"})
+            r.update({"holm_rank": None, "holm_threshold": None, "holm_p": None, "holm_pass": None, "cv_indep_ok": None,
+                      "pass": None, "reason": "default"})
     return rows
 
 
@@ -282,7 +302,8 @@ def _compare(rd: Any, cfg: dict, cands: list[Universe], default: Universe, resul
         rows.append({"key": u.key(), **u.to_dict(), "dimension": dimension_of(u, default), "is_default": is_def,
                      "equivalent_to_default": (not is_def) and r is base,
                      "fit_cv": float(f_cv.mean()), "fit_fwd": float(f_fwd.mean()), "diff_fwd": float(pr.diff_mean),
-                     "diff_se_fwd": float(pr.diff_se), "p_pos_fwd": float(pr.p_pos),
+                     "diff_se_fwd": float(pr.diff_se), "p_pos_fwd": float(pr.p_pos), "p_value_fwd": float(pr.p_value),
+                     "n_blocks_fwd": int(pr.n_blocks), "inference_valid_fwd": bool(pr.inference_valid),
                      "diff_cv_indep": float(d_ind.mean()) if len(d_ind) else None, "n_eras_cv_indep": int(len(d_ind))})
     return rows, [f.name for f in indep]
 
@@ -327,14 +348,15 @@ def select_universe(rd: Any, cfg: dict, run_dir: Path, *, prog: Any = None) -> t
                 continue
             d = Path(run_dir) / "knobs" / key
             rd.universe = u
-            res = trainmod._load_protocol(d)
+            cid = trainmod.cell_hash(params, u, getattr(rd, "fingerprint", ""))
+            res = trainmod._load_protocol(d, cid)
             if res is None:
                 if prog is not None:
                     prog.set(f"knobs {i + 1}/{len(cands)} {key}")
                 res = trainmod.run_protocol(rd, mspec, params, seed=seed, threads=threads, prog=prog, label=f"knobs[{key}]")
-                trainmod._save_protocol(d, res)
+                trainmod._save_protocol(d, res, cid)
                 trainmod.write_json(d / "cell.json", {"member": member, "universe": u.to_dict(), "key": key,
-                                                      "params_hash": trainmod.cell_hash(params, u)})
+                                                      "params_hash": cid})
             results[key] = res
     finally:
         rd.universe = saved

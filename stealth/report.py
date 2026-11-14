@@ -22,14 +22,27 @@ p_source), ``final``, ``dropped`` (timing / pending external / redundant / not a
 reports the CHOSEN blend (cross-fitted when NNLS was adopted). When metrics.json has no ``blend_vs_<baseline>``
 paired row (M1 runs), it is recomputed from ``oof.parquet`` with the blend.json weights and labelled as such.
 
+Fix-pass additions (docs/INTERFACES.md section 22): the ``status`` is decided by evidence, never by one module's own
+status field: ``pipeline.json`` (a running / interrupted / failed pipeline is never ``ok``; the failing step's
+scrubbed log tail and the attempts' per-step seconds are reported, so the first train's time survives a retrain),
+``metrics.json`` status + leak check, and -- for every step the pipeline reports as ok -- the files behind it: the
+manifest and its byte-bound ``pkl_check`` record (``passed`` AND ``sha256`` == the manifest's == the pickle on disk),
+the diagnostics FILE's ``.meta.json`` (coverage, built from the bundled pickle; built, NOT uploaded) and
+``audit.json``. A required item that failed makes the status ``failed``; one that is missing makes it ``incomplete``.
+Sections ``pipeline``, ``evidence``, ``packaging``, ``diag_file``, ``audit`` (reserved eras, frozen model; technical
+completion is reported apart from ``audit_win``) appear when present; development figures are labelled
+:data:`SELECTION_LABEL`. Without ``pipeline.json`` (handoffs 00-03) the evidence is informational only.
+
 Then ``git add handoffs/results && git commit -m "results: NN <slug>" && git push``. On push failure it prints
 ``PUSH FAILED — results are saved locally in handoffs/results/; ask the human to run git push`` and exits 1
 (the files are already written). ``--no-git`` skips commit+push (sandbox testing); ``--no-push`` commits only.
 
 Rules honoured here: config NAMES only (hyperparameter values stay in ``artifacts/``); the reporter never reads
 ``members/*/spec.json`` or ``config.yaml`` beyond its ``name``; every text that goes into a results file passes
-through :func:`scrub` (API keys / tokens / tokenised remote URLs are redacted); git output is scrubbed before it
-is printed. Works when ``metrics.json`` is missing (status ``failed``).
+through :func:`scrub` (API keys / tokens / tokenised remote URLs / presigned-URL queries and signatures are
+redacted) and every captured log tail through :func:`scrub_params` (hyperparameter name = value pairs dropped); git
+output is scrubbed before it is printed. Local absolute paths (the pipeline's pkl path) are reduced to file names.
+Works when ``metrics.json`` is missing (status ``failed``).
 """
 from __future__ import annotations
 
@@ -68,8 +81,26 @@ _SECRET_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"https://[^/\s]*@github\.com"),
     re.compile(r"https://[^/\s]*:[^/\s]*@[^/\s]+"),
+    # bare signature / credential parameters of presigned storage URLs (S3 / GCS), wherever they appear
+    re.compile(r"(?i)\b(X-(?:Amz|Goog)-(?:Signature|Credential|Security-Token))=[^\s&\"'<>]+"),
 ]
+#: a URL query is redacted as a whole when it carries any signing / credential key (presigned download / upload URLs)
+_URL_QUERY = re.compile(r"(https?://[^\s?#\"'<>]+)\?([^\s\"'<>]*)")
+_SIGNED_QUERY_KEY = re.compile(r"(?i)(?:^|[&;])(?:x-amz-[a-z-]+|x-goog-[a-z-]+|signature|sig|token|expires|credential|"
+                               r"awsaccesskeyid|security-token|policy|key-pair-id)=")
+#: hyperparameter NAME = VALUE pairs that a captured log line may carry (search / trainer logs): name and value are both
+#: dropped from every log tail that reaches a results file (hyperparameter values stay in artifacts/, PLAN C3)
+_HP_NAMES = ("num_leaves", "learning_rate", "min_data_in_leaf", "feature_fraction", "lambda_l1", "lambda_l2",
+             "bagging_fraction", "bagging_freq", "max_bin", "max_depth", "min_child_weight", "subsample",
+             "colsample_bytree", "reg_lambda", "reg_alpha", "depth", "l2_leaf_reg", "iterations", "border_count", "alpha",
+             "hidden", "dropout", "aux_weight", "lr", "weight_decay", "batch_size", "patience", "params", "parameters")
+_HP_RE = re.compile(r"(?<![A-Za-z0-9_])['\"]?(?:%s)['\"]?\s*[:=]\s*(?:\{[^}]*\}|\[[^\]]*\]|\([^)]*\)|'[^']*'|\"[^\"]*\"|"
+                    r"[^\s,;}{)]+)" % "|".join(_HP_NAMES))
 _MEAN_PREFERRED = 0.009  # live-record benchmark FIT mean used for the headline regime row
+SELECTION_LABEL = "selection estimates (reused for selection; optimistic)"
+AUDIT_LABEL = "reserved audit eras: the frozen model scored once after selection; informational, never fed back"
+PIPELINE_REQUIRED_STEPS = ("bundle", "pkl_check", "diag", "audit")  # steps whose files must back a pipeline 'ok'
+_TAIL_LINES = 40
 
 
 class GitError(RuntimeError):
@@ -83,11 +114,30 @@ class GitError(RuntimeError):
 # --------------------------------------------------------------------------------------------- helpers
 
 
+def _scrub_query(m: re.Match[str]) -> str:
+    return f"{m.group(1)}?[REDACTED]" if _SIGNED_QUERY_KEY.search(m.group(2)) else m.group(0)
+
+
 def scrub(text: str) -> str:
-    """Redact anything that looks like a credential or a tokenised URL. Idempotent."""
+    """Redact anything that looks like a credential, a tokenised URL or a presigned URL's query. Idempotent."""
+    text = _URL_QUERY.sub(_scrub_query, text)
     for pat in _SECRET_PATTERNS:
         text = pat.sub("[REDACTED]", text)
     return text
+
+
+def scrub_params(text: str) -> str:
+    """Drop ``<hyperparameter name> = <value>`` pairs from captured log text (e.g. a trainer's 'hidden=[256, 64]')."""
+    return _HP_RE.sub("[hyperparameter]", text)
+
+
+_HOME_RE = re.compile(r"/(?:home|Users)/[^/\s'\"]+/")
+
+
+def _clean_log_line(line: str) -> str:
+    """A captured log line as it may appear in a public results file: credentials and presigned queries redacted,
+    hyperparameter values dropped, home directories shortened to ``~/`` (no local user names)."""
+    return _HOME_RE.sub("~/", scrub_params(scrub(line)))
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -118,7 +168,7 @@ def log_tail(run_log: Path, n: int = 60) -> list[str]:
     if not run_log.exists():
         return []
     lines = run_log.read_text(encoding="utf-8", errors="replace").splitlines()
-    return [scrub(line) for line in lines[-n:]]
+    return [_clean_log_line(line) for line in lines[-n:]]
 
 
 def extract_traceback(run_log: Path) -> str | None:
@@ -129,7 +179,7 @@ def extract_traceback(run_log: Path) -> str | None:
     idx = text.rfind("Traceback (most recent call last)")
     if idx < 0:
         return None
-    return scrub(text[idx:].strip()[-6000:])
+    return scrub_params(scrub(text[idx:].strip()[-6000:]))
 
 
 def handoff_slug(handoff: str, handoffs_dir: Path = HANDOFFS, fallback: str | None = None) -> str:
@@ -220,7 +270,7 @@ def _headline_regime(blend: dict[str, Any] | None) -> dict[str, Any] | None:
 # reasons. Hyperparameter values never get here (search/<m>.json and spec.json are never read).
 
 _SUMMARY_KEYS = ("mean", "se_block", "std", "sharpe", "pct_pos", "frac_roll20_neg", "ci90", "n_eras")
-_PAIRED_KEYS = ("diff_mean", "diff_se", "p_pos", "ci90", "n_eras")
+_PAIRED_KEYS = ("diff_mean", "diff_se", "p_pos", "ci90", "n_eras", "p_value", "n_blocks", "inference_valid")
 _KNOB_KEYS = ("key", "dimension", "fit_cv", "fit_fwd", "diff_fwd", "diff_se_fwd", "p_pos_fwd", "diff_cv_indep", "holm_rank",
               "holm_threshold", "pass", "reason", "equivalent_to_default")
 _SEARCH_KEYS = ("n_trials", "topk_fit", "base_params_fit", "gain", "margin", "suspect", "topk_forward_fit",
@@ -483,6 +533,269 @@ def blend_vs_baseline(run_dir: Path, blend: dict[str, Any] | None, metrics: dict
         return None
 
 
+# --------------------------------------------------------------------------------------------- evidence
+# What a results file may claim is decided by the artifacts, never by one module's own status field: the driver's
+# pipeline.json (attempts / steps / exit codes / seconds), the manifest's byte-bound pkl_check record, the diagnostics
+# file's meta sidecar and the audit's audit.json. Every helper copies an allow-list of keys.
+
+_STEP_KEYS = ("name", "status", "exit_code", "seconds", "started_at", "finished_at", "note")
+_AUDIT_SUMMARY_KEYS = _SUMMARY_KEYS
+_AUDIT_SHARPE_KEYS = ("dsharpe", "se", "p_pos", "ci90", "n_eras", "sharpe_a", "sharpe_b", "n_blocks", "inference_valid")
+_AUDIT_SEGMENT_KEYS = ("eras", "n_eras", "blend_fit", "baseline_fit", "diff")
+_AUDIT_SENS_KEYS = ("block", "se_block", "p_pos", "p_value", "ci90", "n_blocks", "inference_valid")
+_PKL_CHECK_KEYS = ("passed", "status", "at", "sha256", "python", "eras", "seconds_per_era_max", "isolation", "checker_libs_ok")
+
+
+def _read_tail(path: Path, n: int = _TAIL_LINES) -> list[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [_clean_log_line(line) for line in lines[-n:]]
+
+
+def _latest_step_status(pipe: dict[str, Any] | None, name: str) -> str | None:
+    """Status of the most recent run of ``name`` over every attempt (None when it never ran)."""
+    out = None
+    for att in (pipe or {}).get("attempts") or []:
+        for s in att.get("steps") or []:
+            if isinstance(s, dict) and s.get("name") == name:
+                out = s.get("status")
+    return out
+
+
+def pipeline_doc(run_dir: Path) -> dict[str, Any] | None:
+    """``artifacts/<run>/pipeline.json`` (written by scripts/run_pipeline.sh): status, attempts, per-step seconds of
+    EVERY attempt (so the first attempt's train time survives a retrain), the failing step with its scrubbed log tail,
+    and the MLP step's tail when it was skipped. None when the run was not driven by the pipeline."""
+    pj = _load_json(run_dir / "pipeline.json")
+    if not isinstance(pj, dict):
+        return None
+    attempts: list[dict[str, Any]] = []
+    step_seconds: dict[str, list[dict[str, Any]]] = {}
+    for i, att in enumerate(pj.get("attempts") or [], 1):
+        if not isinstance(att, dict):
+            continue
+        steps = [_pick(s, _STEP_KEYS) for s in att.get("steps") or [] if isinstance(s, dict)]
+        for s in steps:
+            step_seconds.setdefault(str(s.get("name")), []).append(
+                {"attempt": i, "seconds": s.get("seconds"), "status": s.get("status")})
+        attempts.append({"attempt": i, "from_step": att.get("from_step"), "status": att.get("status"),
+                         "exit_code": att.get("exit_code"), "seconds": att.get("seconds"), "started_at": att.get("started_at"),
+                         "finished_at": att.get("finished_at"), "failed_step": att.get("failed_step"), "mlp": att.get("mlp"),
+                         "note": att.get("note"), "steps": steps, "report_step": _pick(att.get("report_step"), _STEP_KEYS)})
+    status = pj.get("status")
+    doc: dict[str, Any] = {
+        "status": status, "exit_code": pj.get("exit_code"), "failed_step": pj.get("failed_step"),
+        "last_step": pj.get("last_step"), "finished_at": pj.get("finished_at"), "mlp": pj.get("mlp"),
+        "pkl": Path(str(pj["pkl"])).name if pj.get("pkl") else None,  # never an absolute local path
+        "n_attempts": len(attempts), "attempts": attempts, "step_seconds": step_seconds,
+        "total_seconds": sum(int(a["seconds"]) for a in attempts if isinstance(a.get("seconds"), (int, float))),
+        "report_step": _pick(pj.get("report_step"), _STEP_KEYS), "failing_step": None, "mlp_step": None,
+    }
+    last = (pj.get("attempts") or [{}])[-1] if pj.get("attempts") else {}
+    for s in reversed(last.get("steps") or []):
+        if isinstance(s, dict) and s.get("status") in ("failed", "interrupted", "running"):
+            doc["failing_step"] = {**(_pick(s, _STEP_KEYS) or {}), "log_tail": _read_tail(run_dir / str(s.get("log_file") or ""))
+                                   if s.get("log_file") else []}
+            break
+    for s in reversed(last.get("steps") or []):
+        if isinstance(s, dict) and s.get("name") == "mlp" and s.get("status") != "ok":
+            doc["mlp_step"] = {**(_pick(s, _STEP_KEYS) or {}),
+                               "log_tail": _read_tail(run_dir / str(s.get("log_file") or ""), 20) if s.get("log_file") else []}
+            break
+    return doc
+
+
+def _sha256(path: Path) -> str | None:
+    import hashlib
+
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _manifest_path(run_id: str, models_dir: Path, pipe: dict[str, Any] | None) -> Path:
+    pkl_name = (pipe or {}).get("pkl") or f"{run_id}.pkl"
+    stem = Path(str(pkl_name)).stem
+    return models_dir / f"{stem}.manifest.json"
+
+
+def packaging_doc(run_id: str, models_dir: Path, pipe: dict[str, Any] | None) -> dict[str, Any]:
+    """The bundle's manifest and its byte-bound pkl_check record: does the record name the bytes the manifest
+    describes, and (when the pickle is on disk) are those the file's bytes? Never the pickle itself."""
+    mpath = _manifest_path(run_id, models_dir, pipe)
+    man = _load_json(mpath)
+    if not isinstance(man, dict):
+        return {"present": False, "manifest": mpath.name}
+    rec = man.get("pkl_check") if isinstance(man.get("pkl_check"), dict) else {}
+    pkl_path = mpath.with_name(str(man.get("pkl") or f"{mpath.name[: -len('.manifest.json')]}.pkl"))
+    file_sha = _sha256(pkl_path) if pkl_path.exists() else None
+    size = man.get("size_bytes")
+    return {
+        "present": True, "manifest": mpath.name, "pkl": pkl_path.name, "sha256": man.get("sha256"),
+        "file_present": pkl_path.exists(), "file_sha_matches": None if file_sha is None else file_sha == man.get("sha256"),
+        "size_mb": round(float(size) / 1e6, 3) if isinstance(size, (int, float)) else None, "python": man.get("python"),
+        "run_id": man.get("run_id"), "p_b": man.get("p_b"), "p_c": man.get("p_c"), "p_source": man.get("p_source"),
+        "blend_rule": man.get("blend_rule"), "admitted_arms": man.get("admitted_arms"),
+        "members": [str(m.get("name")) for m in man.get("members") or [] if isinstance(m, dict)],
+        "pkl_check": {**(_pick(rec, _PKL_CHECK_KEYS) or {}), "problems": list(rec.get("problems") or [])[:5]} if rec else None,
+        "pkl_check_bound": bool(rec.get("sha256")) and rec.get("sha256") == man.get("sha256") if rec else False,
+    }
+
+
+def diag_file_doc(run_id: str, artifacts_dir: Path, packaging: dict[str, Any] | None) -> dict[str, Any]:
+    """``artifacts/diag/<run>_validation.parquet.meta.json``: coverage of the diagnostics FILE (built, not uploaded) and
+    whether it was built from the bundled pickle. An ``.upload.json`` next to it would mean an upload happened."""
+    out_file = artifacts_dir / "diag" / f"{run_id}_validation.parquet"
+    meta = _load_json(out_file.with_name(out_file.name + ".meta.json"))
+    upload = _load_json(out_file.with_name(out_file.name + ".upload.json"))
+    if not isinstance(meta, dict):
+        return {"present": False, "file": out_file.name, "upload_recorded": isinstance(upload, dict)}
+    full = (meta.get("eras_limit") is None and meta.get("rows") == meta.get("validation_rows")
+            and meta.get("eras") == meta.get("validation_eras"))
+    pk_sha = (packaging or {}).get("sha256")
+    return {"present": True, "file": out_file.name, "file_present": out_file.exists(), "rows": meta.get("rows"),
+            "eras": meta.get("eras"), "validation_rows": meta.get("validation_rows"), "validation_eras": meta.get("validation_eras"),
+            "eras_limit": meta.get("eras_limit"), "with_bench": meta.get("with_bench"), "bench_used_eras": meta.get("bench_used_eras"),
+            "full_coverage": bool(full), "built_from_bundled_pkl": None if not pk_sha else meta.get("pkl_sha256") == pk_sha,
+            "upload_recorded": isinstance(upload, dict), "created_at": meta.get("created_at")}
+
+
+def audit_doc(run_dir: Path) -> dict[str, Any] | None:
+    """``audit.json`` (stealth.audit, after the frozen blend selection): the reserved-era comparison of the bundled blend
+    with the unsearched baseline. Informational: it never fed back into any choice."""
+    a = _load_json(run_dir / "audit.json")
+    if not isinstance(a, dict):
+        return {"present": False, "label": AUDIT_LABEL} if (run_dir / "audit.parquet").exists() else None
+    drawdown = a.get("drawdown") if isinstance(a.get("drawdown"), dict) else {}
+    stab = a.get("stability") if isinstance(a.get("stability"), dict) else {}
+    scen = a.get("scenario") if isinstance(a.get("scenario"), dict) else None
+    return {
+        "present": True, "label": AUDIT_LABEL, "schema": a.get("schema"), "status": a.get("status"),
+        "created_at": a.get("created_at"),
+        "partition": _pick(a.get("partition"), ("train_end", "test_start", "eras", "n_eras", "n_rows")),
+        "frozen": _pick(a.get("frozen"), ("rule", "members", "admitted_arms", "p_b", "p_c", "p_source")),
+        "blend": _summary(a.get("blend")),
+        "baseline": {**(_summary(a.get("baseline")) or {}), **(_pick(a.get("baseline"), ("name", "label")) or {})}
+        if isinstance(a.get("baseline"), dict) else None,
+        "paired_vs_baseline": _pick(a.get("paired_vs_baseline"), _PAIRED_KEYS),
+        "sharpe_vs_baseline": _pick(a.get("sharpe_vs_baseline"), _AUDIT_SHARPE_KEYS),
+        "drawdown": {"label": drawdown.get("label"),
+                     "blend": _pick(drawdown.get("blend"), ("max_drawdown", "longest_underwater_eras")),
+                     "baseline": _pick(drawdown.get("baseline"), ("max_drawdown", "longest_underwater_eras"))} if drawdown else None,
+        "stability": {"segments": [_pick(s, _AUDIT_SEGMENT_KEYS) for s in stab.get("segments") or [] if isinstance(s, dict)],
+                      **(_pick(stab, ("n_segments", "blend_positive_segments", "diff_positive_segments")) or {})} if stab else None,
+        "bootstrap_sensitivity": [_pick(r, _AUDIT_SENS_KEYS) for r in a.get("bootstrap_sensitivity") or [] if isinstance(r, dict)],
+        "scenario": None if scen is None else {**(_pick(scen, ("note", "p_b", "p_c", "bench_fit_mean")) or {}),
+                                               "mix": _pick(scen.get("mix"), ("fit", "unq", "inov", "score", "score_sharpe"))},
+        "verdict": _pick(a.get("verdict"), ("technical", "audit_win", "text")),
+        "notes": [str(n) for n in a.get("notes") or []][:20],
+    }
+
+
+def evidence_items(pipe: dict[str, Any] | None, packaging: dict[str, Any], diag_file: dict[str, Any],
+                   audit: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """``[{item, status: ok|fail|missing|warn|info, required, detail}]``. Without pipeline.json (handoffs 00-03 style)
+    everything is informational; with it, the files behind every step the pipeline reports as ok are REQUIRED."""
+    items: list[dict[str, Any]] = []
+
+    def add(item: str, status: str, detail: str, required: bool) -> None:
+        items.append({"item": item, "status": status, "required": required, "detail": detail})
+
+    req = {s: pipe is not None and _latest_step_status(pipe, s) == "ok" for s in PIPELINE_REQUIRED_STEPS}
+    need_bundle = req["bundle"] or req["pkl_check"]
+    if not packaging.get("present"):
+        if need_bundle:
+            add("manifest", "missing", f"{packaging.get('manifest')} not found although bundle/pkl_check reported ok", True)
+    else:
+        sm = packaging.get("file_sha_matches")
+        add("manifest", "ok" if sm is not False else "fail",
+            f"{packaging['manifest']} sha256 {str(packaging.get('sha256'))[:12]}"
+            + ("" if sm is None else " = pickle bytes" if sm else " != the pickle on disk"), need_bundle)
+        rec = packaging.get("pkl_check") or {}
+        if not rec:
+            add("pkl_check", "missing" if req["pkl_check"] else "info", "manifest has no pkl_check record", req["pkl_check"])
+        elif not rec.get("passed"):
+            add("pkl_check", "fail", f"pkl_check {rec.get('status') or 'FAILED'}: " + "; ".join(rec.get("problems") or [])[:300],
+                req["pkl_check"])
+        elif not packaging.get("pkl_check_bound"):
+            add("pkl_check", "fail", "the pass record does not name these bytes (sha256 absent or different): re-run pkl_check",
+                req["pkl_check"])
+        else:
+            add("pkl_check", "ok", f"PASSED on these bytes (python {rec.get('python')}, {rec.get('eras')} eras, slowest call "
+                f"{_fmt(rec.get('seconds_per_era_max'), 2)} s)", req["pkl_check"])
+    if not diag_file.get("present"):
+        if req["diag"]:
+            add("diag_file", "missing", f"{diag_file.get('file')}.meta.json not found although diag reported ok", True)
+    else:
+        built = diag_file.get("built_from_bundled_pkl")
+        if built is False:
+            add("diag_file", "fail", "built from a different pickle than the manifest's", req["diag"])
+        elif not diag_file.get("full_coverage"):
+            add("diag_file", "warn", f"partial coverage: rows {diag_file.get('rows')}/{diag_file.get('validation_rows')}, eras "
+                f"{diag_file.get('eras')}/{diag_file.get('validation_eras')} (--eras smoke)", req["diag"])
+        else:
+            add("diag_file", "ok", f"{diag_file.get('rows')} rows / {diag_file.get('eras')} eras, full coverage; built, not uploaded",
+                req["diag"])
+        if diag_file.get("upload_recorded"):
+            add("diag_upload", "info", "an .upload.json exists next to the file: an upload was recorded for it", False)
+    if audit is None:
+        if req["audit"]:
+            add("audit", "missing", "audit.json not found although the audit step reported ok", True)
+    elif not audit.get("present"):
+        add("audit", "missing", "audit.parquet exists but audit.json does not (run stealth.audit)", req["audit"] or pipe is not None)
+    elif audit.get("status") != "ok":
+        add("audit", "fail", f"audit.json status {audit.get('status')}", True)
+    else:
+        add("audit", "ok", "frozen model scored on the reserved eras (informational)", req["audit"])
+    if pipe is not None:
+        add("mlp", "info", str(pipe.get("mlp") or "not recorded"), False)
+    return items
+
+
+def overall_status(metrics: dict[str, Any] | None, pipe: dict[str, Any] | None,
+                   evidence: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    """``(status, reasons)``: the pipeline's own outcome first (a running / interrupted / failed pipeline is never 'ok'),
+    then train/blend metrics status + leak check, then every REQUIRED evidence item (fail -> failed, missing ->
+    incomplete)."""
+    reasons: list[str] = []
+    if pipe is not None and pipe.get("status") != "ok":
+        ps = str(pipe.get("status") or "unknown")
+        step = pipe.get("failed_step") or pipe.get("last_step") or "?"
+        if ps == "running":
+            reasons.append(f"pipeline.json says running at step {step}: still running, or the driver was killed before it "
+                           "recorded an end (re-run the same pipeline command)")
+        else:
+            reasons.append(f"pipeline {ps} at step {step} (exit {pipe.get('exit_code')})")
+        status = ps if ps in ("failed", "interrupted", "running") else "failed"
+    else:
+        status = "ok"
+    m_status = (metrics or {}).get("status") or "failed"
+    if metrics is None:
+        reasons.append("metrics.json missing")
+    elif m_status != "ok":
+        reasons.append(f"metrics.json status {m_status}")
+    if str((metrics or {}).get("leak_check") or "").upper() == "FAIL":
+        reasons.append("leak check FAILED")
+        m_status = "failed"
+    if status == "ok" and m_status != "ok":
+        status = m_status
+    fails = [e for e in evidence if e["required"] and e["status"] == "fail"]
+    missing = [e for e in evidence if e["required"] and e["status"] == "missing"]
+    reasons += [f"{e['item']}: {e['detail']}" for e in fails + missing]
+    if status == "ok" and fails:
+        status = "failed"
+    elif status == "ok" and missing:
+        status = "incomplete"
+    return status, reasons
+
+
 # --------------------------------------------------------------------------------------------- JSON
 
 
@@ -493,8 +806,16 @@ def build_metrics_json(run_id: str, handoff: str, slug: str, run_dir: Path, metr
 
     ``diag_json`` adds the validation-diagnostics panel (``stealth.diag`` upload record); ``recompute`` allows the
     ``blend_vs_<baseline>`` paired row to be recomputed from ``oof.parquet`` when metrics.json lacks it.
+    ``status`` comes from :func:`overall_status` (pipeline.json, metrics.json + leak check, the files behind every step
+    the pipeline reports as ok), never from one module's own status field alone.
     """
-    status = (metrics or {}).get("status") or "failed"
+    models_dir = models_dir if models_dir is not None else run_dir.parent.parent / "models"
+    pipe = pipeline_doc(run_dir)
+    packaging = packaging_doc(run_id, models_dir, pipe)
+    diag_file = diag_file_doc(run_id, run_dir.parent, packaging)
+    audit = audit_doc(run_dir)
+    evidence = evidence_items(pipe, packaging, diag_file, audit)
+    status, status_reasons = overall_status(metrics, pipe, evidence)
     host_src = (metrics or {}).get("host") or {}
     host = {
         "os": host_src.get("os", env.get("os")),
@@ -580,6 +901,8 @@ def build_metrics_json(run_id: str, handoff: str, slug: str, run_dir: Path, metr
         "started_at": (metrics or {}).get("started_at"),
         "finished_at": (metrics or {}).get("finished_at"),
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "status_reasons": status_reasons,
+        "labels": {"development": SELECTION_LABEL, "audit": AUDIT_LABEL},
         "host": host,
         "timings": (metrics or {}).get("timings") or {},
         "configs": configs,
@@ -605,6 +928,12 @@ def build_metrics_json(run_id: str, handoff: str, slug: str, run_dir: Path, metr
         "final": final_doc(blend),
         "dropped": dropped_doc(metrics, blend),
         "diag": _diag_with_reference(diag_json, configs, models_dir) if diag_json is not None else None,
+        "pipeline": pipe,
+        "packaging": packaging,
+        "diag_file": diag_file,
+        "audit": audit,
+        "evidence": evidence,
+        "external_members": (metrics or {}).get("external_members"),
         "leak_check": (metrics or {}).get("leak_check"),
         "notes": list((metrics or {}).get("notes") or []),
         "artifacts_present": sorted(p.name for p in run_dir.iterdir()) if run_dir.exists() else [],
@@ -746,7 +1075,9 @@ def _paired_section(paired: dict[str, Any]) -> str:
         ci = v.get("ci90")
         ci_s = f"[{_fmt(ci[0])}, {_fmt(ci[1])}]" if isinstance(ci, (list, tuple)) and len(ci) == 2 else "-"
         verdict = "-"
-        if isinstance(v.get("p_pos"), (int, float)):
+        if v.get("inference_valid") is False:
+            verdict = "no valid inference (fewer than 2 bootstrap blocks)"
+        elif isinstance(v.get("p_pos"), (int, float)):
             verdict = "adopt A (p_pos >= 0.8)" if v["p_pos"] >= 0.8 else "tie — keep the simpler one"
         rows.append([key, _fmt(v.get("diff_mean")), _fmt(v.get("diff_se")), _fmt(v.get("p_pos"), 2), ci_s,
                      _fmt(v.get("n_eras")), verdict])
@@ -793,10 +1124,17 @@ def _regime_section(blend: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def _timings_section(timings: dict[str, Any]) -> str:
+def _timings_section(timings: dict[str, Any], pipe: dict[str, Any] | None = None) -> str:
+    """metrics.json timings (the LAST train invocation: a retrain overwrites them) plus, when the pipeline drove the
+    run, every attempt's per-step seconds from pipeline.json (the first train's time survives a retrain)."""
     rows = []
+    for name, runs in ((pipe or {}).get("step_seconds") or {}).items():
+        for r in runs:
+            rows.append([f"pipeline step {name} (attempt {r.get('attempt')}, {r.get('status')})", _fmt(r.get("seconds"))])
+    if pipe:
+        rows.append(["pipeline total (all attempts)", _fmt(pipe.get("total_seconds"))])
     if "total_s" in timings:
-        rows.append(["TOTAL", _fmt(timings.get("total_s"), 1)])
+        rows.append(["TOTAL (metrics.json, last train invocation)" if pipe else "TOTAL", _fmt(timings.get("total_s"), 1)])
     for name, s in sorted((timings.get("per_member_fit_s") or {}).items()):
         rows.append([name, _fmt(s, 1)])
     for key, val in timings.items():
@@ -805,10 +1143,131 @@ def _timings_section(timings: dict[str, Any]) -> str:
     return _md_table(["step / member", "wall seconds"], rows)
 
 
+def _pipeline_section(pd_: dict[str, Any]) -> str:
+    head = (f"pipeline status **{pd_.get('status')}** (exit {_fmt(pd_.get('exit_code'))}"
+            + (f", failed step {pd_['failed_step']}" if pd_.get("failed_step") else "")
+            + f"); {pd_.get('n_attempts')} attempt(s), {_fmt(pd_.get('total_seconds'))} s of driver wall time; "
+            f"mlp: {pd_.get('mlp') or '-'}")
+    rows = []
+    for a in pd_.get("attempts") or []:
+        rows.append([str(a.get("attempt")), "(attempt)", _fmt(a.get("from_step")), _fmt(a.get("status")), _fmt(a.get("exit_code")),
+                     _fmt(a.get("seconds")), scrub(str(a.get("note") or "-"))])
+        for st in a.get("steps") or []:
+            rows.append([str(a.get("attempt")), _fmt(st.get("name")), "", _fmt(st.get("status")), _fmt(st.get("exit_code")),
+                         _fmt(st.get("seconds")), scrub(str(st.get("note") or "-"))])
+        rep = a.get("report_step")
+        if rep:
+            rows.append([str(a.get("attempt")), "report", "", _fmt(rep.get("status")), _fmt(rep.get("exit_code")),
+                         _fmt(rep.get("seconds")), "report step (recorded apart from the pipeline result)"])
+    out = head + "\n\n" + _md_table(["attempt", "step", "from", "status", "exit", "seconds", "note"], rows)
+    for key, title in (("failing_step", "failing step"), ("mlp_step", "mlp step (optional member)")):
+        st = pd_.get(key)
+        if st and st.get("log_tail"):
+            out += (f"\n\n{title} `{st.get('name')}` ({st.get('status')}, exit {st.get('exit_code')}), last "
+                    f"{len(st['log_tail'])} log lines:\n\n```text\n" + "\n".join(st["log_tail"]) + "\n```")
+    return out
+
+
+def _evidence_section(items: list[dict[str, Any]]) -> str:
+    return _md_table(["item", "status", "required", "detail"],
+                     [[e["item"], e["status"].upper() if e["status"] in ("fail", "missing") else e["status"],
+                       _fmt(e.get("required")), scrub(str(e.get("detail") or "-"))] for e in items])
+
+
+def _packaging_section(p: dict[str, Any]) -> str:
+    if not p.get("present"):
+        return f"_no manifest ({p.get('manifest')})_"
+    rec = p.get("pkl_check") or {}
+    iso = rec.get("isolation") if isinstance(rec.get("isolation"), dict) else {}
+    rows = [["manifest", _fmt(p.get("manifest"))], ["pickle file present / bytes = manifest sha256",
+             f"{_fmt(p.get('file_present'))} / {_fmt(p.get('file_sha_matches'))}"],
+            ["size MB", _fmt(p.get("size_mb"), 2)], ["built under python", _fmt(p.get("python"))],
+            ["members", ", ".join(p.get("members") or []) or "-"], ["admitted arms", ", ".join(p.get("admitted_arms") or []) or "-"],
+            ["rule / p_b / p_c (p_source)", f"{_fmt(p.get('blend_rule'))} / {_fmt(p.get('p_b'), 2)} / {_fmt(p.get('p_c'), 2)} "
+             f"({p.get('p_source')})"],
+            ["pkl_check", "PASSED" if rec.get("passed") else ("not run" if not rec else f"FAILED ({rec.get('status') or '-'})")],
+            ["pkl_check bound to these bytes", _fmt(p.get("pkl_check_bound"))],
+            ["checker python / eras / slowest call s", f"{_fmt(rec.get('python'))} / {_fmt(rec.get('eras'))} / "
+             f"{_fmt(rec.get('seconds_per_era_max'), 2)}"],
+            ["isolation (stealth / torch importable)", f"{_fmt(iso.get('stealth_importable'))} / {_fmt(iso.get('torch_importable'))}"]]
+    rows += [["pkl_check problem", scrub(str(x))] for x in rec.get("problems") or []]
+    return _md_table(["item", "value"], rows)
+
+
+def _diag_file_section(d: dict[str, Any]) -> str:
+    if not d.get("present"):
+        return f"_not built ({d.get('file')} has no .meta.json)_"
+    rows = [["file", _fmt(d.get("file"))], ["rows", f"{d.get('rows')} / {d.get('validation_rows')}"],
+            ["eras", f"{d.get('eras')} / {d.get('validation_eras')}"], ["full coverage", _fmt(d.get("full_coverage"))],
+            ["benchmark used (eras)", _fmt(d.get("bench_used_eras"))], ["built from the bundled pickle",
+             _fmt(d.get("built_from_bundled_pkl"))], ["upload recorded", _fmt(d.get("upload_recorded"))]]
+    return _md_table(["item", "value"], rows) + "\n\n- built only; uploading it is a separate USER MUST APPROVE handoff"
+
+
+def _audit_section(a: dict[str, Any]) -> str:
+    if not a.get("present"):
+        return "_audit.parquet exists but audit.json is missing: run `python -m stealth.audit --run-id <run>`_"
+    part = a.get("partition") or {}
+    fr = a.get("frozen") or {}
+    b, base = a.get("blend") or {}, a.get("baseline") or {}
+    pv = a.get("paired_vs_baseline") or {}
+    sh = a.get("sharpe_vs_baseline") or {}
+    dd = a.get("drawdown") or {}
+    ver = a.get("verdict") or {}
+    eras = part.get("eras")
+    head = [f"{AUDIT_LABEL}.",
+            f"status **{a.get('status')}**; eras {eras[0] if isinstance(eras, list) and eras else '-'}.."
+            f"{eras[-1] if isinstance(eras, list) and eras else '-'} ({_fmt(part.get('n_eras'))} eras, {_fmt(part.get('n_rows'))} rows; "
+            f"development used eras < {_fmt(part.get('train_end'))})",
+            f"frozen blend: rule {_fmt(fr.get('rule'))}, arms {', '.join(fr.get('admitted_arms') or []) or '-'}, "
+            f"p_b {_fmt(fr.get('p_b'), 2)}, p_c {_fmt(fr.get('p_c'), 2)} ({fr.get('p_source')}); unneutralised FIT below",
+            f"verdict: technical **{ver.get('technical') or '-'}**; audit win **{_fmt(ver.get('audit_win'))}** — "
+            f"{scrub(str(ver.get('text') or '-'))}"]
+    rows = [["fit20 mean (se)", f"{_fmt(b.get('mean'))} ({_fmt(b.get('fit_se'))})",
+             f"{_fmt(base.get('mean'))} ({_fmt(base.get('fit_se'))})"],
+            ["sharpe", _fmt(b.get("sharpe"), 3), _fmt(base.get("sharpe"), 3)],
+            ["pct_pos", _fmt(b.get("pct_pos"), 2), _fmt(base.get("pct_pos"), 2)],
+            ["frac 20-era means < 0", _fmt(b.get("frac_roll20_neg"), 2), _fmt(base.get("frac_roll20_neg"), 2)],
+            ["max drawdown (cum. fit20)", _fmt((dd.get("blend") or {}).get("max_drawdown")),
+             _fmt((dd.get("baseline") or {}).get("max_drawdown"))],
+            ["longest underwater (eras)", _fmt((dd.get("blend") or {}).get("longest_underwater_eras")),
+             _fmt((dd.get("baseline") or {}).get("longest_underwater_eras"))]]
+    out = "\n".join(f"- {h}" for h in head) + "\n\n" + _md_table(["metric", "blend", f"baseline {base.get('name') or ''}"], rows)
+    out += (f"\n\n- paired fit20 blend - baseline: diff {_fmt(pv.get('diff_mean'))} (se {_fmt(pv.get('diff_se'))}), "
+            f"p_pos {_fmt(pv.get('p_pos'), 2)}, p_value {_fmt(pv.get('p_value'), 3)}, {_fmt(pv.get('n_blocks'))} blocks, "
+            f"inference valid {_fmt(pv.get('inference_valid'))}"
+            f"\n- paired Sharpe: dsharpe {_fmt(sh.get('dsharpe'), 3)} (se {_fmt(sh.get('se'), 3)}), p_pos {_fmt(sh.get('p_pos'), 2)}"
+            f"\n- drawdown: {scrub(str(dd.get('label') or 'cumulative per-era fit20 drawdown (NOT platform P&L)'))}")
+    stab = a.get("stability") or {}
+    if stab.get("segments"):
+        out += "\n\nchronological stability:\n\n" + _md_table(
+            ["eras", "n_eras", "blend fit", "baseline fit", "diff"],
+            [[f"{s['eras'][0]}..{s['eras'][-1]}" if isinstance(s.get("eras"), list) and s["eras"] else "-", _fmt(s.get("n_eras")),
+              _fmt(s.get("blend_fit")), _fmt(s.get("baseline_fit")), _fmt(s.get("diff"))] for s in stab["segments"]])
+    if a.get("bootstrap_sensitivity"):
+        out += "\n\nbootstrap block-length sensitivity (paired diff):\n\n" + _md_table(
+            ["block", "se", "p_pos", "p_value", "ci90", "blocks", "valid"],
+            [[_fmt(r.get("block")), _fmt(r.get("se_block")), _fmt(r.get("p_pos"), 2), _fmt(r.get("p_value"), 3),
+              f"[{_fmt(r['ci90'][0])}, {_fmt(r['ci90'][1])}]" if isinstance(r.get("ci90"), list) and len(r["ci90"]) == 2 else "-",
+              _fmt(r.get("n_blocks")), _fmt(r.get("inference_valid"))] for r in a["bootstrap_sensitivity"]])
+    sc = a.get("scenario")
+    if sc and sc.get("mix"):
+        m = sc["mix"]
+        out += (f"\n\n- scenario (frozen constants only, simulated benchmark mean {_fmt(sc.get('bench_fit_mean'), 3)}): mix fit "
+                f"{_fmt(m.get('fit'))}, unq {_fmt(m.get('unq'))}, inov {_fmt(m.get('inov'))}, score {_fmt(m.get('score'))}, "
+                f"score Sharpe {_fmt(m.get('score_sharpe'), 3)}; {scrub(str(sc.get('note') or ''))}")
+    for n in a.get("notes") or []:
+        out += f"\n- note: {scrub(str(n))}"
+    return out
+
+
 def render_markdown(doc: dict[str, Any], env: dict[str, Any], blend: dict[str, Any] | None, tail: list[str],
                     traceback_text: str | None) -> str:
     status = doc["status"]
-    banner = "" if status == "ok" else f"\n> **STATUS: {status.upper()}** — see the traceback / log tail below.\n"
+    banner = "" if status == "ok" else f"\n> **STATUS: {status.upper()}** — see the reasons and the traceback / log tail below.\n"
+    for r in doc.get("status_reasons") or []:
+        if status != "ok":
+            banner += f"> - {scrub(str(r))}\n"
     suspects = [c["name"] for c in doc["configs"] if c.get("suspect")]
     if suspects:
         banner += ("\n> **SUSPECT — winner's curse or leak:** " + ", ".join(suspects)
@@ -826,7 +1285,8 @@ def render_markdown(doc: dict[str, Any], env: dict[str, Any], blend: dict[str, A
         "",
         _env_section(doc, env),
         "",
-        "## Metrics (per-era fit20 on OOF; fit_se = 20-era block-bootstrap SE; config names only, no hyperparameter values)",
+        f"## Metrics — development {SELECTION_LABEL} (per-era fit20 on OOF; fit_se = 20-era block-bootstrap SE; config names "
+        "only, no hyperparameter values)",
         "",
         _metrics_section(doc),
         "",
@@ -841,13 +1301,21 @@ def render_markdown(doc: dict[str, Any], env: dict[str, Any], blend: dict[str, A
     ]
     # M2-M6 sections appear only when the run produced them (an M1 run's report keeps its old shape)
     optional = [
+        ("Pipeline (scripts/run_pipeline.sh attempts and steps)", doc.get("pipeline"), _pipeline_section),
+        ("Evidence behind the status", doc.get("evidence"), _evidence_section),
+        ("Audit — reserved eras, frozen model (informational; never fed back)", doc.get("audit"), _audit_section),
+        ("Packaging evidence (manifest + pkl_check)", doc.get("packaging") if (doc.get("packaging") or {}).get("present") else None,
+         _packaging_section),
+        ("Diagnostics FILE (built, NOT uploaded)", doc.get("diag_file") if (doc.get("diag_file") or {}).get("present") else None,
+         _diag_file_section),
         ("Validation diagnostics (upload; informational only, never tunes p)", doc.get("diag"), _diag_section),
-        ("Training universe (knobs, decided once on the forward block)", doc.get("knobs"), _knobs_section),
-        ("Search adoption (top-k vs base cell; paired gate)", doc.get("search"), _search_section),
-        ("Admission ladder (pre-registered order, one look per arm)", doc.get("ladder"), _ladder_section),
+        (f"Training universe (knobs, decided once on the development forward block) — {SELECTION_LABEL}", doc.get("knobs"),
+         _knobs_section),
+        (f"Search adoption (top-k vs base cell; paired gate) — {SELECTION_LABEL}", doc.get("search"), _search_section),
+        (f"Admission ladder (pre-registered order, one look per arm) — {SELECTION_LABEL}", doc.get("ladder"), _ladder_section),
         ("Member correlation", doc.get("member_corr_max_pair"), _corr_section),
         ("Neutralisation constants (simulation, staking-aware)", doc.get("neutralisation"), _neutral_section),
-        ("Final selection", doc.get("final"), _final_section),
+        (f"Final selection — {SELECTION_LABEL}", doc.get("final"), _final_section),
         ("Dropped members", doc.get("dropped"), _dropped_section),
     ]
     for title, value, fn in optional:
@@ -856,7 +1324,7 @@ def render_markdown(doc: dict[str, Any], env: dict[str, Any], blend: dict[str, A
     parts += [
         "## Wall times",
         "",
-        _timings_section(doc.get("timings") or {}),
+        _timings_section(doc.get("timings") or {}, doc.get("pipeline")),
         "",
         "## Notes",
         "",
@@ -894,7 +1362,7 @@ def write_results(run_id: str, handoff: str, *, repo: Path = REPO, artifacts_dir
     doc = build_metrics_json(run_id, handoff, slug, run_dir, metrics, blend, env, diag_json=diag_json,
                              recompute=recompute, models_dir=repo / "models")
     tail = log_tail(run_dir / "run.log", log_lines)
-    tb = extract_traceback(run_dir / "run.log") if doc["status"] != "ok" else None
+    tb = extract_traceback(run_dir / "run.log") if doc["status"] not in ("ok", "incomplete") else None
     results_dir.mkdir(parents=True, exist_ok=True)
     md = results_dir / f"{handoff}-results.md"
     js = results_dir / f"{handoff}-metrics.json"

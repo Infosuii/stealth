@@ -11,16 +11,20 @@ run:
   time_decay: false      # default of the time_decay knob
   data_dir: data
 cv:
-  n_folds: 5
+  n_folds: 5             # development CV on scoring eras 2800..5924 only (the audit eras below are reserved)
   purge: 20
   embargo: 20
   inner_frac: 0.15
   inner_gap: 20
-  forward:
+  forward:               # DEVELOPMENT forward block (selection data: knobs, search adoption, ladder, NNLS gate)
     enabled: true
-    train_end: 5925
+    train_end: 5300
+    test_start: 5340
+  audit:                 # RESERVED from this run's selection: no fit, early stop or choice sees eras >= train_end.
+    enabled: true        # Full refits stop at 5924 too; the frozen blend is scored once on 5945..6524 (stealth.audit).
+    train_end: 5925      # Handoff 02 has already looked at these eras: independent of THIS run's selection only.
     test_start: 5945
-knobs:                   # TRAINING rows only; decided ONCE on the forward block (Holm, alpha 0.2) -> knobs.json
+knobs:                   # TRAINING rows only; decided ONCE on the dev forward block (Holm on p_value, alpha 0.2) -> knobs.json
   member: lgbm_everest   # runs at its BASE params under every candidate (default + one knob changed at a time)
   era_start: [2800, 2000, 3]
   rows_rule: [none, filter80, weight80]
@@ -132,7 +136,7 @@ blend:
     order: [aux, xgb, cat, ridge, sharpe, bags, mlp]
     sharpe_gain: 0.05
   simulation:
-    n_draws: 500
+    n_draws: 1000        # measurement budget (DECISIONS #10): 2x handoff 02's draws, no extra search or seeds
     p_b_grid: [0.0, 0.25, 0.5, 0.75]
     p_c_grid: [0.0, 0.25, 0.5]
     bench_fit_means: [0.0, 0.009, 0.02]
@@ -147,7 +151,7 @@ blend:
     worst_tol: 0.0005
 bootstrap:
   block: 20
-  n_boot: 2000
+  n_boot: 5000           # measurement budget (DECISIONS #10): 2.5x the paired-bootstrap draws of handoff 02
   seed: 0
 gates:
   leak_spearman: 0.18
@@ -155,7 +159,9 @@ gates:
   p_pos_adopt: 0.8
   member_corr_max: 0.95
   max_search_trials: 25
-  baseline_fit: 0.0229   # handoff 02 (same scoring layout): UNSEARCHED lgbm_everest base cell = top-3 0.0238 - search gain 0.0009
+  baseline_fit: null     # handoff 02's unsearched base cell (0.0229) was scored on folds over 2800..6524; this run's
+                         # development folds stop at 5924, so it is context only. The SUSPECT bar uses the in-run
+                         # UNSEARCHED lgbm_everest base cell (search_gain.base_params_fit) + 0.004 instead.
 timing:
   catboost_max_fit_seconds: 120
   progress_every_seconds: 60

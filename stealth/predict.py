@@ -124,11 +124,17 @@ def validate_predictions(out: pd.DataFrame, live_index: pd.Index) -> dict[str, A
         raise ValueError(f"predict returned {type(out).__name__}, not pandas.DataFrame")
     if out.shape[1] != 1:
         problems.append(f"{out.shape[1]} columns (want 1)")
+    if out.shape[1] == 0:
+        raise ValueError("prediction validation failed: " + "; ".join(problems))
     if not out.index.equals(live_index):
         problems.append("index != live ids")
     if out.index.has_duplicates:
         problems.append("duplicate ids")
-    v = out.iloc[:, 0].to_numpy(dtype=np.float64)
+    col = out.iloc[:, 0]
+    # same rule as pkl_check: a NumPy float column only (numeric strings, ints, pandas extension dtypes are refused)
+    if not (isinstance(col.dtype, np.dtype) and np.issubdtype(col.dtype, np.floating)):
+        raise ValueError("prediction validation failed: " + "; ".join([*problems, f"dtype {col.dtype} is not float"]))
+    v = col.to_numpy(dtype=np.float64)
     if not np.isfinite(v).all():
         problems.append(f"{int((~np.isfinite(v)).sum())} non-finite values")
     elif v.size and not ((v > 0.0).all() and (v < 1.0).all()):
@@ -291,27 +297,57 @@ def write_active(model_id: str, upload_id: str | None, sha256: str, pkl: Path, p
     return path
 
 
-def upload(client: Any, model_id: str, pkl: Path, *, poll_seconds: float = 10.0, timeout: float = 900.0,
-           active_path: Path = ACTIVE_JSON) -> dict:
-    """Upload the pickle (``python_version="3.11"``), poll until sandbox-ready, record active.json + manifest upload_id."""
+def check_upload_artifact(pkl: Path) -> dict[str, Any]:
+    """THE artifact gate of every upload path (``predict --upload``, ``diag --upload``, ``diag --attach-pkl``).
+
+    Raises ``RuntimeError`` naming the failed condition unless ALL hold: the pickle exists; ``<stem>.manifest.json``
+    exists next to it; the manifest's ``sha256`` equals the file's; ``manifest.pkl_check.passed`` is true AND its
+    ``sha256`` equals the file's (a pass recorded for other bytes, or a legacy pass without a hash, does not count);
+    the manifest's ``python`` (and the checker's, when recorded) is 3.11.x, the version every upload declares.
+    Purely local: callers run it BEFORE creating a client, so a refusal sends nothing.
+    Returns ``{"pkl", "sha256", "manifest", "manifest_path"}``.
+    """
     from stealth.bundle import manifest_path, sha256_file
 
     pkl = Path(pkl)
+    if not pkl.is_file():
+        raise RuntimeError(f"{pkl} does not exist; build it with `python -m stealth.bundle`")
     sha = sha256_file(pkl)
     mpath = manifest_path(pkl)
     if not mpath.exists():
         # pkl_check is the final gate before any upload (PLAN "Packaging"); no manifest = no gate record.
         raise RuntimeError(f"no manifest next to {pkl.name} ({mpath.name} missing); run `python -m stealth.bundle` "
                            "and `python -m stealth.pkl_check` first")
-    manifest = json.loads(mpath.read_text())
+    try:
+        manifest = json.loads(mpath.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{mpath.name} is unreadable ({exc}); rebuild it with `python -m stealth.bundle`") from exc
     if manifest.get("sha256") != sha:
         raise RuntimeError(f"{pkl.name} sha256 {sha[:12]} != manifest {str(manifest.get('sha256'))[:12]}; rebuild the manifest")
-    if not (manifest.get("pkl_check") or {}).get("passed"):
-        raise RuntimeError("manifest.pkl_check has not passed; run `python -m stealth.pkl_check` first")
+    check = manifest.get("pkl_check") or {}
+    if not check.get("passed"):
+        raise RuntimeError(f"manifest.pkl_check has not passed (status {check.get('status', 'none')}); run "
+                           "`python -m stealth.pkl_check` first")
+    if check.get("sha256") != sha:
+        raise RuntimeError(f"manifest.pkl_check passed for bytes {str(check.get('sha256'))[:12]}, not for {pkl.name} "
+                           f"({sha[:12]}); re-run `python -m stealth.pkl_check` on this pickle")
     built_py = str(manifest.get("python") or "")
     if not built_py.startswith(PKL_PYTHON_VERSION + "."):
         raise RuntimeError(f"manifest says the pickle was built under Python {built_py or '?'}, but the upload declares "
                            f"python_version={PKL_PYTHON_VERSION}; rebuild the pickle in the 3.11 train venv")
+    checked_py = check.get("python")
+    if checked_py is not None and not str(checked_py).startswith(PKL_PYTHON_VERSION + "."):
+        raise RuntimeError(f"pkl_check ran under Python {checked_py}, not {PKL_PYTHON_VERSION}.x; re-run it in the lane venv")
+    return {"pkl": pkl, "sha256": sha, "manifest": manifest, "manifest_path": mpath}
+
+
+def upload(client: Any, model_id: str, pkl: Path, *, poll_seconds: float = 10.0, timeout: float = 900.0,
+           active_path: Path = ACTIVE_JSON) -> dict:
+    """Upload the pickle (``python_version="3.11"``), poll until sandbox-ready, record active.json + manifest upload_id.
+
+    :func:`check_upload_artifact` runs first; nothing reaches ``client`` when it refuses."""
+    gate = check_upload_artifact(pkl)
+    pkl, sha, mpath, manifest = Path(pkl), gate["sha256"], gate["manifest_path"], gate["manifest"]
     res = client.upload_model(model_id, str(pkl), python_version=PKL_PYTHON_VERSION)
     upload_id = res.get("upload_id") or res.get("id")
     log.warning("UPLOADED %s (%.2f MB, sha256 %s) to model %s: upload_id=%s", pkl.name, pkl.stat().st_size / 1e6, sha[:12],
@@ -358,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             approval_gate("submit predictions", ENV_SUBMIT, args.i_have_approval)
         if args.upload:
             approval_gate("upload model", ENV_UPLOAD, args.i_have_approval)
+            check_upload_artifact(args.pkl)  # local artifact gate before any client exists (upload() repeats it)
         client = None if args.offline else sdata.make_client()
         try:
             result = predict_live(args.pkl, data_dir=args.data_dir, offline=args.offline, client=client, out_dir=args.out_dir)

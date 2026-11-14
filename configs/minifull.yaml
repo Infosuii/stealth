@@ -12,12 +12,16 @@ run:
   time_decay: false
   data_dir: data
 cv:
-  n_folds: 3
+  n_folds: 3             # development eras 5000..5924; 5945..6524 reserved for the audit
   purge: 20
   embargo: 20
   inner_frac: 0.15
   inner_gap: 20
-  forward:
+  forward:               # development forward block
+    enabled: true
+    train_end: 5600
+    test_start: 5640
+  audit:                 # same reserved partition as full.yaml
     enabled: true
     train_end: 5925
     test_start: 5945

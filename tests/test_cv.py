@@ -144,7 +144,10 @@ def test_paired_block_bootstrap_clear_winner() -> None:
     assert r.p_pos > 0.99 and r.ci90[0] > 0 and r.ci90[0] < r.diff_mean < r.ci90[1]
     assert 0.0002 < r.diff_se < 0.0006  # ~ sd/sqrt(n) = 0.01/31.6 = 0.00032, inflated by blocks
     d = r.as_dict()
-    assert set(d) == {"diff_mean", "diff_se", "p_pos", "ci90", "n_eras"}
+    assert set(d) == {"diff_mean", "diff_se", "p_pos", "ci90", "n_eras", "p_value", "n_blocks", "inference_valid"}
+    assert r.inference_valid and r.n_blocks == 50
+    # null-centred one-sided p-value: a clear winner gets the smallest value a finite bootstrap can report
+    assert r.p_value == pytest.approx(1.0 / 2001.0)
 
 
 def test_paired_block_bootstrap_tie_and_determinism() -> None:
@@ -192,39 +195,78 @@ def test_block_bootstrap_means_shape_and_short_series() -> None:
     assert m.shape == (50,) and np.all((m >= 0) & (m <= 6))
 
 
+# ---------------------------------------------------------------------------------------------- short series
+def test_paired_bootstrap_short_series_is_not_certain() -> None:
+    """Review finding 6: one effective block used to give SE 0, p_pos 1 and a degenerate CI."""
+    r = cv.paired_block_bootstrap(_era_series(np.array([-1.0, 1.1])), block=20, n_boot=500, seed=0)
+    assert not r.inference_valid and r.n_blocks == 0
+    assert r.p_pos == 0.5 and r.p_value == 1.0
+    r = cv.paired_block_bootstrap(_era_series(np.full(39, 0.01)), block=20, n_boot=500, seed=0)  # 1 whole block
+    assert not r.inference_valid and r.n_blocks == 1 and r.p_pos == 0.5 and r.p_value == 1.0
+    r = cv.paired_block_bootstrap(_era_series(np.full(40, 0.01)), block=20, n_boot=500, seed=0)
+    assert r.inference_valid and r.n_blocks == 2
+    with pytest.raises(ValueError, match="n_boot"):
+        cv.block_bootstrap_means(np.arange(50.0), n_boot=1)
+
+
+def test_paired_bootstrap_p_value_is_null_centred() -> None:
+    """Under a true null (diff centred on 0) the one-sided p-value is ~uniform: neither ~0 nor stuck at 1."""
+    rng = np.random.default_rng(11)
+    ps = []
+    for k in range(40):
+        x = 0.01 * rng.standard_normal(400)
+        ps.append(cv.paired_block_bootstrap(_era_series(x), n_boot=400, seed=k).p_value)
+    ps = np.asarray(ps)
+    assert 0.25 < ps.mean() < 0.75
+    assert (ps < 0.05).mean() < 0.2
+    # a loser gets a p-value near 1 while its p_pos is near 0
+    loser = cv.paired_block_bootstrap(_era_series(-0.004 + 0.01 * rng.standard_normal(1000)), n_boot=1000, seed=0)
+    assert loser.p_value > 0.95 and loser.p_pos < 0.05
+
+
 # ---------------------------------------------------------------------------------------------- count sources
 def test_independent_inner_folds_test_layout() -> None:
-    """test.yaml layout: the last fold and the forward block may only take their tree count from independent sources."""
+    """Review finding 1: a count source's WHOLE training provenance must exclude the scored block (+ purge).
+
+    With chronological two-sided folds every other fold trains on the target fold's test eras, so each CV fold keeps
+    its own inner split only; the forward block may also use the last fold, whose training ends before it."""
     eras = ALL_TRAIN_ERAS[ALL_TRAIN_ERAS >= 2800]
     folds = cv.purged_folds(eras, 5)
     fw = cv.forward_block(eras)
-    # folds 0..3 have their inner_val at the end of the era range -> inside fold4's AND the forward's test block
-    for k in range(4):
-        assert int(folds[k].inner_val_eras.min()) >= int(folds[4].test_eras.min())
-        assert int(folds[k].inner_val_eras.min()) >= int(fw.test_eras.min())
-    assert cv.independent_inner_folds(folds[4], folds) == [4]
-    assert cv.independent_inner_folds(fw, folds) == [4]
-    # an early fold may use every fold's inner split (all inner_val blocks are >= 20 eras after its test block)
-    assert cv.independent_inner_folds(folds[0], folds) == [0, 1, 2, 3, 4]
-    # every admitted source is >= 20 eras from the target's test block; a contaminated source is rejected
     for k, f in enumerate(folds):
-        src = [folds[j] for j in cv.independent_inner_folds(f, folds)]
-        assert k in cv.independent_inner_folds(f, folds)  # own split always eligible
+        assert cv.independent_inner_folds(f, folds) == [k]
+        for j, other in enumerate(folds):
+            if j != k:  # the old inner_val-only rule admitted these although they trained on f's test labels
+                assert np.isin(f.test_eras, other.train_eras).any()
+    assert cv.independent_inner_folds(fw, folds) == [4]
+    for f in folds + [fw]:
+        src = [folds[j] for j in cv.independent_inner_folds(f, folds)] + ([fw] if f is fw else [])
         cv.assert_count_sources(f, src)
-        for s in src:
-            assert cv._gap_to_block(s.inner_val_eras, f.test_eras) >= 20
-    cv.assert_count_sources(fw, [folds[4], fw])
+        for s_ in src:
+            assert cv._gap_to_block(s_.train_eras, f.test_eras) >= 20
     with pytest.raises(AssertionError, match="count source"):
         cv.assert_count_sources(folds[4], [folds[0]])
+    with pytest.raises(AssertionError, match="count source"):
+        cv.assert_count_sources(folds[0], [folds[1]])  # fold1 trains on fold0's test block
     with pytest.raises(AssertionError, match="no early-stopping source"):
         cv.assert_count_sources(folds[4], [])
+
+
+def test_independent_inner_folds_full_audit_layout() -> None:
+    """full.yaml with the reserved audit: development eras 2800..5924, dev forward 5300 / 5340."""
+    dev = ALL_TRAIN_ERAS[(ALL_TRAIN_ERAS >= 2800) & (ALL_TRAIN_ERAS < 5925)]
+    folds = cv.purged_folds(dev, 5)
+    fw = cv.forward_block(dev, train_end=5300, test_start=5340)
+    assert int(fw.test_eras.max()) == 5924 and int(fw.train_eras.max()) == 5299
+    assert [cv.independent_inner_folds(f, folds) for f in folds] == [[k] for k in range(5)]
+    assert cv.independent_inner_folds(fw, folds) == [4]
 
 
 def test_independent_inner_folds_smoke_layout() -> None:
     eras = ALL_TRAIN_ERAS[ALL_TRAIN_ERAS >= 5000]
     folds = cv.purged_folds(eras, 3)
     assert cv.independent_inner_folds(folds[2], folds) == [2]
-    assert cv.independent_inner_folds(folds[0], folds) == [0, 1, 2]
+    assert cv.independent_inner_folds(folds[0], folds) == [0]
 
 
 # ------------------------------------------------------------------------------------- extend_train (M2 pool)

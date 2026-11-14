@@ -75,11 +75,25 @@ if [ "$have_uv" -eq 1 ]; then
 else
   "$GPU_PY" -m pip install --quiet "${TORCH_DEPS[@]}" || fail "torch dependency install failed"
 fi
+# A reused venv may hold a CPU-only torch (e.g. from a CPU-index install): `pip install torch` would call it satisfied and
+# the smoke would then report GPU FAIL. From a CUDA index, such a build is reinstalled.
+REINSTALL_UV=()
+REINSTALL_PIP=()
+case "$TORCH_INDEX" in
+  */cu[0-9]*)
+    if "$GPU_PY" -c 'import sys, torch; sys.exit(0 if torch.version.cuda is None else 1)' >/dev/null 2>&1; then
+      say "the installed torch is a CPU-only build; reinstalling it from $TORCH_INDEX"
+      REINSTALL_UV=(--reinstall-package torch)
+      REINSTALL_PIP=(--force-reinstall --no-deps)
+    fi ;;
+esac
 say "installing $TORCH_SPEC from $TORCH_INDEX (large download the first time)"
 if [ "$have_uv" -eq 1 ]; then
-  uv pip install --python "$GPU_PY" "$TORCH_SPEC" --index-url "$TORCH_INDEX" || fail "torch install failed"
+  uv pip install --python "$GPU_PY" "$TORCH_SPEC" --index-url "$TORCH_INDEX" ${REINSTALL_UV[@]+"${REINSTALL_UV[@]}"} \
+    || fail "torch install failed"
 else
-  "$GPU_PY" -m pip install --quiet "$TORCH_SPEC" --index-url "$TORCH_INDEX" || fail "torch install failed"
+  "$GPU_PY" -m pip install --quiet "$TORCH_SPEC" --index-url "$TORCH_INDEX" ${REINSTALL_PIP[@]+"${REINSTALL_PIP[@]}"} \
+    || fail "torch install failed"
 fi
 
 # ---- 3. lane-pinned libraries ---------------------------------------------------------------------------

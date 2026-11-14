@@ -13,11 +13,20 @@ Contracts: docs/INTERFACES.md sections 8, 10, 16 and 17; protocol: docs/PLAN.md 
   (config order inside an arm), drops members correlated above ``gates.member_corr_max`` with an already-kept member
   (the earlier/simpler one stays), and tests each arm ONCE against the incumbent (paired fit20 bootstrap on CV OOF,
   forward diff, paired Sharpe bootstrap, correlation with the incumbent). Without ``admission`` every member is in;
-* NNLS weights (sum to 1, floor 0.02) on the ADMITTED set are computed NESTED: fitted on CV folds ``0..K-2``,
-  evaluated on fold ``K-1`` (paired block bootstrap vs hierarchical equal weight) and on the forward block; adopted
-  only when ``p_pos >= gates.p_pos_adopt`` and the forward difference is ``>= 0``. When NNLS is adopted the bundle
-  gets ``full_weights`` (fitted on all OOF eras) but every REPORTED number (``chosen`` fit20, forward fit, the
-  SUSPECT and leak checks, the regime grid, the neutralisation choice) comes from CROSS-FITTED weights;
+* NNLS weights (sum to 1, floor 0.02) on the ADMITTED set are computed NESTED: fitted on CV folds ``0..K-2`` whose
+  rows lie >= 20 eras from the evaluation fold AND from the forward test block (``purged_fit_mask``: a 20-day target
+  window must not straddle the meta-fit / evaluation boundary), evaluated on fold ``K-1`` (paired block bootstrap vs
+  hierarchical equal weight) and on the forward block WITH THE SAME WEIGHTS (the gate and the reported forward fit
+  use one rule); adopted only when the bootstrap has enough blocks, ``p_pos >= gates.p_pos_adopt`` and the forward
+  difference is ``>= 0``; too few purged rows -> equal weights (fail closed). When NNLS is adopted the bundle gets
+  ``full_weights`` (fitted on all OOF eras) but every REPORTED number (``chosen`` fit20, the SUSPECT and leak checks,
+  the regime grid, the neutralisation choice) comes from CROSS-FITTED weights (fold ``k`` weights fitted on the other
+  folds' rows purged >= 20 eras around fold ``k``);
+* every number here is a SELECTION estimate: the development eras chose the knobs, the search, the ladder, the rule
+  and the constants they also score. The independent check is ``stealth.audit`` on the reserved eras (never read
+  here);
+* ``load_run`` refuses an ``oof.parquet`` member whose spec is not ``done`` or (external members) belongs to another
+  run fingerprint: a stale or half-retrained member is never blended;
 * the chosen blend's OOF ``z`` goes through ``metrics.regime_grid`` (p_b x p_c, common random numbers) and
   ``select_neutralisation`` freezes ``p_b``/``p_c`` from the simulation (section 16.3; never from the diag lane);
 * gates: ``metrics.leak_check`` on the blend's per-era Spearman; a "SUSPECT" banner when the blend's OOF fit20
@@ -40,8 +49,8 @@ import pandas as pd
 import yaml
 
 from stealth import _runtime, cv, data, features, metrics, surrogate
-from stealth.train import (ARTIFACTS, REPO_ROOT, baseline_fit, baseline_member, per_era_fit_fast, per_era_spearman_fast, setup_logging,
-                           write_json)
+from stealth.train import (ARTIFACTS, REPO_ROOT, base_cell_fits, baseline_fit, baseline_member, per_era_fit_fast, per_era_spearman_fast,
+                           setup_logging, write_json)
 
 log = logging.getLogger("stealth.blend")  # explicit: under `python -m` __name__ is __main__
 
@@ -66,11 +75,27 @@ def load_run(run_dir: Path) -> dict:
     oof = pd.read_parquet(run_dir / "oof.parquet")
     fwd_path = run_dir / "forward.parquet"
     fwd = pd.read_parquet(fwd_path) if fwd_path.exists() else None
+    fp_path = run_dir / "run_fingerprint.json"
+    fingerprint = json.loads(fp_path.read_text()).get("fingerprint") if fp_path.exists() else None
     specs = {}
     for p in sorted((run_dir / "members").glob("*/spec.json")):
         s = json.loads(p.read_text())
-        if f"m__{s['name']}" in oof.columns:
+        if f"m__{s.get('name', p.parent.name)}" in oof.columns:
             specs[s["name"]] = s
+    problems = []
+    for n in member_columns(oof):
+        s = specs.get(n)
+        if s is None:
+            problems.append(f"{n}: oof.parquet has m__{n} but members/{n}/spec.json is missing")
+        elif s.get("status") not in (None, "done"):  # None: legacy M1 specs
+            problems.append(f"{n}: spec status {s.get('status')!r} (an interrupted retrain?)")
+        elif fingerprint is not None and s.get("run_fingerprint") not in (None, fingerprint):
+            problems.append(f"{n}: spec belongs to another run fingerprint")
+        elif fingerprint is not None and s.get("family") in ("mlp",) and s.get("run_fingerprint") != fingerprint:
+            problems.append(f"{n}: external member without this run's fingerprint")
+    if problems:
+        raise ValueError("stale or incomplete members in oof.parquet -- re-run `python -m stealth.train --resume` "
+                         "(add --skip-external to drop an external member): " + "; ".join(problems))
     feats = json.loads((run_dir / "features.json").read_text())
     mpath = run_dir / "metrics.json"
     mets = json.loads(mpath.read_text()) if mpath.exists() else {}
@@ -249,17 +274,43 @@ def member_corr_matrix(Z: pd.DataFrame, era: pd.Series) -> pd.DataFrame:
 # --------------------------------------------------------------------------------------------------
 # nested NNLS gate
 # --------------------------------------------------------------------------------------------------
+def purged_fit_mask(era: pd.Series, blocks: list[np.ndarray], gap: int = FORWARD_GAP) -> np.ndarray:
+    """Rows whose era lies outside every evaluation block and at least ``gap`` eras from it (``era <= lo - gap`` or
+    ``era >= hi + gap``): the NNLS meta-fit rows. Statistics review finding 5: a 20-day target window must never
+    straddle the meta-fit / evaluation boundary."""
+    e = era.to_numpy()
+    ok = np.ones(len(e), dtype=bool)
+    for b in blocks:
+        if b is None or len(b) == 0:
+            continue
+        lo, hi = int(np.min(b)), int(np.max(b))
+        ok &= (e <= lo - gap) | (e >= hi + gap)
+    return ok
+
+
 def nested_nnls(Z: pd.DataFrame, oof: pd.DataFrame, Zf: pd.DataFrame | None, fwd: pd.DataFrame | None,
                 ew: dict[str, float], cfg: dict) -> dict:
-    """Fit NNLS on folds 0..K-2, compare with equal weight on fold K-1 (paired bootstrap) and on the forward block.
+    """Fit NNLS on folds 0..K-2 purged >= 20 eras from fold K-1 and from the forward test block; compare with equal
+    weight on fold K-1 (paired bootstrap) and on the forward block, both with these SAME nested weights.
 
-    Returns ``{"nested_weights", "full_weights", "paired_vs_ew", "forward_diff", "adopt", "reason"}``.
+    Returns ``{"nested_weights", "full_weights", "paired_vs_ew", "forward_diff", "adopt", "reason", "eval_fold",
+    "fit_eras", "purge_gap"}``. Fewer than ``2 * FORWARD_GAP`` purged meta-fit eras, or a bootstrap without enough blocks,
+    fails closed (``adopt`` False, ``nested_weights`` None when nothing could be fitted).
     """
     y, era, fold = oof[data.PRIMARY_TARGET], oof["era"], oof["fold"]
     bs, gates = cfg["bootstrap"], cfg["gates"]
     last = int(fold.max())
-    fit_mask = (fold < last).to_numpy()
     eval_mask = (fold == last).to_numpy()
+    blocks = [np.unique(era.to_numpy()[eval_mask])] + ([np.unique(fwd["era"].to_numpy())] if fwd is not None else [])
+    fit_mask = (fold < last).to_numpy() & purged_fit_mask(era, blocks)
+    fit_eras = np.unique(era.to_numpy()[fit_mask])
+    w_full = nnls_weights(Z, y, era)
+    base = {"full_weights": w_full, "eval_fold": last, "purge_gap": FORWARD_GAP,
+            "fit_eras": [int(fit_eras.min()), int(fit_eras.max()), int(len(fit_eras))] if len(fit_eras) else None}
+    if len(fit_eras) < 2 * FORWARD_GAP:
+        reason = f"only {len(fit_eras)} purged meta-fit eras (< {2 * FORWARD_GAP}) -> equal weights (fail closed)"
+        log.info("nested NNLS: %s", reason)
+        return {**base, "nested_weights": None, "paired_vs_ew": None, "forward_diff": None, "adopt": False, "reason": reason}
     w_nested = nnls_weights(Z.loc[fit_mask], y.loc[fit_mask], era.loc[fit_mask])
     z_n = blend_scores(Z.loc[eval_mask], w_nested)
     z_e = blend_scores(Z.loc[eval_mask], ew)
@@ -269,41 +320,34 @@ def nested_nnls(Z: pd.DataFrame, oof: pd.DataFrame, Zf: pd.DataFrame | None, fwd
     if Zf is not None and fwd is not None:
         fy, fe = fwd[data.PRIMARY_TARGET], fwd["era"]
         fwd_diff = float(fit_series(blend_scores(Zf, w_nested), fy, fe).mean() - fit_series(blend_scores(Zf, ew), fy, fe).mean())
-    adopt = paired["p_pos"] >= float(gates["p_pos_adopt"]) and (fwd_diff is None or fwd_diff >= 0.0)
+    p_ok = bool(paired["inference_valid"]) and paired["p_pos"] >= float(gates["p_pos_adopt"])
+    adopt = p_ok and (fwd_diff is None or fwd_diff >= 0.0)
     reason = (f"p_pos={paired['p_pos']:.3f} {'>=' if paired['p_pos'] >= float(gates['p_pos_adopt']) else '<'} {gates['p_pos_adopt']}"
-              + ("" if fwd_diff is None else f", forward diff={fwd_diff:+.4f}"))
-    w_full = nnls_weights(Z, y, era)
-    log.info("nested NNLS: nested weights %s; eval fold%d diff_mean=%+.4f se=%.4f p_pos=%.3f; %s -> %s", _fmt_w(w_nested), last,
-             paired["diff_mean"], paired["diff_se"], paired["p_pos"], reason, "ADOPT nnls" if adopt else "keep equal weights")
-    return {"nested_weights": w_nested, "full_weights": w_full, "paired_vs_ew": paired, "forward_diff": fwd_diff,
-            "adopt": bool(adopt), "reason": reason, "eval_fold": last}
+              + ("" if paired["inference_valid"] else f" (only {paired['n_blocks']} bootstrap blocks: no inference)")
+              + ("" if fwd_diff is None else f", forward diff={fwd_diff:+.4f} (same nested weights)"))
+    log.info("nested NNLS: weights %s fitted on %d purged eras; eval fold%d diff_mean=%+.4f se=%.4f p_pos=%.3f; %s -> %s",
+             _fmt_w(w_nested), len(fit_eras), last, paired["diff_mean"], paired["diff_se"], paired["p_pos"], reason,
+             "ADOPT nnls" if adopt else "keep equal weights")
+    return {**base, "nested_weights": w_nested, "paired_vs_ew": paired, "forward_diff": fwd_diff, "adopt": bool(adopt),
+            "reason": reason}
 
 
 def crossfit_nnls(Z: pd.DataFrame, oof: pd.DataFrame) -> tuple[pd.Series, dict[str, dict[str, float]]]:
-    """Cross-fitted NNLS blend: for every CV fold ``k`` fit the weights on the OOF rows of folds ``!= k`` and apply them to
-    fold ``k``. Returns ``(z, {fold: weights})``; ``z`` is out-of-sample w.r.t. the weights on every row."""
+    """Cross-fitted NNLS blend: for every CV fold ``k`` fit the weights on the OOF rows of the other folds that lie >= 20
+    eras from fold ``k``'s test eras (``purged_fit_mask``) and apply them to fold ``k``. Returns ``(z, {fold: weights})``;
+    ``z`` is out-of-sample w.r.t. the weights on every row. Raises ``ValueError`` when a fold has no purged rows."""
     y, era, fold = oof[data.PRIMARY_TARGET], oof["era"], oof["fold"]
     z = pd.Series(np.nan, index=Z.index, name="blend", dtype=np.float64)
     per_fold: dict[str, dict[str, float]] = {}
     for k in sorted(int(x) for x in fold.unique()):
-        fit_mask = (fold != k).to_numpy()
         apply_mask = (fold == k).to_numpy()
+        fit_mask = (fold != k).to_numpy() & purged_fit_mask(era, [np.unique(era.to_numpy()[apply_mask])])
+        if not fit_mask.any():
+            raise ValueError(f"crossfit NNLS: no OOF rows >= {FORWARD_GAP} eras from fold{k}")
         w = nnls_weights(Z.loc[fit_mask], y.loc[fit_mask], era.loc[fit_mask])
         z.loc[apply_mask] = blend_scores(Z.loc[apply_mask], w).to_numpy()
         per_fold[f"fold{k}"] = w
     return z, per_fold
-
-
-def forward_nnls_weights(Z: pd.DataFrame, oof: pd.DataFrame, fwd: pd.DataFrame, nested: dict[str, float]) -> tuple[dict[str, float], str]:
-    """NNLS weights that never saw the forward test eras: fitted on the OOF rows ``FORWARD_GAP`` eras or more before the
-    forward block (the forward test eras overlap the last CV test block, so the full-OOF weights are in-sample there).
-    Falls back to the nested (folds 0..K-2) weights when fewer than ``2 * FORWARD_GAP`` such eras exist."""
-    cut = int(fwd["era"].min()) - FORWARD_GAP
-    mask = (oof["era"] < cut).to_numpy()
-    if int(oof.loc[mask, "era"].nunique()) < 2 * FORWARD_GAP:
-        return dict(nested), "nested weights (folds 0..K-2): too few OOF eras before the forward block"
-    w = nnls_weights(Z.loc[mask], oof.loc[mask, data.PRIMARY_TARGET], oof.loc[mask, "era"])
-    return w, f"NNLS on OOF eras < {cut} (>= {FORWARD_GAP} eras before the forward block)"
 
 
 def _fmt_w(w: dict[str, float]) -> str:
@@ -356,8 +400,10 @@ def admit_decision(row: dict, *, corr_max: float, p_pos_adopt: float, sharpe_gai
     p_pos, ds, pps = row.get("p_pos"), row.get("dsharpe"), row.get("p_pos_sharpe")
     corr_ok = _ok(corr) and float(corr) <= corr_max + _EPS
     fwd_ok = fwd is None or (_ok(fwd) and float(fwd) >= 0.0)
-    fit_route = _ok(p_pos) and float(p_pos) >= p_pos_adopt - _EPS
-    sharpe_route = _ok(ds) and _ok(pps) and float(ds) >= sharpe_gain - _EPS and float(pps) >= p_pos_adopt - _EPS
+    # a bootstrap with fewer than cv.MIN_EFFECTIVE_BLOCKS blocks carries no evidence: both routes fail closed
+    fit_route = row.get("inference_valid") is not False and _ok(p_pos) and float(p_pos) >= p_pos_adopt - _EPS
+    sharpe_route = (row.get("sharpe_inference_valid") is not False and _ok(ds) and _ok(pps)
+                    and float(ds) >= sharpe_gain - _EPS and float(pps) >= p_pos_adopt - _EPS)
     admitted = bool(corr_ok and fwd_ok and (fit_route or sharpe_route))
     parts = [f"corr {corr:.3f} {'<=' if corr_ok else '>'} {corr_max}" if _ok(corr) else "corr undefined",
              "no forward block" if fwd is None else f"fwd diff {fwd:+.4f}{'' if fwd_ok else ' < 0'}",
@@ -372,7 +418,8 @@ def admit_decision(row: dict, *, corr_max: float, p_pos_adopt: float, sharpe_gai
 def _ladder_row(arm: str, members: list[str], admitted: bool, reason: str, dropped: list[str], **stats) -> dict:
     row = {"arm": arm, "members": list(members), "admitted": bool(admitted), "reason": reason, "diff_mean": None, "diff_se": None,
            "p_pos": None, "fwd_diff": None, "dsharpe": None, "p_pos_sharpe": None, "corr_with_incumbent": None,
-           "dropped_redundant": list(dropped)}
+           "dropped_redundant": list(dropped), "p_value": None, "n_blocks": None, "inference_valid": None,
+           "sharpe_inference_valid": None}
     row.update(stats)
     return row
 
@@ -452,7 +499,9 @@ def admission_ladder(Z: pd.DataFrame, oof: pd.DataFrame, Zf: pd.DataFrame | None
         z_inc = blend_scores(Z, ew_of(incumbent))
         c_inc = mean_era_corr(z_arm, z_inc, era)
         stats = {"diff_mean": paired["diff_mean"], "diff_se": paired["diff_se"], "p_pos": paired["p_pos"], "fwd_diff": fwd_diff,
-                 "dsharpe": ps["dsharpe"], "p_pos_sharpe": ps["p_pos"], "corr_with_incumbent": c_inc}
+                 "dsharpe": ps["dsharpe"], "p_pos_sharpe": ps["p_pos"], "corr_with_incumbent": c_inc,
+                 "p_value": paired["p_value"], "n_blocks": paired["n_blocks"], "inference_valid": paired["inference_valid"],
+                 "sharpe_inference_valid": ps.get("inference_valid")}
         ok, reason = admit_decision(stats, corr_max=corr_max, p_pos_adopt=p_pos_adopt, sharpe_gain=sharpe_gain)
         rows.append(_ladder_row(arm, keep, ok, reason + red_note, dropped, **stats))
         log.info("admission ladder %s %s: diff_mean=%+.4f se=%.4f p_pos=%.3f fwd=%s dsharpe=%+.3f p_pos_sharpe=%.3f corr=%.3f -> %s",
@@ -688,16 +737,25 @@ def final_selection(run: dict) -> dict:
     out["chosen_is_crossfit"] = False
     fwd_w = out["weights"]
     if out["rule"] == "nnls":
-        z, cf_weights = crossfit_nnls(Za, oof)
+        try:
+            z, cf_weights = crossfit_nnls(Za, oof)
+        except ValueError as exc:  # fail closed: without honest cross-fitted numbers NNLS cannot be reported, so not used
+            log.warning("NNLS adopted by the gate but %s -> equal weights", exc)
+            out["rule"], out["weights"] = "ew", ew
+            out["nnls"]["adopt"] = False
+            out["nnls"]["reason"] += f"; cross-fit impossible ({exc}) -> equal weights"
+    if out["rule"] == "nnls":
         out["crossfit_weights"] = cf_weights
         out["chosen_is_crossfit"] = True
         insample_summary, _, _ = evaluate_blend(blend_scores(Z, out["weights"]), oof, cfg)
         out["chosen_insample_full_weights"] = insample_summary  # context only: in-sample w.r.t. the K weights
         log.info("NNLS adopted: reported fit20 uses cross-fitted weights (per fold %s); full-OOF weights (bundle) score %.4f in-sample",
                  {k: _fmt_w(w) for k, w in cf_weights.items()}, insample_summary["mean"])
-        if fwd is not None:
-            fwd_w, out["forward_weights_source"] = forward_nnls_weights(Za, oof, fwd, out["nnls"]["nested_weights"])
+        if fwd is not None:  # the reported forward fit uses the very weights the gate judged (purged vs the forward block)
+            fwd_w = out["nnls"]["nested_weights"]
             out["forward_weights"] = fwd_w
+            out["forward_weights_source"] = (f"nested NNLS weights (gate weights): fitted on OOF eras {out['nnls']['fit_eras']} "
+                                             f"purged >= {FORWARD_GAP} eras from the eval fold and the forward block")
     else:
         z = blend_scores(Z, out["weights"])
     chosen_summary, _, sp = evaluate_blend(z, oof, cfg)
@@ -705,7 +763,9 @@ def final_selection(run: dict) -> dict:
     if Zf is not None and fwd is not None:
         fwd_fit = float(fit_series(blend_scores(Zf, fwd_w), fwd[data.PRIMARY_TARGET], fwd["era"]).mean())
     out["blend"] = {"ew": ew_summary, "chosen": chosen_summary, "rule": out["rule"], "forward_fit": fwd_fit, "spearman_mean": float(sp.mean()),
-                    "chosen_is_crossfit": out["chosen_is_crossfit"]}
+                    "chosen_is_crossfit": out["chosen_is_crossfit"], "estimate": "selection"}
+    out["estimates"] = ("selection estimates: the development eras chose the knobs, search, ladder, rule and constants they "
+                        "also score (optimistic); the independent check is stealth.audit on the reserved eras")
     log.info("blend[%s]: fit20 mean=%.4f se_block=%.4f sharpe=%.3f pct_pos=%.2f forward=%s (ew mean=%.4f)%s", out["rule"], chosen_summary["mean"],
              chosen_summary.get("se_block", float("nan")), chosen_summary["sharpe"], chosen_summary["pct_pos"],
              None if fwd_fit is None else round(fwd_fit, 4), ew_summary["mean"], " [cross-fitted weights]" if out["chosen_is_crossfit"] else "")
@@ -758,8 +818,10 @@ def blend_run(run_dir: Path) -> tuple[dict, int]:
     chosen_summary = out["blend"]["chosen"]
     notes: list[str] = []
     code = 0
-    member_means = {n: (m.get("fit") or {}).get("mean") for n, m in (run["metrics"].get("members") or {}).items()}
-    bmean, base = baseline_fit(cfg, {n: v for n, v in member_means.items() if v is not None})
+    members_m = run["metrics"].get("members") or {}
+    member_means = {n: (m.get("fit") or {}).get("mean") for n, m in members_m.items()}
+    bmean, base = baseline_fit(cfg, {n: v for n, v in member_means.items() if v is not None}, base_cell_fits(members_m))
+    out["suspect_reference"] = {"fit": bmean, "label": base}
     margin = float(gates["suspect_gain_over_baseline"])
     out["suspect"] = bool(bmean is not None and metrics.suspect_gain(chosen_summary["mean"], bmean, margin))
     if out["suspect"]:
