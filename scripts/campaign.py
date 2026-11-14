@@ -28,7 +28,7 @@ from stealth.research_models import to_bytes
 log=logging.getLogger('campaign')
 
 
-def load(phase='discovery',*,config_path=None,additional_sources=()):
+def load(phase='discovery',*,config_path=None,additional_sources=(),additional_inputs=()):
     r.CONFIG=yaml.safe_load(Path(config_path or REPO/'configs/campaign.yaml').read_text())
     r.RUN=REPO/'artifacts'/r.CONFIG['name']
     r.RUN.mkdir(parents=True,exist_ok=True)
@@ -38,6 +38,7 @@ def load(phase='discovery',*,config_path=None,additional_sources=()):
     source=REPO/'data/futures_train.parquet'
     plan={'protocol':'sustained-campaign-v1','config':r.CONFIG,'data_sha256':r.sha(source),
           'code_sha256':{f:r.sha(REPO/f) for f in files}}
+    if additional_inputs:plan['input_sha256']={f:r.sha(REPO/f) for f in additional_inputs}
     r.PLAN_SHA=hashlib.sha256(json.dumps(plan,sort_keys=True).encode()).hexdigest()
     plan['plan_sha256']=r.PLAN_SHA
     path=r.RUN/'plan.json'
@@ -70,6 +71,12 @@ def fitted(spec,X,y,era,columns,directory):
         from stealth.stability_models import fit_stability
         model,info=fit_stability(spec,X,y,era,columns,r.CONFIG['inner'])
         return 'basis',[to_bytes(model)],lambda xx,eras=None:basis_forward(model,xx),info
+    if spec['kind']=='tree_pool':
+        from stealth.pool_models import fit_pool,predict_pool
+        from stealth.models import lgbm
+        data_sha=json.loads((r.RUN/'plan.json').read_text())['data_sha256']
+        models,info=fit_pool(spec,X,y,era,columns,r.CONFIG['inner'],seed=r.CONFIG['seed'],threads=r.CONFIG['threads'],directory=directory,data_sha=data_sha)
+        return 'lgbm',[lgbm.to_bytes(m) for m in models],lambda xx,eras:predict_pool(models,xx,eras),info
     raise ValueError('external GPU recipe requires campaign_gpu.py')
 
 

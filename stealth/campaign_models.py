@@ -116,13 +116,20 @@ def fit_trees(spec,X,y,era,inner,*,seed,threads,storage):
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     X=np.asarray(X,dtype=np.float32)
     splits=list(inner_windows(era,inner))
-    study=optuna.create_study(direction='maximize',sampler=optuna.samplers.TPESampler(seed=seed),
+    sampler=optuna.samplers.RandomSampler(seed=seed) if spec.get('sampler')=='random' else optuna.samplers.TPESampler(seed=seed)
+    study=optuna.create_study(direction='maximize',sampler=sampler,
                               storage='sqlite:///'+str(storage),study_name='nested',load_if_exists=True)
     if not study.trials:
-        study.enqueue_trial({'num_leaves':8,'learning_rate':.03,'leaf_fraction':.02,'feature_fraction':.3,
-            'bagging_fraction':.7,'lambda_l2':10,'lambda_l1':.01,'extra_trees':False,'history':None,'half_life':None,'centred':False})
-        study.enqueue_trial({'num_leaves':8,'learning_rate':.005,'leaf_fraction':.03,'feature_fraction':.3,
-            'bagging_fraction':.8,'lambda_l2':100,'lambda_l1':1,'extra_trees':False,'history':None,'half_life':512,'centred':True})
+        for params in prior_proposals(spec['trials'],seed) if spec.get('sampler')=='random' else initial_proposals():
+            study.enqueue_trial(params)
+    if spec.get('sampler')=='random':
+        # Persist every prior proposal up front; a process interruption cannot change the random pool.
+        for trial in study.trials:
+            if trial.state==optuna.trial.TrialState.RUNNING:
+                fixed=trial.system_attrs.get('fixed_params')
+                if not fixed:raise RuntimeError('interrupted prior trial lacks frozen parameters')
+                study.tell(trial.number,state=optuna.trial.TrialState.FAIL)
+                study.enqueue_trial(fixed)
     def objective(trial):
         p=tree_setting(trial)
         scores,counts=[],[]
@@ -155,3 +162,21 @@ def fit_trees(spec,X,y,era,inner,*,seed,threads,storage):
         models.append(model)
         info.append({'trial':t.number,'params':t.params,'count':count,'objective':t.value,'scores':t.user_attrs['scores']})
     return models,{'trials_completed':len([t for t in study.trials if t.state==optuna.trial.TrialState.COMPLETE]),'selected':info}
+
+
+def initial_proposals():
+    return [{'num_leaves':8,'learning_rate':.03,'leaf_fraction':.02,'feature_fraction':.3,'bagging_fraction':.7,
+        'lambda_l2':10,'lambda_l1':.01,'extra_trees':False,'history':None,'half_life':None,'centred':False},
+        {'num_leaves':8,'learning_rate':.005,'leaf_fraction':.03,'feature_fraction':.3,'bagging_fraction':.8,
+        'lambda_l2':100,'lambda_l1':1,'extra_trees':False,'history':None,'half_life':512,'centred':True}]
+
+
+def prior_proposals(count,seed):
+    """Generate a frozen prior pool without looking at any target or objective value."""
+    import optuna
+    study=optuna.create_study(direction='maximize',sampler=optuna.samplers.RandomSampler(seed=seed))
+    for p in initial_proposals():study.enqueue_trial(p)
+    result=[]
+    for _ in range(count):
+        trial=study.ask();result.append(tree_setting(trial));study.tell(trial,0.)
+    return result
