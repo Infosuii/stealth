@@ -1,5 +1,10 @@
 # Development continuation prompt (after the M2–M6 fix pass)
 
+**Latest checkpoint:** stability05 raised the best historical average gain to 12.89%, but the latest window
+remains down 2.51%. It failed the corrected promotion gate; baseline01 remains selected and a reliable major
+improvement is not established. Final suite: 451 passed, one expected skip. Read `stability05-results.md` and
+the top of `docs/NEXT-SESSION.md`; earlier checkpoints below are historical.
+
 **Newer checkpoint:** sustained campaigns 03/04 followed the user's renewed major-improvement request. Best
 historical average gain: 11.5%, with a material loss in the latest discovery window. No candidate cleared
 promotion; the user's requested reliable major improvement is unfinished. Read the top of `docs/NEXT-SESSION.md`

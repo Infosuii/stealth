@@ -2,6 +2,16 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Latest, after stability05:** the observed best discovery FIT is now 0.02462116 versus baseline 0.02181070,
+or +12.89%, from a fixed stable-covariance/baseline blend. The latest window remains down 2.51%. It did not pass
+the four-comparison Holm gate or the predeclared 15% major-improvement criterion. No candidate was promoted,
+confirmation was not loaded, and baseline01 remains selected. The requested reliable major gain is still
+unproven. Final suite: 451 passed, 1 expected CUDA no-device-path skip. Full evidence:
+`handoffs/results/stability05-*`; protocol `docs/STABILITY-05.md`; implementation `21da749`; checkpoints
+`artifacts/stability05`. This targeted follow-up uses temporal signal-risk weighting and optional recent-signal
+forecasting; its direct linear solves require no additional neural training. The following paragraphs preserve
+the preceding 03/04 checkpoint. Reproduce each source-bound experiment at its recorded version.
+
 The user renewed the request for a **major predictive improvement**, including much longer training. Sustained
 campaigns 03/04 are complete; reports are `handoffs/results/campaign03-*` and `representations04-*`. Across them,
 336 nested search trials evaluated 1,008 inner tree fits, with more than 21,600 GPU training epochs plus refits.

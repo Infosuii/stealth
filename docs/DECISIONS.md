@@ -66,6 +66,10 @@ candidate qualified for promotion. The 15% major-improvement threshold was the a
 criterion, not a promise from or a threshold supplied by the user. The requested reliable major gain remains
 unachieved. Preserve all failed/positive evidence and do not relax completed gates to manufacture a success.
 
+The subsequent stability05 experiment narrowed the latest-window loss to 2.51% and raised the observed average
+gain to 12.89%, but missed its corrected gate and major-improvement criterion. The incumbent is retained.
+Do not describe the largest historical average as a verified future gain or substitute it for the unmet goal.
+
 ## Standing rules (unchanged)
 
 - Nothing is submitted, uploaded, or staked without a handoff carrying a **USER MUST APPROVE** banner.

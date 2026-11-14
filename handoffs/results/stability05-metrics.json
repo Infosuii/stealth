@@ -1,0 +1,322 @@
+{
+  "run_id": "stability05",
+  "label": "historical development selection estimates; not a fresh holdout",
+  "comparisons": [
+    {
+      "name": "stable_covariance",
+      "blend_with_baseline": false,
+      "fit_mean": 0.02366205865321094,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.5373130343972997,
+      "paired": {
+        "diff_mean": 0.0018513610544135905,
+        "diff_se": 0.0028008231849755666,
+        "p_pos": 0.7422,
+        "ci90": [
+          -0.002750955205056148,
+          0.006421595609833565
+        ],
+        "n_eras": 1300,
+        "p_value": 0.25447455254474555,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": 0.00379972344162669,
+        "middle": 0.003408033218656174,
+        "late": -0.003990363198012545
+      },
+      "holm_threshold": 0.05,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "stable_covariance",
+      "blend_with_baseline": true,
+      "fit_mean": 0.02462115909993771,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.5768710084078694,
+      "paired": {
+        "diff_mean": 0.0028104615011403647,
+        "diff_se": 0.0014983780395040167,
+        "p_pos": 0.9679,
+        "ci90": [
+          0.0002927852945904394,
+          0.005252091526495
+        ],
+        "n_eras": 1300,
+        "p_value": 0.029597040295970403,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": 0.003241846086789981,
+        "middle": 0.004479362433721284,
+        "late": -0.0006900143625771958
+      },
+      "holm_threshold": 0.016666666666666666,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "adaptive_covariance",
+      "blend_with_baseline": false,
+      "fit_mean": 0.023747287449214647,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.5364363601264116,
+      "paired": {
+        "diff_mean": 0.0019365898504173007,
+        "diff_se": 0.002712501668907285,
+        "p_pos": 0.7591,
+        "ci90": [
+          -0.0025129763937388264,
+          0.006390702773550275
+        ],
+        "n_eras": 1300,
+        "p_value": 0.23517648235176483,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": 0.004512757825927749,
+        "middle": 0.0032429756660748823,
+        "late": -0.004534333134862751
+      },
+      "holm_threshold": 0.025,
+      "holm_pass": false,
+      "eligible": false
+    },
+    {
+      "name": "adaptive_covariance",
+      "blend_with_baseline": true,
+      "fit_mean": 0.024619102507144608,
+      "baseline_mean": 0.021810697598797345,
+      "sharpe": 0.5745452386250487,
+      "paired": {
+        "diff_mean": 0.0028084049083472637,
+        "diff_se": 0.001451909771732892,
+        "p_pos": 0.9716,
+        "ci90": [
+          0.00042274068393855033,
+          0.005190278142833899
+        ],
+        "n_eras": 1300,
+        "p_value": 0.025397460253974602,
+        "n_blocks": 65,
+        "inference_valid": true
+      },
+      "windows": {
+        "early": 0.0037590342467297235,
+        "middle": 0.004173307982180881,
+        "late": -0.0010508157786795298
+      },
+      "holm_threshold": 0.0125,
+      "holm_pass": false,
+      "eligible": false
+    }
+  ],
+  "selected": null,
+  "confirmation": {
+    "promoted": false,
+    "major_improvement": false,
+    "reason": "no eligible discovery challenger",
+    "plan_sha256": "e0d8b8277d05fa968014f18b96563b07e4bd80091747110017e5778ca77053b1"
+  },
+  "plan_sha256": "e0d8b8277d05fa968014f18b96563b07e4bd80091747110017e5778ca77053b1",
+  "major_improvement": false,
+  "observed_best_relative_gain": 0.12885702020348652,
+  "research_context": "adaptive historical development estimates; not independent future evidence",
+  "window_results": [
+    {
+      "window": "early",
+      "baseline_fit": 0.005825701960874127,
+      "stable_blend_fit": 0.009067548047664107,
+      "relative_gain": 0.5564730411137531
+    },
+    {
+      "window": "middle",
+      "baseline_fit": 0.034365760821250604,
+      "stable_blend_fit": 0.038845123254971886,
+      "relative_gain": 0.13034375863290637
+    },
+    {
+      "window": "late",
+      "baseline_fit": 0.027527251624580616,
+      "stable_blend_fit": 0.02683723726200342,
+      "relative_gain": -0.02506659117254717
+    }
+  ],
+  "validation": {
+    "pytest": "451 passed, 1 skipped in 120.04s",
+    "skip": "no-device path on CUDA-capable host",
+    "replay": {
+      "plan_sha256": "e0d8b8277d05fa968014f18b96563b07e4bd80091747110017e5778ca77053b1",
+      "checks": [
+        {
+          "window": "early",
+          "name": "baseline",
+          "serialized_models": 1,
+          "rows": 40531,
+          "max_abs_error": 0.0,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        },
+        {
+          "window": "early",
+          "name": "stable_covariance",
+          "serialized_models": 1,
+          "rows": 40531,
+          "max_abs_error": 3.3306690738754696e-16,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            },
+            {
+              "blend": true,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        },
+        {
+          "window": "early",
+          "name": "adaptive_covariance",
+          "serialized_models": 1,
+          "rows": 40531,
+          "max_abs_error": 4.440892098500626e-16,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            },
+            {
+              "blend": true,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        },
+        {
+          "window": "middle",
+          "name": "baseline",
+          "serialized_models": 1,
+          "rows": 42061,
+          "max_abs_error": 0.0,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        },
+        {
+          "window": "middle",
+          "name": "stable_covariance",
+          "serialized_models": 1,
+          "rows": 42061,
+          "max_abs_error": 3.3306690738754696e-16,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            },
+            {
+              "blend": true,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        },
+        {
+          "window": "middle",
+          "name": "adaptive_covariance",
+          "serialized_models": 1,
+          "rows": 42061,
+          "max_abs_error": 6.661338147750939e-16,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            },
+            {
+              "blend": true,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        },
+        {
+          "window": "late",
+          "name": "baseline",
+          "serialized_models": 1,
+          "rows": 25536,
+          "max_abs_error": 0.0,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        },
+        {
+          "window": "late",
+          "name": "stable_covariance",
+          "serialized_models": 1,
+          "rows": 25536,
+          "max_abs_error": 0.0,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            },
+            {
+              "blend": true,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        },
+        {
+          "window": "late",
+          "name": "adaptive_covariance",
+          "serialized_models": 1,
+          "rows": 25536,
+          "max_abs_error": 0.0,
+          "contract": [
+            {
+              "blend": false,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            },
+            {
+              "blend": true,
+              "by_name_and_row_permutation": true,
+              "rank_parity": true
+            }
+          ]
+        }
+      ],
+      "complete": true,
+      "all_passed": true
+    },
+    "confirmation_labels_read": false
+  },
+  "compute": {
+    "inner_coefficient_paths": 2835,
+    "method": "direct matrix solutions; no new neural training"
+  },
+  "platform_writes": false
+}
