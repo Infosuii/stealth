@@ -1,4 +1,5 @@
-# Full tier (laptop CPU, 2.5-3.5 h, < 8 GB; + optional MLP on the GPU venv). Final run (handoff 04).
+# Full tier (laptop, 16 of 20 threads, ~1-2 h scaled from handoff 02, < 8 GB; + the MLP on the GPU venv). Handoff 04.
+# Development eras 2800..5924 choose everything; eras 5945..6524 are a reserved audit (cv.audit), scored once at the end.
 # Schema: docs/INTERFACES.md sections 7 + 11. Resumable: Optuna SQLite + member cache in artifacts/<run_id>/.
 # Budget goes into MEMBERS, not trials (C6). Hyperparameter values stay here + artifacts/, never in handoff results.
 name: full

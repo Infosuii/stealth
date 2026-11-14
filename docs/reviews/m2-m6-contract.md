@@ -85,3 +85,44 @@ neutralisation provenance; (4) finite numeric inputs and float-output validation
 the real checker in `artifacts/pklcheck_venv/bin/python`, including an MLP bundle and 50 validation eras. Root
 prepared `.venv/bin/python` for tests and the isolated checker interpreter; no dependency installation is needed
 unless subsequent inspection shows drift.
+
+## Fix verification (2026-11-14)
+
+All seven findings are fixed; interfaces are in `docs/INTERFACES.md` section 22.K. Each item names its tests, mostly in
+`tests/test_contract_gates.py`.
+1. **One upload gate.** `predict.check_upload_artifact` guards every upload path: lane upload, `diag --upload`,
+   `--attach-pkl` and `--preflight`. It runs before any client exists. Eight bad states are tested across predict,
+   diag and attach, each asserting zero client creations: no manifest, stale sha, failed, running, a pass recorded for
+   other bytes, a legacy pass without a hash, built under 3.12, checked under 3.12.
+2. **Checker trust and stale passes.**
+   - The checker subprocess verifies the installed lane pins and that neither stealth nor torch is importable.
+   - It hashes the bytes it checked, before and after the run.
+   - `main` writes a non-passing `running` record first, and an `error` record on any exception.
+   - All paths are made absolute before the subprocess starts.
+   - The training venv now fails.
+   - Tests: `test_run_check_refuses_the_training_venv`, `test_run_check_verifies_installed_pins`,
+     `test_run_check_resolves_relative_paths` (CLI too), `test_pkl_check_main_never_leaves_a_stale_pass`,
+     `test_check_record_is_bound_to_the_checked_bytes`.
+   - `monitor` now also requires the pass to be bound to the manifest sha
+     (`test_ops.py::test_monitor_refuses_a_pass_bound_to_other_bytes`).
+3. **Declared full refits.** `bundle.member_blob_files` uses exactly `spec.full_blobs`. A missing declared refit or
+   an extra undeclared one is an error, and the legacy glob applies only when the key is absent
+   (`test_declared_full_blobs_are_enforced`).
+4. **Relative paths.** Resolved before the chdir and the subprocess (see item 2).
+5. **Subset neutralisation.** A new `p_source` value, `inherited`, which `--require-frozen` refuses; explicit
+   overrides stay `override` (handoff 03's command still works). Test:
+   `test_member_subset_inherits_simulated_constants_unless_it_is_the_selected_blend`.
+6. **Sparse fold names.** `check_fold_fallback` validates the exact loaded fold names and refuses unknown metadata
+   (`test_fold_fallback_validates_the_exact_loaded_fold_names`).
+7. **Finite numbers.** Non-finite or negative weights and constants are refused in `build_bundle` and `make_predict`.
+   `validate_predictions` requires a numpy float column, matching the checker. Tests:
+   `test_non_finite_constants_and_weights_are_refused`, `test_make_predict_refuses_non_finite_numbers`.
+
+**Real-data evidence on the sandbox**, using the clean lane venv `artifacts/pklcheck_venv` and the minifull run `mf01`:
+- The frozen bundle (`--require-frozen`, `p_source simulation`) passed `pkl_check` on 51 eras, bound to its sha256.
+- A bundle of the same run that includes the trained MLP (`--members lgbm_everest ridge_everest mlp_everest --p-b 0.5
+  --p-c 0.25`) passed on 51 eras with the benchmark neutralisation active. Correlation with the benchmark fell from
+  0.648 to 0.405. The byte scan found `torch` 0 times and only `stealth._runtime` references; all 9 pins were verified;
+  slowest call 0.69 s.
+- Handoff 03's legacy `m1_lgbm` manifest pass has no hash, so it no longer satisfies any upload gate. A future upload
+  re-runs `pkl_check` first.

@@ -241,3 +241,41 @@ Appended rather than rewritten; each item names the review finding it resolves a
 8. **Benchmark frame handling (contract review 4).** A DataFrame handed to `predict` is reduced by `_runtime.select_benchmark_column` (preferred names `eiq_minera_model`/`v1_sherpa`, else the first numeric column) and `last_info["bench_column"]` records the choice — never a blind `iloc[:, 0]`.
 9. **Monitor (contract review 5; handoff review 11).** `coverage_pct == 0` is no longer "full"; `None` (field unpublished) still counts as full. `scripts/daily_task.sh` treats monitor exit 2 (nothing configured yet) as "nothing to do, exit 0" so the cron fallback is silent until handoff 05 fills `EIQ_MODEL_ID`/`models/active.json`; whether `handoffs/ALERT.md` is auto-pushed is decided at handoff 05.
 10. **Laptop setup (handoff review 1–3).** `selfcheck` reports `EIQ_API_KEY` presence from the environment *or* `.env` (presence only). `scripts/setup.sh` creates the venv with `uv venv --seed` (pip present), backfills pip if missing, and prints `GIT IDENTITY MISSING -> HUMAN STEP` when `user.name`/`user.email` are unset; handoffs 00–02 carry the matching HUMAN STEP, the `GIT COMMIT FAILED — …` wording, the pytest-tail file (no silent re-run of the suite) and the `pkl_check: PASSED` operator-notes token that handoff 02 depends on.
+
+## Build notes (M2–M6 fix pass, 2026-11-14) — protocol changes after the three independent reviews
+
+Appended; details and as-built schemas in `docs/INTERFACES.md` section 22, findings and their regression tests in
+`docs/reviews/m2-m6-*.md` ("Fix verification"). These supersede the corresponding statements above.
+
+1. **The forward block is selection data, not confirmation.** It feeds knobs, search adoption, the ladder and the NNLS
+   gate, so its sign is reported as a selection estimate. Independent evidence comes from a **reserved audit**
+   (`cv.audit`, full: eras 5945–6524, DECISIONS #11): development CV runs on 2800–5924, the development forward block is
+   5340–5924, and the deployment full refits stop at 5924 too. After the blend is frozen, `stealth.audit` scores the
+   exact bundled blobs once against an unsearched default-universe LightGBM baseline (paired bootstrap, Sharpe,
+   cumulative-fit drawdown, four chronological segments, block-length sensitivity). An audit "win" is information,
+   never a gate. Handoff 02 has already looked at those eras, so the audit is independent of this run's selection only.
+2. **Tree counts (C8 tightened).** A fold's frozen count may only come from folds whose ENTIRE training provenance
+   (inner fit, inner validation, feature selection) is >= 20 eras from its test block: in practice each fold's own
+   inner split. The forward block also uses the last fold.
+3. **Gates.** Every paired gate needs >= 2 whole bootstrap blocks (`inference_valid`), otherwise it fails closed. The
+   pre-registered `p_pos >= 0.8` rules are unchanged. Holm for the knobs uses a null-centred one-sided bootstrap
+   p-value with the `(count + 1) / (n_boot + 1)` correction. No exact family-wise control is claimed under the
+   time-series dependence.
+4. **NNLS.** Meta-fit rows are purged >= 20 eras from the evaluation fold and the forward block. The gate and the
+   reported forward fit use the same weights; too few purged eras means no NNLS.
+5. **Regime simulation = the deployed recipe.** The weighted member blend is neutralised directly (no second
+   gaussianisation); missing core-proxy rows are z = 0 after ranking the valid ones; INOV is complete-case like the
+   SDK. Parity with `_runtime` + `everestapi.scoring` is tested to 1e-10.
+6. **Provenance.** A run fingerprint (config minus threads + data sha256 + protocol version) is checked before
+   anything is written; cells, studies and specs carry it. Members are `running` until every artifact is written.
+   External (MLP) members must match the run's fingerprint, seeds and epoch cap.
+7. **Suspect bar.** The in-run unsearched base cell (+ 0.004); `gates.baseline_fit` only for the same scoring layout
+   (full.yaml: null).
+8. **Packaging (contract review).** One upload gate for the lane and diagnostics uploads: a pkl_check pass bound to the
+   exact bytes, run in a checker that verifies its own pins and isolation. Declared full refits are enforced. Member
+   subsets inherit, but never freeze, the neutralisation constants. Numbers must be finite.
+9. **Pipeline + report (handoff review).** Atomic `pipeline.json` and per-step logs; signal-safe process groups; the
+   MLP runs on CUDA explicitly. Stale external members are refused. The report status comes from the evidence
+   (pipeline, pkl_check bound to the bytes, diag-file coverage, audit). Signed URLs are redacted.
+10. **Measurement budget for 04 (DECISIONS #12).** 5,000 paired-bootstrap draws and 1,000 simulation draws; search
+    trials, the XGB grid and seeds are unchanged.

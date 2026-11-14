@@ -78,3 +78,51 @@ After completing the fixes, add meaningful coverage for late-stage failure repor
 failure followed by successful retry, MLP exit 130/143, direct INT/TERM, stale external-member exclusion,
 optional audit ordering, captured stderr, signed URL scrubbing, and `--report` completion ordering. Then run
 the targeted tests and the coordinated minifull pipeline before declaring handoff 04 ready.
+
+## Fix verification (2026-11-14)
+
+The code findings are fixed (`docs/INTERFACES.md` section 22.L). The tests named below are in
+`tests/test_pipeline_states.py`, `tests/test_report_m7.py`, `tests/test_pipeline_script.py` and `tests/test_hook.py`.
+
+1. **Failed pipelines reported success.** The report status now comes from `pipeline.json`, metrics and the leak
+   check, the manifest's pkl_check (bound to the bytes), diag-file coverage and `audit.json`. Failed evidence gives
+   `failed`; missing evidence gives `incomplete`. The failing step's log tail is included (scrubbed). Timings come from
+   every attempt, so the first train's time survives a retrain. A finished pipeline records its compute result before
+   the report step; the report's own outcome goes in `report_step`. Tests:
+   - `test_all_evidence_ok_and_sections`, `test_failed_pipeline_step_tail_is_scrubbed`,
+     `test_unfinished_pipeline_is_never_ok`;
+   - `test_pkl_check_record_must_name_these_bytes`, `test_missing_files_behind_ok_steps_make_it_incomplete`,
+     `test_retry_keeps_every_attempts_step_seconds_and_mlp_tail`;
+   - `test_report_observes_a_finished_pipeline_and_its_failure_is_separate`,
+     `test_failure_then_retry_two_attempts_and_stderr_in_step_log`,
+     `test_killed_driver_leaves_running_attempt_marked_interrupted_next_time`.
+2. **MLP interruptions and stale members.** MLP exits 1 and 4 are a tolerated skip; exits 130, 143 and 137 mean
+   interrupted; any other code fails the pipeline. The first `train` runs with `--skip-external`. `retrain` uses
+   `--require-external` after a finished MLP and `--skip-external` otherwise. `--no-mlp --from blend` refuses (exit
+   64) while `oof.parquet` still holds the MLP. Independently, `blend.load_run` refuses stale external members. Tests:
+   `test_mlp_signal_exit_stops_the_pipeline`, `test_retrain_rules_for_external_members`,
+   `test_no_mlp_from_blend_refuses_a_stale_external_member`, `test_dry_run_audit_between_blend_and_bundle`.
+3. **GPU silently becoming CPU training.** The MLP defaults to `--device cuda` (no silent CPU fallback). `setup_gpu.sh`
+   reinstalls a CPU-only torch from the cu128 index (`test_setup_gpu_script_usage_and_cpu_build_reinstall`).
+4. **Redaction.** Signed-URL queries (X-Amz-*, X-Goog-*, signature/token/expires/credential) are redacted; log tails
+   lose hyperparameter `name=value` pairs and home paths; the pre-commit hook blocks signed URLs. Tests:
+   `test_scrub_signed_urls_and_is_idempotent`, `test_scrub_params_drops_hyperparameter_values`,
+   `test_log_tail_hides_home_directories`, new `test_hook.py` cases.
+5. **Handoff text.** Handoff 04 was rewritten:
+   - **Commands:** one GPU branch per block (4a / 4b); `pipefail` and exit codes captured from files; the pipeline
+     runs under `nohup` with `pipeline.json` polling, so a tool timeout cannot kill it; the only edit is restoring
+     `run.threads` itself.
+   - **Expectations:** time estimates scaled from handoff 02; technical success and the audit verdict are separate;
+     the SUSPECT bar is the in-run unsearched base cell.
+   - **Failure safety:** the manifest is committed only after a pass bound to its bytes; operator notes record what
+     happened, never success-shaped placeholders.
+
+**Real-data evidence on the sandbox** (2 cores, minifull with an external CPU-torch MLP):
+- Pipeline `mf01` ran OK end to end in 154 s: train 100, mlp 10, retrain 14, blend 16, audit 3, bundle 0,
+  pkl_check 3, diag 8 s, then report. Report status `ok`, with every evidence item bound to real files.
+- A same-command resume reused every cache and finished OK.
+- `--no-mlp --from blend` refused with its instruction.
+- Run `mf02` received TERM on the driver mid-train. The attempt was recorded `interrupted` (143), no process
+  survived, and the in-flight member was left `running`, never `done`.
+- The same-command re-run finished OK with both attempts recorded. Its blend decisions and audit numbers are
+  identical to the uninterrupted `mf01`.

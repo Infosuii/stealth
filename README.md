@@ -13,8 +13,11 @@ diagnostics lane.
 The model ships as a by-value cloudpickle `predict(live_features, live_benchmark_models=None)` for the platform's
 auto-run lane. It runs on CPU only, under Python 3.11 with the exact lane pins; torch never enters the pickle.
 
-Docs: plan in `docs/PLAN.md`; module contracts in `docs/INTERFACES.md` (sections 11–20 cover M2–M6); decisions in
-`docs/DECISIONS.md`.
+Selection runs on development eras only. `full.yaml` reserves eras 5945–6524 as an audit partition: no fit or choice
+of the run sees them, and `stealth.audit` scores the frozen model on them once, against an unsearched baseline.
+
+Docs: plan in `docs/PLAN.md`; module contracts in `docs/INTERFACES.md` (sections 11–20 cover M2–M6, section 22 the fix
+pass and the audit); decisions in `docs/DECISIONS.md`; review findings and their regression tests in `docs/reviews/`.
 
 ## Quickstart (Linux)
 
@@ -37,19 +40,23 @@ and pushes.
 | config | where | what | time |
 |---|---|---|---|
 | `configs/smoke.yaml` | sandbox / laptop | eras ≥ 5000, 3 folds, 2 LGBM + ridge, 50-draw simulation — proves the M1 pipeline | ≤ 8 min on 2 cores |
-| `configs/minifull.yaml` | sandbox | every M2–M6 path at toy scale: knobs on a pool from 4600, TPE search + adoption gate, aux, XGB grid, tiny CatBoost, ridge, sharpe arm, 2 bags, MLP on CPU torch, ladder, 4×3 (p_b, p_c) grid, `bundle --require-frozen` | ≤ 8 min on 2 cores |
+| `configs/minifull.yaml` | sandbox | every M2–M6 path at toy scale: knobs on a pool from 4600, TPE search + adoption gate, aux, XGB grid, tiny CatBoost, ridge, sharpe arm, 2 bags, MLP on CPU torch, ladder, 4×3 (p_b, p_c) grid, the reserved audit (5945–6524), `bundle --require-frozen` | ~3 min on 2 cores |
 | `configs/test.yaml` | laptop | eras ≥ 2800, 5 folds + forward block, 12-cell LGBM grid, 3 aux, 4 XGB, 1 timed CatBoost, ridge — the M1 baseline (handoff 02: OOF fit20 0.0238, forward 0.0313) | ~12 min on 16 threads |
-| `configs/full.yaml` | laptop (+ GPU for the MLP) | knobs, ≤ 25 TPE trials, 6 aux × 2 families, XGB 12, Cat 3, ridge, sharpe + 4 bags, MLP, admission ladder, simulation-frozen `p_b`/`p_c` — the model that gets uploaded | ~1–2.5 h |
+| `configs/full.yaml` | laptop (+ GPU for the MLP) | development eras 2800–5924: knobs, ≤ 25 TPE trials, 6 aux × 2 families, XGB 12, Cat 3, ridge, sharpe + 4 bags, MLP, admission ladder, simulation-frozen `p_b`/`p_c`; audit 5945–6524 | ~1–2 h |
 
 The pipeline runs these steps per run:
-1. `train --config C --run-id R --resume`
-2. (MLP) `scripts/mlp_train.py --run-id R --resume` in `.venv-gpu`
-3. `train --resume`, which loads the external member
+1. `train --config C --run-id R --resume --skip-external`
+2. (MLP) `scripts/mlp_train.py --run-id R --resume --device cuda` in `.venv-gpu`
+3. `train --resume --require-external`, which loads the finished external member
 4. `blend --run-id R`
-5. `bundle --run-id R --out models/X.pkl [--require-frozen]`
-6. `pkl_check models/X.pkl` (throwaway venv without `stealth`)
-7. `diag --pkl models/X.pkl --out artifacts/diag/R_validation.parquet` (file only)
-8. `report --run-id R --handoff NN`
+5. `audit --run-id R` (when `cv.audit.enabled`: the frozen blend on the reserved eras)
+6. `bundle --run-id R --out models/X.pkl [--require-frozen]`
+7. `pkl_check models/X.pkl` (throwaway venv without `stealth`, pins and isolation verified)
+8. `diag --pkl models/X.pkl --out artifacts/diag/R_validation.parquet` (file only)
+9. `report --run-id R --handoff NN`
+
+A run-id is bound to its config, data and protocol (`artifacts/R/run_fingerprint.json`). Anything else under the same
+run-id is refused before any file is touched. `artifacts/R/pipeline.json` records every attempt.
 
 One driver runs all of it, is idempotent, and resumes when re-run with the same command:
 ```bash
