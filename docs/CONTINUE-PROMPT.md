@@ -1,5 +1,10 @@
 # Development continuation prompt (after the M2–M6 fix pass)
 
+**Newer checkpoint:** sustained campaigns 03/04 followed the user's renewed major-improvement request. Best
+historical average gain: 11.5%, with a material loss in the latest discovery window. No candidate cleared
+promotion; the user's requested reliable major improvement is unfinished. Read the top of `docs/NEXT-SESSION.md`
+and both new result reports before planning further work. Do not rerun or silently change completed campaigns.
+
 **Latest checkpoint:** the user subsequently authorised autonomous model development and extensive local
 CPU/GPU compute. Read the current section of `docs/NEXT-SESSION.md` first. Handoff 04 and research rounds
 01/02 have finished; neither research round promoted a challenger. The historical prompt below must not

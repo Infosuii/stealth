@@ -2,6 +2,24 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+The user renewed the request for a **major predictive improvement**, including much longer training. Sustained
+campaigns 03/04 are complete; reports are `handoffs/results/campaign03-*` and `representations04-*`. Across them,
+336 nested search trials evaluated 1,008 inner tree fits, with more than 21,600 GPU training epochs plus refits.
+The best historical discovery FIT increased from 0.02181070 to 0.02431878 (+11.50%), but the latest discovery
+window fell from 0.02752725 to 0.02326433. Neither campaign cleared its predeclared promotion gates or 15%
+major-improvement criterion. The user's performance objective remains unmet. Do not present tests, epochs,
+code volume or this exploratory average gain as a reliable major improvement. Baseline01 remains selected;
+neither campaign loaded confirmation labels, exported a new deployment pickle or made a platform write.
+
+Long supervised fitting overfit. Target-free denoising improved the average, but did not solve temporal
+instability. All saved fold models replayed correctly, and the final suite passed 448 tests with one expected
+CUDA no-device-path skip. Encoder weights were unchanged after permuting targets in a regression check.
+Protocols: `docs/CAMPAIGN-03.md`, `docs/REPRESENTATIONS-04.md`. Source-bound private checkpoints live under
+`artifacts/campaign03` and `artifacts/representations04`. Reproduce campaign03 at `a8a3d00`/`bbbb29b`, before the
+runtime extension; reproduce representations04 at `3ad0a71` or its report commit. Changing source requires a
+new run ID; do not bypass the plan guard or retune on the old audit. Further development needs a new explicit
+experiment design and honest historical/prospective evidence, not a relaxed gate after seeing these scores.
+
 The user's latest instruction authorises autonomous model development and prioritises powerful local CPU/GPU
 compute over compute cost. This supersedes the old laptop-operator-only prohibition on code changes for new
 research. The preference is recorded in `docs/DECISIONS.md` and `docs/RESEARCH-01.md`. Always use the absolute

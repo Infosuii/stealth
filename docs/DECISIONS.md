@@ -59,6 +59,13 @@ Protocols: `docs/RESEARCH-01.md`, `docs/RESEARCH-02.md`. Complete results: `hand
 `handoffs/results/research02-*`. These are historical selection estimates. New research remains separate from
 platform uploads, live submissions, model-slot changes, staking and any separately specified M7 refit.
 
+The user subsequently renewed the major-improvement request and explicitly suggested much longer training.
+Campaigns 03/04 used sustained nested searches, complete long neural schedules and target-free representation
+learning. Their best observed historical FIT gain was 11.5%, with a material loss in the latest window; no
+candidate qualified for promotion. The 15% major-improvement threshold was the agent's predeclared operational
+criterion, not a promise from or a threshold supplied by the user. The requested reliable major gain remains
+unachieved. Preserve all failed/positive evidence and do not relax completed gates to manufacture a success.
+
 ## Standing rules (unchanged)
 
 - Nothing is submitted, uploaded, or staked without a handoff carrying a **USER MUST APPROVE** banner.

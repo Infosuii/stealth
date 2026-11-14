@@ -724,3 +724,26 @@ status from that evidence (pipeline.json, metrics/leak, manifest pkl_check bound
 evidence, packaging, diagnostics-file and audit sections; labels development figures "selection estimates";
 `scrub()` also redacts signed-URL queries (X-Amz-*, X-Goog-*, signature/token/expires), `scrub_params()` drops
 hyperparameter name=value pairs from log tails, home directories shorten to `~/`. The pre-commit hook blocks signed URLs.
+
+
+## Local research basis models (2026-11-14)
+
+The research-only `basis` runtime family consumes the declared raw feature columns with `input: nan` and
+numeric/string NPZ blobs (`allow_pickle=False`). Existing linear, polynomial, categorical, quadratic,
+residual-tree and numeric neural forms share their transforms between training and inference. Neural weights
+are exported to NumPy; no torch import is permitted in the package or clean runtime. External training scripts
+are explicitly allowlisted in `tests/test_no_torch.py`.
+
+The `latent_tree` basis form stores a fit-only Gaussian-bin projection, its feature mean, scalar `context` and
+`add_raw` flags, and serialized LightGBM bytes. Projection and layer dimensions and finite numeric arrays are
+validated before inference. With `context` enabled, latent coordinates are standardized using only the current
+cross-section's features. Training and offline evaluation must transform each era separately; portable
+`predict` receives one live cross-section. Passing multiple eras together changes the defined model.
+`stealth.diag` already invokes prediction separately by era. Column order is resolved from declared feature
+names; row permutation must preserve scores after reindexing.
+
+`configs/campaign.yaml` and `configs/representations.yaml` define separate local research workflows, not the
+`stealth.train` schema. Their source/data-bound plan hashes reject changed code or configuration under a cached
+run ID. Discovery readers exclude confirmation and old-audit labels. Reports retain rejected candidates and
+label all historical scores as selection estimates. These workflows perform no platform write; a research
+score does not imply a promoted artifact or a clean-check pass on a full-data pickle.
