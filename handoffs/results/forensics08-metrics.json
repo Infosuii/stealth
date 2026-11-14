@@ -1,0 +1,174 @@
+{
+  "label": "descriptive matched trial-population diagnostics; no test-period model selection",
+  "cases": [
+    {
+      "source_run": "campaign03",
+      "window": "early",
+      "trials": 64,
+      "source_database_sha256": "e29d45ec0e70072c2339c70d348fcd99c815f83e8b0804270c59a222f1a2eba0",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": 0.021703296703296703,
+      "outer_fit_min": -0.003182636203116836,
+      "outer_fit_median": 0.005781818687875822,
+      "outer_fit_max_oracle_only": 0.012158932345579224,
+      "selected_individual_fit_mean": 0.006064588678458852,
+      "selected_outer_percentiles": [
+        0.234375,
+        0.453125,
+        0.953125
+      ]
+    },
+    {
+      "source_run": "campaign03",
+      "window": "late",
+      "trials": 64,
+      "source_database_sha256": "bdbc7f2ce2fa2a271d3005c21b500c73ef478e9fb80115aff89bb43f3e4dfbed",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": -0.2743131868131868,
+      "outer_fit_min": 0.019400086716517308,
+      "outer_fit_median": 0.025549767073637403,
+      "outer_fit_max_oracle_only": 0.029496891007199023,
+      "selected_individual_fit_mean": 0.0242721295511837,
+      "selected_outer_percentiles": [
+        0.546875,
+        0.234375,
+        0.140625
+      ]
+    },
+    {
+      "source_run": "campaign03",
+      "window": "middle",
+      "trials": 64,
+      "source_database_sha256": "d256023f1508eb2c73f7cac37663bb1a701b05de42e211268149c43b7c8392bc",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": -0.03914879978278218,
+      "outer_fit_min": 0.01319352356458133,
+      "outer_fit_median": 0.03226034131278108,
+      "outer_fit_max_oracle_only": 0.03773153454327475,
+      "selected_individual_fit_mean": 0.0301538354300693,
+      "selected_outer_percentiles": [
+        0.6875,
+        0.3125,
+        0.1875
+      ]
+    },
+    {
+      "source_run": "repairs07",
+      "window": "early",
+      "trials": 48,
+      "source_database_sha256": "b39155e894fa47b3e1810a44d075fe53f95b84904058add0c862a17666453fc1",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": -0.511528238902514,
+      "outer_fit_min": -0.0003306505512702116,
+      "outer_fit_median": 0.0028118876730554927,
+      "outer_fit_max_oracle_only": 0.009030993854927977,
+      "selected_individual_fit_mean": 0.003390733293256759,
+      "selected_outer_percentiles": [
+        0.020833333333333332,
+        1.0,
+        0.3125
+      ]
+    },
+    {
+      "source_run": "repairs07",
+      "window": "late",
+      "trials": 48,
+      "source_database_sha256": "f884f11e146947a88f34b0765d731bfc265ef6a4e1a127e727950c506069f7fd",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": -0.33543204515848896,
+      "outer_fit_min": 0.02099889354888118,
+      "outer_fit_median": 0.026335098730683647,
+      "outer_fit_max_oracle_only": 0.029252288956616135,
+      "selected_individual_fit_mean": 0.022487111447908603,
+      "selected_outer_percentiles": [
+        0.25,
+        0.020833333333333332,
+        0.041666666666666664
+      ]
+    },
+    {
+      "source_run": "repairs07",
+      "window": "middle",
+      "trials": 48,
+      "source_database_sha256": "67d248bef7c93539eac0fdbc33b62b874b862694b8358ab32393b1fb44cfaa43",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": -0.15653495440729484,
+      "outer_fit_min": 0.011540180223043586,
+      "outer_fit_median": 0.029359136282386157,
+      "outer_fit_max_oracle_only": 0.033287742721260005,
+      "selected_individual_fit_mean": 0.022361179733869304,
+      "selected_outer_percentiles": [
+        0.041666666666666664,
+        0.625,
+        0.0625
+      ]
+    },
+    {
+      "source_run": "representations04",
+      "window": "early",
+      "trials": 48,
+      "source_database_sha256": "4d7aae4217d67228f2fdd1cc85b2eae57b15a865b5ce59f344ad6a6aae692710",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": -0.06524276062868944,
+      "outer_fit_min": -0.005452290865382693,
+      "outer_fit_median": 0.0033602953599522105,
+      "outer_fit_max_oracle_only": 0.012776866614227151,
+      "selected_individual_fit_mean": 0.008187961048772452,
+      "selected_outer_percentiles": [
+        0.9791666666666666,
+        0.4583333333333333,
+        0.9375
+      ]
+    },
+    {
+      "source_run": "representations04",
+      "window": "late",
+      "trials": 48,
+      "source_database_sha256": "0ca1a9da8ac809e60d63c617094fa72abdf935e2d68abba55cb4df9fbb58576b",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": -0.4197785497177594,
+      "outer_fit_min": 0.014924333211600655,
+      "outer_fit_median": 0.022153717410771028,
+      "outer_fit_max_oracle_only": 0.029614859789169626,
+      "selected_individual_fit_mean": 0.020385491661780473,
+      "selected_outer_percentiles": [
+        0.0625,
+        0.4791666666666667,
+        0.375
+      ]
+    },
+    {
+      "source_run": "representations04",
+      "window": "middle",
+      "trials": 48,
+      "source_database_sha256": "0fe4b849c96ea56ac3aed2f70a0d914898333e17dc62a9862d49b90d7db25ae0",
+      "selected_ensemble_replayed": true,
+      "inner_outer_spearman": 0.1064915327833261,
+      "outer_fit_min": 0.019423278577871524,
+      "outer_fit_median": 0.028466312446231885,
+      "outer_fit_max_oracle_only": 0.03258470129119246,
+      "selected_individual_fit_mean": 0.02853459313332901,
+      "selected_outer_percentiles": [
+        0.16666666666666666,
+        0.7083333333333334,
+        0.8125
+      ]
+    }
+  ],
+  "total_refits": 480,
+  "source_plan": {
+    "data_sha256": "54a8e0194d94164f4c731b16773674916d9b6272d72d7efe4555a7e3e5942df2",
+    "code_sha256": {
+      "scripts/diagnose_selection.py": "cf8d52dcf79a32c22f5f1474c54643acac21174c04606d2316a3658d82d7fd49",
+      "scripts/diagnose_models.py": "f29d7e91c33f7cef39986b66e6417030201c0c8991fc4f6a7077ac8e4e770cc4",
+      "stealth/_runtime.py": "e1710dd3c67f397bf3d3fc299cd3b1bc9a5b0c4793fa8f97f3b05c5ba5af54c7",
+      "stealth/campaign_models.py": "539c9b9e7457e932bd1b8a418d530899ec660422f137ff3f15255d5699bdac9e",
+      "stealth/representation_models.py": "48b58755d4c932e76485c82a889775207fa5dd964a84eedbe71a8487fe6cb6c4"
+    },
+    "reader_ceiling": 5300,
+    "trial_limit": null
+  },
+  "validation": "459 passed, 1 skipped in 124.08s",
+  "confirmation_labels_read": false,
+  "platform_writes": false
+}
