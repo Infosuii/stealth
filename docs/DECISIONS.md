@@ -32,7 +32,19 @@ Decisions made by the user that shape the build. Newest at the bottom.
 | 14 | Handoff 03 | Accepted (upload `35bfe266…`); 04 must not repeat it. Four diagnostics uploads remain, each its own USER MUST APPROVE handoff. |
 | 15 | Laptop for 04 | Linux, 20 logical threads with `run.threads: 16`, RTX 5070 Ti (MLP via `--device cuda`, no silent CPU fallback), ~30.8 GB RAM, Europe/London. |
 
-## Standing rules
+## 2026-11-14 — after laptop 04 and delegated follow-up
+
+The user delegated the development follow-up to the laptop agent. Handoff 04 completed technically but reported
+no audit win. Preserve the pre-registered unsearched comparator as the conservative candidate; do not promote
+the larger blend from its optimistic development scores. `bundle --audit-baseline` exports its existing refits
+without changing any model decisions or fitting on the audit. The baseline differs from the knob-selected
+`--members lgbm_everest` export.
+
+All newly inspected diagnostics would be additional selection evidence, never a new untouched holdout. Optional
+diagnostics #2 gets handoff 05; M7 refit/deployment remains separately specified and authorised. This follow-up
+performs no uploads, submissions, model-slot changes or staking. See `docs/reviews/bot-followup-2026-11-14.md`.
+
+## Standing rules (unchanged)
 
 - Nothing is submitted, uploaded, or staked without a handoff carrying a **USER MUST APPROVE** banner.
 - `.env`, `data/`, `artifacts/`, `models/*.pkl` are never committed. Pre-commit hook blocks secrets.

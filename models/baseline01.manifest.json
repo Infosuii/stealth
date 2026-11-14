@@ -1,0 +1,86 @@
+{
+  "pkl": "baseline01.pkl",
+  "sha256": "8df233b1f2e40931693bc953093c03b94541490d9b20126bef0cf5fac8aa43a6",
+  "size_bytes": 97295,
+  "version": "0.1.0",
+  "git_sha": "915b9f8f9ba764887a706b23a61e7e6bb548e626",
+  "run_id": "full01",
+  "built_at": "2026-11-14T09:01:43+00:00",
+  "python": "3.11.18",
+  "libs": {
+    "lightgbm": "4.7.0",
+    "xgboost": "3.2.0",
+    "catboost": "1.2.10",
+    "scikit-learn": "1.9.1",
+    "numpy": "2.4.6",
+    "pandas": "3.0.6",
+    "scipy": "1.17.1",
+    "cloudpickle": "3.1.2"
+  },
+  "members": [
+    {
+      "name": "lgbm_everest",
+      "family": "lgbm",
+      "target": "target_everest",
+      "group": "everest",
+      "arm": "lgbm",
+      "input": "nan",
+      "n_features": 178,
+      "n_blobs": 2
+    }
+  ],
+  "weights": {
+    "lgbm_everest": 1.0
+  },
+  "p_b": 0.0,
+  "p_c": 0.0,
+  "p_source": "override",
+  "p_reason": "exact unneutralised unsearched audit comparator; no post-audit tuning or refit",
+  "blend_rule": "audit_baseline",
+  "admitted_arms": [
+    "lgbm"
+  ],
+  "member_subset": [
+    "lgbm_everest"
+  ],
+  "weights_source": "unsearched audit baseline",
+  "artifact_source": "audit_baseline",
+  "source_run_fingerprint": "f969dc8080732e4d972a31e42f730f68ca3c5bf0e249ebf76ea9e60f2700c345",
+  "source_universe": "e2800-none-d0",
+  "blob_files": {
+    "lgbm_everest": [
+      "full_s0.bin",
+      "full_s1.bin"
+    ]
+  },
+  "core_proxy_cols": [],
+  "n_features": 178,
+  "pkl_check": {
+    "passed": true,
+    "status": "passed",
+    "at": "2026-11-14T09:01:44+00:00",
+    "sha256": "8df233b1f2e40931693bc953093c03b94541490d9b20126bef0cf5fac8aa43a6",
+    "python": "3.11.18",
+    "libs": {
+      "catboost": "1.2.10",
+      "cloudpickle": "3.1.2",
+      "lightgbm": "4.7.0",
+      "numpy": "2.4.6",
+      "pandas": "3.0.6",
+      "pyarrow": "24.0.0",
+      "scikit-learn": "1.9.1",
+      "scipy": "1.17.1",
+      "xgboost": "3.2.0"
+    },
+    "checker": "/home/om/Projects/eversteer/stealth/artifacts/pklcheck_venv/bin/python",
+    "eras": 51,
+    "seconds_per_era_max": 0.31972202999168076,
+    "isolation": {
+      "stealth_importable": false,
+      "torch_importable": false
+    },
+    "problems": []
+  },
+  "sandbox_sha256": null,
+  "upload_id": null
+}

@@ -69,4 +69,30 @@ No larger search, extra seed bagging, post-audit parameter tuning, full-data M7 
 model-slot change or stake is part of this follow-up. Diagnostics #2 is optional calibration under handoff 05;
 it does not automatically promote the challenger. A fresh assessment requires an agreed prospective protocol.
 
-Verification counts and the exact exported baseline's packaging evidence are recorded after execution below.
+## Executed verification
+
+- Final integrated suite with the GPU interpreter available: **418 passed, 1 skipped in 103.98s**. Earlier focused
+  statistics/contract run: 209 passed; focused export/contract run: 145 passed; reporter follow-up: 34 passed.
+- Shell syntax and `git diff --check` passed. Platform writes in the suite use fake clients only.
+- Exported `models/baseline01.pkl` from code commit `915b9f8`, without retraining. Its SHA256 is
+  `8df233b1f2e40931693bc953093c03b94541490d9b20126bef0cf5fac8aa43a6`.
+- Real clean-lane checker passed on 51 eras, with all nine pins and both import-isolation flags verified; zero
+  torch references and zero non-runtime stealth references. File size 0.10 MB, slowest call 0.31972203 s.
+- The loaded pickle matched the original `audit_baseline.parquet` ranks on **all 53,292 rows / 580 eras**, with
+  maximum rank error **0.0**. Only features and saved predictions were read; no targets, new audit score or fit.
+  Detailed local evidence: `artifacts/baseline01.verification.json` and `artifacts/baseline01.check.json`.
+- Built the baseline's full validation diagnostics file: **125,931 rows / 1,392 eras**. Offline live dry run passed
+  for **90 rows / 90 unique predictions**. Both baseline and unchanged full01 passed diagnostics preflight;
+  neither has a new upload record.
+- The original full01 pickle, blend, audit and validation predictions were not rebuilt or overwritten. The
+  existing handoff 03 upload was not repeated. Pickles, predictions, data and private artifacts remain uncommitted.
+
+## Next decision
+
+The baseline is locally ready, not deployed. It is the preserved default comparator, not an independently proved
+new strategy. Keep its raw constants; do not infer an unmeasured platform UNQ/INOV improvement from audit FIT.
+Full01 remains a challenger. Handoff 05 is an optional, single validation upload of its exact frozen bytes;
+it carries a fresh approval step and no promotion path. Keep all four remaining diagnostics uploads unless a
+specific calibration question warrants using one. Before any M7 live deployment, specify the chosen recipe,
+prospective evaluation window, no-stake operating mode, monitoring and stop conditions; authorise that handoff
+separately. No further adaptive use of the old audit or larger search is justified by the current evidence.
