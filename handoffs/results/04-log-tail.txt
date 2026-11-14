@@ -1,0 +1,60 @@
+2026-11-14 01:54:59,451 INFO stealth.data: loaded futures_train.parquet: 468236 rows, 6522 eras (3..6524)
+2026-11-14 01:58:58,143 INFO stealth.metrics: regime mean=0 p_c=0: p_b=0 mix score 0.0400 sharpe 0.381; p_b=0.25 mix score 0.0429 sharpe 0.382; p_b=0.5 mix score 0.0458 sharpe 0.382; p_b=0.75 mix score 0.0479 sharpe 0.379
+2026-11-14 01:58:59,246 INFO stealth.metrics: regime mean=0 p_c=0.25: p_b=0 mix score 0.0401 sharpe 0.381; p_b=0.25 mix score 0.0431 sharpe 0.383; p_b=0.5 mix score 0.0460 sharpe 0.384; p_b=0.75 mix score 0.0482 sharpe 0.382
+2026-11-14 01:59:00,357 INFO stealth.metrics: regime mean=0 p_c=0.5: p_b=0 mix score 0.0400 sharpe 0.381; p_b=0.25 mix score 0.0431 sharpe 0.384; p_b=0.5 mix score 0.0461 sharpe 0.385; p_b=0.75 mix score 0.0483 sharpe 0.384
+2026-11-14 02:02:58,016 INFO stealth.metrics: regime mean=0.009 p_c=0: p_b=0 mix score 0.0394 sharpe 0.360; p_b=0.25 mix score 0.0407 sharpe 0.347; p_b=0.5 mix score 0.0414 sharpe 0.331; p_b=0.75 mix score 0.0411 sharpe 0.311
+2026-11-14 02:02:59,022 INFO stealth.metrics: regime mean=0.009 p_c=0.25: p_b=0 mix score 0.0395 sharpe 0.361; p_b=0.25 mix score 0.0408 sharpe 0.347; p_b=0.5 mix score 0.0416 sharpe 0.332; p_b=0.75 mix score 0.0413 sharpe 0.313
+2026-11-14 02:03:00,041 INFO stealth.metrics: regime mean=0.009 p_c=0.5: p_b=0 mix score 0.0394 sharpe 0.361; p_b=0.25 mix score 0.0408 sharpe 0.348; p_b=0.5 mix score 0.0416 sharpe 0.333; p_b=0.75 mix score 0.0414 sharpe 0.315
+2026-11-14 02:06:59,026 INFO stealth.metrics: regime mean=0.02 p_c=0: p_b=0 mix score 0.0377 sharpe 0.330; p_b=0.25 mix score 0.0368 sharpe 0.300; p_b=0.5 mix score 0.0348 sharpe 0.266; p_b=0.75 mix score 0.0314 sharpe 0.228
+2026-11-14 02:07:00,122 INFO stealth.metrics: regime mean=0.02 p_c=0.25: p_b=0 mix score 0.0378 sharpe 0.331; p_b=0.25 mix score 0.0369 sharpe 0.301; p_b=0.5 mix score 0.0350 sharpe 0.267; p_b=0.75 mix score 0.0316 sharpe 0.229
+2026-11-14 02:07:01,182 INFO stealth.metrics: regime mean=0.02 p_c=0.5: p_b=0 mix score 0.0377 sharpe 0.331; p_b=0.25 mix score 0.0368 sharpe 0.301; p_b=0.5 mix score 0.0350 sharpe 0.268; p_b=0.75 mix score 0.0316 sharpe 0.230
+2026-11-14 02:07:01,182 INFO stealth.metrics: regime grid: 1000 draws x 3 means x 12 cells (4 p_b x 3 p_c) on 3125 eras in 721.5s
+2026-11-14 02:07:01,188 INFO stealth.blend: regime grid: 1000 draws x 12 cells on 3125 eras in 721s (extrapolated 500 draws: 361s)
+2026-11-14 02:07:01,190 INFO stealth.blend: regime grid (mix):
+ bench_mean    p_c    p_b regime    fit    unq   inov  score  score_se  score_sharpe  n_eras   frac
+     0.0000 0.0000 0.0000    mix 0.0226 0.0031 0.0143 0.0400    0.0059        0.3808    3125 1.0000
+     0.0000 0.0000 0.2500    mix 0.0240 0.0035 0.0154 0.0429    0.0063        0.3822    3125 1.0000
+     0.0000 0.0000 0.5000    mix 0.0254 0.0038 0.0166 0.0458    0.0066        0.3820    3125 1.0000
+     0.0000 0.0000 0.7500    mix 0.0262 0.0041 0.0176 0.0479    0.0068        0.3794    3125 1.0000
+     0.0000 0.2500 0.0000    mix 0.0225 0.0031 0.0145 0.0401    0.0059        0.3815    3125 1.0000
+     0.0000 0.2500 0.2500    mix 0.0239 0.0034 0.0157 0.0431    0.0063        0.3830    3125 1.0000
+     0.0000 0.2500 0.5000    mix 0.0253 0.0038 0.0169 0.0460    0.0066        0.3837    3125 1.0000
+     0.0000 0.2500 0.7500    mix 0.0262 0.0041 0.0179 0.0482    0.0068        0.3818    3125 1.0000
+     0.0000 0.5000 0.0000    mix 0.0223 0.0031 0.0146 0.0400    0.0059        0.3814    3125 1.0000
+     0.0000 0.5000 0.2500    mix 0.0238 0.0034 0.0159 0.0431    0.0063        0.3836    3125 1.0000
+     0.0000 0.5000 0.5000    mix 0.0251 0.0038 0.0171 0.0461    0.0066        0.3850    3125 1.0000
+     0.0000 0.5000 0.7500    mix 0.0260 0.0041 0.0181 0.0483    0.0068        0.3837    3125 1.0000
+     0.0090 0.0000 0.0000    mix 0.0226 0.0026 0.0143 0.0394    0.0061        0.3599    3125 1.0000
+     0.0090 0.0000 0.2500    mix 0.0229 0.0029 0.0149 0.0407    0.0065        0.3468    3125 1.0000
+     0.0090 0.0000 0.5000    mix 0.0228 0.0032 0.0154 0.0414    0.0069        0.3306    3125 1.0000
+     0.0090 0.0000 0.7500    mix 0.0221 0.0035 0.0155 0.0411    0.0072        0.3113    3125 1.0000
+     0.0090 0.2500 0.0000    mix 0.0225 0.0025 0.0145 0.0395    0.0062        0.3606    3125 1.0000
+     0.0090 0.2500 0.2500    mix 0.0228 0.0029 0.0151 0.0408    0.0066        0.3474    3125 1.0000
+     0.0090 0.2500 0.5000    mix 0.0228 0.0032 0.0156 0.0416    0.0069        0.3320    3125 1.0000
+     0.0090 0.2500 0.7500    mix 0.0220 0.0035 0.0158 0.0413    0.0072        0.3133    3125 1.0000
+     0.0090 0.5000 0.0000    mix 0.0223 0.0025 0.0146 0.0394    0.0062        0.3605    3125 1.0000
+     0.0090 0.5000 0.2500    mix 0.0226 0.0028 0.0153 0.0408    0.0066        0.3477    3125 1.0000
+     0.0090 0.5000 0.5000    mix 0.0226 0.0032 0.0158 0.0416    0.0069        0.3330    3125 1.0000
+     0.0090 0.5000 0.7500    mix 0.0219 0.0035 0.0160 0.0414    0.0071        0.3148    3125 1.0000
+     0.0200 0.0000 0.0000    mix 0.0226 0.0008 0.0143 0.0377    0.0064        0.3301    3125 1.0000
+     0.0200 0.0000 0.2500    mix 0.0215 0.0011 0.0142 0.0368    0.0069        0.3005    3125 1.0000
+     0.0200 0.0000 0.5000    mix 0.0197 0.0014 0.0138 0.0348    0.0073        0.2662    3125 1.0000
+     0.0200 0.0000 0.7500    mix 0.0170 0.0016 0.0129 0.0314    0.0075        0.2278    3125 1.0000
+     0.0200 0.2500 0.0000    mix 0.0225 0.0008 0.0145 0.0378    0.0064        0.3308    3125 1.0000
+     0.0200 0.2500 0.2500    mix 0.0214 0.0011 0.0144 0.0369    0.0069        0.3009    3125 1.0000
+     0.0200 0.2500 0.5000    mix 0.0196 0.0014 0.0140 0.0350    0.0073        0.2672    3125 1.0000
+     0.0200 0.2500 0.7500    mix 0.0169 0.0016 0.0131 0.0316    0.0075        0.2293    3125 1.0000
+     0.0200 0.5000 0.0000    mix 0.0223 0.0008 0.0146 0.0377    0.0064        0.3309    3125 1.0000
+     0.0200 0.5000 0.2500    mix 0.0212 0.0010 0.0146 0.0368    0.0069        0.3009    3125 1.0000
+     0.0200 0.5000 0.5000    mix 0.0194 0.0014 0.0142 0.0350    0.0072        0.2678    3125 1.0000
+     0.0200 0.5000 0.7500    mix 0.0167 0.0016 0.0133 0.0316    0.0075        0.2304    3125 1.0000
+2026-11-14 02:07:01,190 INFO stealth.blend: neutralisation: 12/12 cells eligible; best mix score_sharpe 0.361 at bench mean 0.009; 6 in the tie set (within 0.02); W best 0.0363, 3 within 0.0005 -> simplest; chosen p_b=0 p_c=0: fit 0.0226 (vs 0.0226 at 0,0), score_sharpe 0.3599 (vs 0.3599), W 0.0362
+2026-11-14 02:07:01,190 INFO stealth.blend: final: arms ['lgbm', 'ridge'] rule nnls p_b=0 p_c=0 (simulation); OOF fit20 0.0226 forward 0.0219; central mix score 0.0394 score_sharpe 0.3599
+2026-11-14 02:07:01,191 INFO stealth.metrics: leak_check pass: mean OOF Spearman 0.1010 <= 0.18
+2026-11-14 02:07:01,196 INFO stealth.blend: wrote ~/Projects/eversteer/stealth/artifacts/full01/blend.json, member_corr.csv and updated metrics.json
+2026-11-14 02:07:02,417 INFO stealth.data: loaded futures_train.parquet: 468236 rows, 6522 eras (3..6524)
+2026-11-14 02:07:06,061 INFO stealth.metrics: regime mean=0 p_c=0: p_b=0 mix score 0.0457 sharpe 0.456
+2026-11-14 02:07:09,603 INFO stealth.metrics: regime mean=0.009 p_c=0: p_b=0 mix score 0.0454 sharpe 0.435
+2026-11-14 02:07:13,087 INFO stealth.metrics: regime mean=0.02 p_c=0: p_b=0 mix score 0.0439 sharpe 0.403
+2026-11-14 02:07:13,087 INFO stealth.metrics: regime grid: 1000 draws x 3 means x 1 cells (1 p_b x 1 p_c) on 580 eras in 10.6s
+2026-11-14 02:07:13,088 INFO stealth.audit: audit full01 eras 5945..6524: blend fit20 0.0266 (se 0.0070, sharpe 0.557) vs baseline 0.0308 (diff -0.0042, p_pos 0.041); drawdown 1.5745; no audit win: tie or loss against the unsearched baseline on the reserved eras (diff -0.0042, p_pos 0.041, p_value 0.948): technical completion only
