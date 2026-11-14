@@ -1,0 +1,108 @@
+{
+  "pkl": "full01.pkl",
+  "sha256": "c693300d81d1ff102cf684b8451836355ba82b216005ae42977dcf2c6fc3ab03",
+  "size_bytes": 186773,
+  "version": "0.1.0",
+  "git_sha": "1a0a9693f5b4fdf269d92f8b8bbb64085f8cb841",
+  "run_id": "full01",
+  "built_at": "2026-11-14T02:07:13+00:00",
+  "python": "3.11.18",
+  "libs": {
+    "lightgbm": "4.7.0",
+    "xgboost": "3.2.0",
+    "catboost": "1.2.10",
+    "scikit-learn": "1.9.1",
+    "numpy": "2.4.6",
+    "pandas": "3.0.6",
+    "scipy": "1.17.1",
+    "cloudpickle": "3.1.2"
+  },
+  "members": [
+    {
+      "name": "lgbm_everest",
+      "family": "lgbm",
+      "target": "target_everest",
+      "group": "everest",
+      "arm": "lgbm",
+      "input": "nan",
+      "n_features": 178,
+      "n_blobs": 2
+    },
+    {
+      "name": "ridge_everest",
+      "family": "ridge",
+      "target": "target_everest",
+      "group": "everest",
+      "arm": "ridge",
+      "input": "linear",
+      "n_features": 178,
+      "n_blobs": 2
+    }
+  ],
+  "weights": {
+    "lgbm_everest": 0.2551319698194973,
+    "ridge_everest": 0.7448680301805026
+  },
+  "p_b": 0.0,
+  "p_c": 0.0,
+  "p_source": "simulation",
+  "p_reason": "blend.json neutralisation (frozen from the regime simulation)",
+  "blend_rule": "nnls",
+  "admitted_arms": [
+    "lgbm",
+    "ridge"
+  ],
+  "member_subset": null,
+  "weights_source": "blend",
+  "blob_files": {
+    "lgbm_everest": [
+      "full_s0.bin",
+      "full_s1.bin"
+    ],
+    "ridge_everest": [
+      "full_s0.bin",
+      "full_s1.bin"
+    ]
+  },
+  "core_proxy_cols": [
+    "feature_Agouti",
+    "feature_Tazzarine",
+    "feature_Azzaden",
+    "feature_Tagmat",
+    "feature_Zaouiat",
+    "feature_Ighzer",
+    "feature_Amazigh",
+    "feature_Tafouk",
+    "feature_Zerrouka",
+    "feature_Mrirt"
+  ],
+  "n_features": 178,
+  "pkl_check": {
+    "passed": true,
+    "status": "passed",
+    "at": "2026-11-14T02:07:14+00:00",
+    "sha256": "c693300d81d1ff102cf684b8451836355ba82b216005ae42977dcf2c6fc3ab03",
+    "python": "3.11.18",
+    "libs": {
+      "catboost": "1.2.10",
+      "cloudpickle": "3.1.2",
+      "lightgbm": "4.7.0",
+      "numpy": "2.4.6",
+      "pandas": "3.0.6",
+      "pyarrow": "24.0.0",
+      "scikit-learn": "1.9.1",
+      "scipy": "1.17.1",
+      "xgboost": "3.2.0"
+    },
+    "checker": "/home/om/Projects/eversteer/stealth/artifacts/pklcheck_venv/bin/python",
+    "eras": 51,
+    "seconds_per_era_max": 0.3216879949977738,
+    "isolation": {
+      "stealth_importable": false,
+      "torch_importable": false
+    },
+    "problems": []
+  },
+  "sandbox_sha256": null,
+  "upload_id": null
+}
