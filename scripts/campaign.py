@@ -65,7 +65,7 @@ def fitted(spec,X,y,era,columns,directory):
     if spec['kind']=='latent_tree':
         from stealth.representation_models import fit_latent,grouped_prediction
         models,info=fit_latent(spec,X,y,era,columns,r.CONFIG['inner'],seed=r.CONFIG['seed'],threads=r.CONFIG['threads'],storage=directory/'search.sqlite')
-        return 'basis',[to_bytes(m) for m in models],lambda xx,eras:grouped_prediction(models,xx,eras),info
+        return 'basis',[to_bytes(m) for m in models],lambda xx,eras:grouped_prediction(models,xx,eras,spec.get('blob_rule','raw_mean')),info
     if spec['kind']=='stable_signal':
         from stealth.stability_models import fit_stability
         model,info=fit_stability(spec,X,y,era,columns,r.CONFIG['inner'])
@@ -87,7 +87,7 @@ def fit_job(window,spec):
         family,blobs,predict,info=fitted(spec,X,tr.target_everest.to_numpy(),tr.era.to_numpy(),columns,directory)
         prediction=predict(Xt,te.era.to_numpy())
         r.write_json(directory/'training.json',info)
-        r.save_fit(window,spec['name'],family,blobs,prediction,te,time.perf_counter()-start,{'training_sha256':r.sha(directory/'training.json')})
+        r.save_fit(window,spec['name'],family,blobs,prediction,te,time.perf_counter()-start,{'training_sha256':r.sha(directory/'training.json'),'blob_rule':spec.get('blob_rule','raw_mean')})
     return f'{window["name"]}/{spec["name"]}: done in {time.perf_counter()-start:.1f}s'
 
 
@@ -160,7 +160,7 @@ def package():
             family,blobs,_,info=fitted(spec,X,r.FRAME.target_everest.to_numpy(),r.FRAME.era.to_numpy(),columns,full)
             r.write_json(full/'training.json',info)
         members=[{'name':spec['name'],'family':family,'input':'nan','feature_cols':columns,'blobs':blobs,
-                  'target':'target_everest','arm':'campaign','group':'everest'}]
+                  'target':'target_everest','arm':'campaign','group':'everest','blob_rule':spec.get('blob_rule','raw_mean')}]
         weights={spec['name']:1.}
         if doc['blend_with_baseline']:
             base,_=r.baseline_fit(None,X,r.FRAME.target_everest.to_numpy(),r.FRAME.era.to_numpy())

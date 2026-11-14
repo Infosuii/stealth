@@ -99,6 +99,15 @@ def gaussianise(x: np.ndarray) -> np.ndarray:
     return out
 
 
+def average_blob_scores(scores: list[np.ndarray], rule: str = 'raw_mean') -> np.ndarray:
+    """Average raw scores or equally weighted cross-sectional Gaussian ranks."""
+    if rule == 'raw_mean':
+        return np.mean(np.vstack(scores), axis=0)
+    if rule == 'gaussian_mean':
+        return np.mean(np.vstack([gaussianise(score) for score in scores]), axis=0)
+    raise ValueError(f'unsupported blob averaging rule {rule!r}')
+
+
 def neutralise(z: np.ndarray, m: np.ndarray, p: float) -> np.ndarray:
     """Partial orthogonalisation ``z - p * m * (m . z) / (m . m)``.
 
@@ -606,6 +615,8 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
     blob_idx: list[list[np.ndarray] | None] = []
     for m in active:
         fam, inp = m["family"], m.get("input", "nan")
+        if m.get('blob_rule', 'raw_mean') not in ('raw_mean', 'gaussian_mean'):
+            raise ValueError(f"member {m['name']}: unsupported blob averaging rule")
         if fam not in SUPPORTED_FAMILIES:
             raise ValueError(f"member {m['name']}: unsupported family {fam!r} (supported: {SUPPORTED_FAMILIES})")
         unknown = [c for c in m["feature_cols"] if c not in col_pos]
@@ -658,7 +669,7 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
         else:
             X = nan_mat[:, member_idx[i]]
             scores = [predict_member(m["family"], model, X) for model in models]
-        return np.mean(np.vstack(scores), axis=0)
+        return average_blob_scores(scores, m.get('blob_rule', 'raw_mean'))
 
     needs_linear = any(b is not None for b in blob_idx)
 

@@ -11,13 +11,13 @@ from torch import nn
 import representations as rep
 from campaign_gpu import fit_window
 from stealth._runtime import basis_design,basis_forward
-from stealth.representation_models import design_path
+from stealth.representation_models import design_path,group_head
 from stealth.metrics import per_era_fit_fast
 
 log=logging.getLogger('denoise-gpu')
 
 
-def train(spec,X,y,era,columns,seed,epochs,valid=None,selection=None):
+def train(spec,X,y,era,columns,seed,epochs,valid=None,selection=None,encoder_source=None):
     start=time.perf_counter()
     torch.manual_seed(seed);torch.cuda.manual_seed_all(seed)
     torch.cuda.reset_peak_memory_stats()
@@ -32,8 +32,17 @@ def train(spec,X,y,era,columns,seed,epochs,valid=None,selection=None):
     average=copy.deepcopy(encoder).eval()
     optimizer=torch.optim.AdamW([*encoder.parameters(),*decoder.parameters()],lr=spec['lr'],weight_decay=spec['weight_decay'])
     curves=[]
+    if encoder_source is not None:
+        old=encoder_source['model']
+        if old['columns']!=columns:raise RuntimeError('reused encoder feature order changed')
+        np.testing.assert_allclose(old['x_mean'],mean,rtol=0,atol=1e-12)
+        np.testing.assert_allclose(old['x_std'],std,rtol=0,atol=1e-12)
+        with torch.no_grad():
+            for j,index in enumerate([0,3]):
+                average[index].weight.copy_(torch.as_tensor(old[f'W{j}'].T,dtype=torch.float32,device='cuda'))
+                average[index].bias.copy_(torch.as_tensor(old[f'b{j}'],dtype=torch.float32,device='cuda'))
     # No labels, targets or target-validation features are used in encoder updates.
-    for epoch in range(1,epochs+1):
+    for epoch in range(1,(epochs if encoder_source is None else 0)+1):
         encoder.train();decoder.train()
         rate=spec['lr']*(.03+.97*.5*(1+math.cos(math.pi*(epoch-1)/spec['epochs'])))
         for group in optimizer.param_groups:group['lr']=rate
@@ -68,19 +77,28 @@ def train(spec,X,y,era,columns,seed,epochs,valid=None,selection=None):
         return np.concatenate(output).astype(float)
     hidden=encode(design)
     hm,hs=hidden.mean(axis=0),np.maximum(hidden.std(axis=0),.1)
-    combined=np.concatenate([design,(hidden-hm)/hs],axis=1)
+    latent=(hidden-hm)/hs
     lambdas=spec['lambdas'] if valid is not None else [selection['selected_lambda']]
-    coefs,_=design_path(combined,np.asarray(y)[:,0],era,lambdas)
-    scores=None
+    groups=spec.get('raw_group_weights',[None]) if valid is not None else [selection.get('selected_raw_strength')]
+    paths=[]
     if valid is not None:
         vd=basis_design(valid[0],'linear')
-        vh=encode(vd)
-        prediction=np.concatenate([vd,(vh-hm)/hs],axis=1)@coefs
-        scores=[float(per_era_fit_fast(pd.Series(prediction[:,j]),pd.Series(valid[1]),pd.Series(valid[2])).mean()) for j in range(len(lambdas))]
-        best=int(np.argmax(scores))
-    else:best=0
-    coef=coefs[:,best]
-    result={'kind':'net','columns':columns,'coef':coef[:width],'x_mean':mean,'x_std':std,
+        vl=(encode(vd)-hm)/hs
+    for strength in groups:
+        if strength is None:
+            coefs,_=design_path(np.concatenate([design,latent],axis=1),np.asarray(y)[:,0],era,lambdas)
+            raw_scale=1.
+        else:
+            coefs,raw_scale,_=group_head(design,latent,np.asarray(y)[:,0],era,lambdas,strength)
+        scores=None
+        if valid is not None:
+            prediction=np.concatenate([vd*raw_scale,vl],axis=1)@coefs
+            scores=[float(per_era_fit_fast(pd.Series(prediction[:,j]),pd.Series(valid[1]),pd.Series(valid[2])).mean()) for j in range(len(lambdas))]
+        paths.append((strength,raw_scale,coefs,scores))
+    group,best=max(((g,j) for g in range(len(paths)) for j in range(len(lambdas))),key=lambda gj:paths[gj[0]][3][gj[1]]) if valid is not None else (0,0)
+    strength,raw_scale,coefs,_=paths[group];coef=coefs[:,best]
+    combined=np.concatenate([design*raw_scale,latent],axis=1)
+    result={'kind':'net','columns':columns,'coef':coef[:width]*raw_scale,'x_mean':mean,'x_std':std,
             'W0':average[0].weight.detach().cpu().numpy().T.copy().astype(float),'b0':average[0].bias.detach().cpu().numpy().copy().astype(float),
             'W1':average[3].weight.detach().cpu().numpy().T.copy().astype(float),'b1':average[3].bias.detach().cpu().numpy().copy().astype(float),
             'W2':(coef[width:]/hs)[:,None],'b2':np.array([-hm@(coef[width:]/hs)])}
@@ -89,7 +107,10 @@ def train(spec,X,y,era,columns,seed,epochs,valid=None,selection=None):
     reference=combined[:256]@coef/scale
     error=float(np.max(np.abs(reference-basis_forward(result,X[:256]))))
     if not np.isfinite(error) or error>1e-4:raise RuntimeError(f'denoiser numeric export mismatch: {error}')
-    info={'trained_epochs':epochs,'best_epoch':epochs,'selected_lambda':float(lambdas[best]),'head_inner_scores':scores,
+    info={'trained_epochs':epochs if encoder_source is None else 0,'reused_encoder_epochs':0 if encoder_source is None else encoder_source['trained_epochs'],
+          'encoder_source_sha256':None if encoder_source is None else encoder_source['sha256'],
+          'best_epoch':epochs,'selected_lambda':float(lambdas[best]),'selected_raw_strength':strength,'raw_group_input_scale':raw_scale,
+          'head_inner_scores':[{'raw_strength':p[0],'scores':p[3]} for p in paths],
           'curves':curves,'seconds':time.perf_counter()-start,'export_error':error,'peak_gpu_mb':torch.cuda.max_memory_allocated()/2**20}
     del raw,optimizer,encoder,decoder,average
     torch.cuda.empty_cache()

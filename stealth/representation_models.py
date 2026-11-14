@@ -4,7 +4,7 @@ import logging
 import numpy as np
 import pandas as pd
 from stealth import metrics
-from stealth._runtime import basis_design,basis_forward,latent_design
+from stealth._runtime import basis_design,basis_forward,latent_design,average_blob_scores
 from stealth.campaign_models import inner_windows
 from stealth.research_models import era_target
 
@@ -21,15 +21,32 @@ def covariance(design,era):
     return (gram+gram.T)*.5,weights
 
 
-def design_path(design,y,era,lambdas):
+def design_path(design,y,era,lambdas,*,penalty_mode='mean'):
     gram,weights=covariance(design,era)
     target=era_target(np.asarray(y),np.asarray(era))[0]
     rhs=design.T@(weights*target)
-    scale=max(float(np.trace(gram)/len(rhs)),1e-12)
+    if penalty_mode not in ('mean','trace'):raise ValueError('unknown ridge penalty mode')
+    scale=max(float(np.trace(gram)/(len(rhs) if penalty_mode=='mean' else 1)),1e-12)
     eigen,vectors=np.linalg.eigh(gram)
     penalties=np.asarray(lambdas)*scale
     coef=vectors@((vectors.T@rhs)[:,None]/(np.maximum(eigen,0)[:,None]+penalties[None,:]))
     return coef,penalties
+
+
+def group_head(raw,latent,y,era,lambdas,raw_strength):
+    """Equalize group variance and use a dimension-invariant total-trace penalty."""
+    if not np.isfinite(raw_strength) or raw_strength<0:raise ValueError('invalid raw-group strength')
+    def trace_variance(values):
+        _,count=np.unique(era,return_counts=True);order=np.argsort(era,kind='stable');d=values[order]
+        starts=np.r_[0,np.cumsum(count)[:-1]]
+        mean=np.add.reduceat(d,starts,axis=0)/count[:,None]
+        var=np.add.reduceat(d*d,starts,axis=0)/count[:,None]-mean*mean
+        return float(np.maximum(var,0).mean(axis=0).sum())
+    raw_var,latent_var=trace_variance(raw),trace_variance(latent)
+    scale=raw_strength*np.sqrt(latent_var/raw_var) if raw_var>1e-12 else 0.
+    combined=np.concatenate([raw*scale,latent],axis=1)
+    coef,penalties=design_path(combined,y,era,lambdas,penalty_mode='trace')
+    return coef,scale,penalties
 
 
 def projection(X,era,columns,n=64):
@@ -40,11 +57,11 @@ def projection(X,era,columns,n=64):
             'projection':vectors[:,-min(n,len(vectors)):][:,::-1].copy(),'context':False,'add_raw':False}
 
 
-def grouped_prediction(models,X,era):
+def grouped_prediction(models,X,era,rule='raw_mean'):
     result=np.empty(len(X))
     for e in np.unique(era):
         keep=np.asarray(era)==e
-        result[keep]=np.mean([basis_forward(m,X[keep]) for m in models],axis=0)
+        result[keep]=average_blob_scores([basis_forward(m,X[keep]) for m in models],rule)
     return result
 
 
@@ -63,7 +80,7 @@ def fit_latent(spec,X,y,era,columns,inner,*,seed,threads,storage):
         storage='sqlite:///'+str(storage),study_name='latent',load_if_exists=True)
     def objective(trial):
         p={'components':trial.suggest_categorical('components',[8,16,32,64]),
-           'context':trial.suggest_categorical('context',[False,True]),'add_raw':trial.suggest_categorical('add_raw',[False,True]),
+           'context':trial.suggest_categorical('context',[False,True]),'add_raw':trial.suggest_categorical('add_raw',[True] if spec.get('force_raw') else [False,True]),
            'num_leaves':trial.suggest_categorical('num_leaves',[4,8,16,31]),'learning_rate':trial.suggest_float('learning_rate',.005,.03,log=True),
            'leaf_fraction':trial.suggest_float('leaf_fraction',.01,.1,log=True),'lambda_l2':trial.suggest_float('lambda_l2',10,1000,log=True),
            'feature_fraction':trial.suggest_float('feature_fraction',.3,1)}
