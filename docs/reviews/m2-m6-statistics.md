@@ -44,3 +44,50 @@ Agreed audit interface with the coordinating agent (not implemented here):
 Coordination promises still pending: handoff reviewer expects `train_run(..., skip_external=False)` and CLI `--skip-external` for initial tree-only/fallback pipeline runs. Contract reviewer owns runtime/bundle and will require declared `full_blobs`; training still needs to mark a member running before blob replacement.
 
 Next steps: inspect the WIP diff; implement partition/provenance/status first; wire the statistical changes and NNLS purge; add complete runtime-parity tests; update the count-source tests; run focused tests, then the integrated suite/pipeline. Reproduce the numerical findings above against the fixed implementation. Do not reuse pre-fix artifacts as validated evidence.
+
+## Fix verification (2026-11-14)
+
+Interfaces: `docs/INTERFACES.md` section 22. Every finding is fixed; each line names the regression test(s).
+
+1. **Count sources.** `cv.independent_inner_folds` / `assert_count_sources` check the source's whole `train_eras`. Every
+   CV fold now uses only its own inner split; the dev forward block uses its own plus fold4 (training ends >= 20 eras
+   before it). Tests: `test_cv.py::test_independent_inner_folds_test_layout` (each other fold is shown to train on the
+   target's test eras), `::test_independent_inner_folds_full_audit_layout`, `::test_independent_inner_folds_smoke_layout`,
+   and the requested label perturbation `test_train_m2.py::test_fold_count_does_not_depend_on_its_own_test_labels`
+   (fold0's test labels permuted: its count and its predictions are bit-identical).
+2. **Provenance.** Run fingerprint (config + data + protocol) checked before ANY write; cell ids, Optuna study names
+   and member specs carry it; `status: running` before any blob is replaced, `done` last; external members validated
+   (fingerprint, universe, seeds, epoch cap, declared blobs, OOF + audit files); `--skip-external` /
+   `--require-external`; blend refuses stale / incomplete members. Tests: `test_train_m2.py::
+   test_redecision_refused_in_run` (metrics.json, config.yaml, knobs.json byte-identical after the refusal; threads-only
+   change keeps the fingerprint), `::test_legacy_run_dir_without_fingerprint_refused`, `::test_cell_cache_identity`,
+   `::test_external_member_provenance_checks`, `::test_skip_and_require_external`,
+   `::test_interrupted_retrain_never_exposes_a_done_member` (KeyboardInterrupt inside the refit leaves "running"; resume
+   retrains to "done").
+3. **Simulation vs runtime.** `metrics.cell_scores` (no re-gaussianisation, runtime missing-core semantics, SDK
+   complete-case INOV via `inov_rows`) is the grid's per-cell kernel. `test_metrics.py::
+   test_cell_scores_match_runtime_and_sdk[4 cells]` matches `_runtime` + `everestapi.scoring` per era to 1e-10 with 20%
+   missing-core rows; `::test_regime_grid_uses_the_parity_kernel`. On that fixture the pre-fix semantics overstated
+   FIT by +0.0022 and INOV by +0.0038 (per-era errors up to 0.016 / 0.044); the fixed kernel differs by < 1e-16.
+4. **Forward reuse.** Protocol change, not a patch: `cv.audit {train_end 5925, test_start 5945}` reserves 580 eras from
+   every choice and fit of the run (development CV 2800..5924, dev forward 5340..5924, full refits < 5925); the frozen
+   blend is scored once by `stealth.audit`. Development figures are labelled selection estimates in metrics.json,
+   blend.json and the report. Tests: `test_audit.py::test_partition_boundaries_and_audit_file`,
+   `::test_audit_predictions_are_the_bundled_blobs` (rank-for-rank equal to the pickle at p = 0),
+   `::test_audit_labels_never_reach_a_decision` (audit targets permuted: knobs, search gain, ladder, weights, p_b/p_c,
+   oof.parquet and every audit prediction identical), `::test_stealth_audit_scores_the_frozen_blend_once`.
+   The audit is independent of THIS run's selection only: handoff 02 already looked at those eras.
+5. **NNLS purge.** `purged_fit_mask`; nested fit rows >= 20 eras from the eval fold AND the forward block; the gate's
+   forward diff and the reported forward fit use the same nested weights; < 40 purged eras -> no NNLS; cross-fit rows
+   purged per fold. Tests: `test_blend_select.py::test_nested_nnls_meta_fit_is_purged`,
+   `::test_blend_run_m1_config_keeps_old_behaviour` (forward weights == gate weights).
+6. **Short series / Holm.** `inference_valid` (>= 2 whole blocks) with neutral p_pos 0.5 / p_value 1 otherwise; every
+   gate fails closed; Holm on the null-centred `p_value_fwd`; p_pos kept as a descriptive statistic; no exact FWER
+   claim. Tests: `test_cv.py::test_paired_bootstrap_short_series_is_not_certain` (the `[-1, 1.1]` case),
+   `::test_paired_bootstrap_p_value_is_null_centred` (~uniform under the null), `test_knobs.py::
+   test_holm_uses_null_centred_p_value_and_fails_closed`, `test_blend_select.py::test_admit_decision_fails_closed_without_inference`,
+   `test_metrics.py::test_paired_sharpe_bootstrap_sign_and_p_pos` (one-block case).
+
+Also: the SUSPECT reference of a searched in-run baseline is its unsearched base cell (`train.baseline_fit`), and
+`full.yaml` sets `gates.baseline_fit: null` (0.0229 was scored on another layout). Integration evidence (full suite,
+real-data minifull with the CPU MLP, frozen bundle in the clean lane venv) is recorded in `docs/NEXT-SESSION.md`.

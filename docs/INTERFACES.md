@@ -606,3 +606,119 @@ Implementation facts the groups reported plus the integration fixes. Nothing her
   `--mlp-threads`, `--pkl-check-python`, `--diag-eras`, `--no-diag`, `--report NN`, `--dry-run`; writes
   `artifacts/<run>/pipeline.log`; exit 64 on bad usage.
 * pytest marker `slow` is registered in pyproject.toml.
+
+## 22. Fix pass after the three independent reviews (2026-11-14) — supersedes 12-21 where they differ
+
+Reviews: `docs/reviews/m2-m6-{statistics,contract,handoff}.md` (each ends with a "Fix verification" section naming the
+regression tests). `PROTOCOL_VERSION = "m2m6-fix1-audit"` (train.py) is part of every run fingerprint, cell id and
+study name: nothing cached under an older protocol can be resumed; use a new run-id after any protocol change.
+
+**A. Run fingerprint** [train]. `artifacts/<run>/run_fingerprint.json = {"schema": "stealth.fingerprint/1",
+"fingerprint", "config_sha" (config minus `run.threads` / `timing.progress_every_seconds`), "data" ({train,
+train_benchmark}: sha256), "protocol", "created_at"}`. `train_run` checks it BEFORE writing anything: another config /
+data / protocol for an existing run-id, or a run dir with artifacts but no fingerprint -> exit 1, `notes` = "start a
+new run-id", nothing in the old run dir touched. Run fingerprint is copied into `folds_eras.json`, every member's
+`spec.json` (`run_fingerprint`, `protocol`) and every external spec (`scripts/mlp_train.py`).
+
+**B. Cache and status identity** [train]. `cell_hash(params, universe, fingerprint)`; `result.json` of every search /
+knob / baseline cell records `cell_id` + `protocol` and `_load_protocol(d, cell_id)` refuses another cell. Optuna
+study name `"<member>@<fingerprint[:16]>-<universe key>"` (`search.run_search(..., study_name=)`). `train_member`
+writes `spec.json {"status": "running", ...}` and deletes the member's `oof_/audit_` files BEFORE any protocol work, and
+writes `status: done` LAST; `_reusable_spec` additionally requires the run fingerprint, the declared `full_blobs` on
+disk and (audit on) `audit_<m>.parquet`.
+
+**C. External members** [train] [nn]. `train.external_problem` refuses a spec that is not `done`, has another universe or
+run fingerprint, other `seeds` or `epochs_cap` than the config, no / missing declared `full_blobs`, no OOF, or (audit on)
+no `audit_<m>.parquet`. CLI: `python -m stealth.train ... [--skip-external | --require-external]` (mutually exclusive):
+skip never loads `family: mlp` members (`dropped` status `skipped_external`); require turns a refusal into exit 1.
+`metrics.json.external_members = {name: "loaded" | "skipped_external" | "pending"}`. `blend.load_run` refuses an
+`oof.parquet` member whose spec is missing, not `done` (`None` = legacy M1 allowed) or of another run fingerprint
+(external members must carry it).
+
+**D. Count sources (statistics review 1).** `cv.independent_inner_folds` / `assert_count_sources` check the source fold's
+WHOLE `train_eras` (inner fit + inner validation + target-dependent feature selection) against the target's test block
+(>= 20 eras). Chronological two-sided folds: every CV fold uses its own inner split only; the forward block uses its
+own split plus CV folds whose training ends >= 20 eras before it (full: fold4). The full refit keeps the median over CV
+folds.
+
+**E. Paired inference (statistics review 6).** `cv.PairedResult` / `as_dict()` gain `p_value` (null-centred one-sided
+bootstrap p-value, `(1 + #{mean* - mean >= mean}) / (n_boot + 1)`), `n_blocks` (whole blocks) and `inference_valid`
+(`n_blocks >= cv.MIN_EFFECTIVE_BLOCKS = 2`; else `p_pos = 0.5`, `p_value = 1`). `metrics.paired_sharpe_bootstrap` gains
+`n_blocks` / `inference_valid` (p_pos 0.5 when invalid). Gates fail closed without inference: search adoption, NNLS,
+both ladder routes (`admit_decision` reads `inference_valid` / `sharpe_inference_valid`), knobs. Holm (`knobs.holm_decide`)
+runs on `p_value_fwd` (knobs rows add `p_value_fwd`, `n_blocks_fwd`, `inference_valid_fwd`, `holm_p`); `p_pos` stays a
+descriptive statistic and the pre-registered `p_pos >= 0.8` gates are unchanged. No exact family-wise claim.
+
+**F. NNLS (statistics review 5).** `blend.purged_fit_mask(era, blocks, gap=20)`: meta-fit rows lie outside and >= 20
+eras from every evaluation block. `nested_nnls`: fit = folds < K-1 purged against fold K-1 AND the forward test block;
+the gate's forward diff AND the reported forward fit use these same nested weights (`forward_weights_source` "gate
+weights"); `< 40` purged eras -> no NNLS (`nested_weights` None, fail closed). `crossfit_nnls` purges each fold's fit
+rows around that fold; a fold without rows raises and the blend falls back to EW. `forward_nnls_weights` is gone.
+
+**G. Simulation == deployed recipe (statistics review 3).** `metrics.cell_scores(P, m, p_b, p_c) -> (zg, fit, unq, inov)`
+is the regime grid's per-cell kernel: neutralise the weighted member blend (no re-gaussianisation) against the benchmark,
+then the core proxy (valid raw values ranked first, missing rows z = 0 afterwards, as `_runtime`); score with SDK
+semantics -- `fit20`, `unq20` (zero rule, >= 5 rows), and `inov` COMPLETE-CASE (`metrics.inov_rows`: rows without a core
+average dropped, prediction re-ranked and target re-centred). Parity: `tests/test_metrics.py::test_cell_scores_match_
+runtime_and_sdk` (1e-10 vs `_runtime` + `everestapi.scoring`, 20% missing-core rows).
+
+**H. Reserved audit partition.** Config `cv.audit: {enabled, train_end, test_start}` (`load_config` checks the >= 20 gap,
+`cv.forward.test_start < train_end`, every `knobs.era_start < train_end`). `RunData.eras` (CV + forward) and
+`RunData.full_train_eras` (full refits, `sharpe_subset` for full refits) stop before `train_end`; `RunData.audit_eras`
+= eras >= `test_start`; `assert_development_only()` guards it. Per member `audit_<m>.parquet` (index id; `era` int32;
+`pred` float64) = mean over the member's declared full-refit blobs (`train._predict_full`; MLP: the exported npz via
+`_runtime.mlp_forward`) -- exactly what the bundle averages. `train.audit_baseline` refits `knobs.member` at its CONFIG
+params under the DEFAULT universe (count from its own knob/baseline cell) on the pre-audit eras -> `baseline/
+{spec.json, full_s*.bin, cell/}` + `audit_baseline.parquet`. `train.assemble_audit` -> `audit.parquet` (index id over
+every audit row; `era`, `target_everest` float32 copied, `m__<member>` float64, `baseline__<name>`); incomplete coverage
+raises. `folds_eras.json` gains `run_fingerprint`, `protocol`, `audit {train_end, test_start, eras, ...}` and
+`full_train_eras` = pre-audit eras. `metrics.json.audit = {enabled, train_end, test_start, n_eras, eras, file, baseline}`.
+No module reads an audit label before `stealth.audit` (regression: `tests/test_audit.py::
+test_audit_labels_never_reach_a_decision` permutes them and compares every decision artefact).
+
+**I. `python -m stealth.audit --run-id R`** (after blend, before bundle; exit 0 / 1). Writes `audit.json`:
+`{schema "stealth.audit/1", run_id, status ok|failed, created_at, run_fingerprint, blend_sha256, partition {train_end,
+test_start, eras [min,max], n_eras, n_rows}, frozen {rule, members, admitted_arms, p_b, p_c, p_source}, blend
+(summarise of the UNNEUTRALISED frozen blend's per-era fit20), blend_spearman_mean, baseline {name, label, **summarise},
+paired_vs_baseline (PairedResult dict), sharpe_vs_baseline, drawdown {label "... NOT platform P&L ...", blend {max_drawdown,
+longest_underwater_eras, final_cum}, baseline}, stability {segments [{eras, n_eras, blend_fit, baseline_fit, diff}] x 4,
+n_segments, blend_positive_segments, diff_positive_segments}, bootstrap_sensitivity [{block 10|20|40, se_block, p_pos,
+p_value, ci90, n_blocks, inference_valid}], frozen_core_step {p_c, fit, inov_proxy, fit_unneutralised,
+inov_proxy_unneutralised, note}, scenario {note, p_b, p_c, bench_fit_mean, n_draws, mix, bneg, reference_00}, verdict
+{technical "complete", audit_win true|false|null, text}, notes, seconds}`. `audit_win` = `inference_valid` AND diff_mean > 0
+AND `p_pos >= gates.p_pos_adopt` -- reported as information; technical completion is not an audit win. On error:
+`{schema, run_id, status "failed", error}`. Never writes `blend.json`; nothing reads `audit.json` to choose anything.
+
+**J. Suspect reference.** `train.baseline_fit(cfg, fits, base_cell_fits)`: `gates.baseline_fit` (only for the SAME scoring
+layout) > the in-run baseline member's UNSEARCHED base cell (`search_gain.base_params_fit`) > its OOF mean.
+`full.yaml` sets `gates.baseline_fit: null` (handoff 02's 0.0229 was scored on folds over 2800..6524).
+`blend.json.suspect_reference = {fit, label}`.
+
+**K. Contract (contract review 1-7)** [nn]. `predict.check_upload_artifact(pkl)` is the one upload gate (lane upload,
+`diag --upload`, `--attach-pkl`, `--preflight`), run before any client exists: manifest sha256 == file, `pkl_check.passed`
+AND `pkl_check.sha256` == file, manifest and checker Python 3.11.x. Manifest `pkl_check = {passed, status
+(running|passed|failed|error), at, sha256, python, libs (verified in the checker), checker, eras, seconds_per_era_max,
+isolation {stealth_importable, torch_importable}, problems[, error]}`, set to a non-passing `running` record before
+every attempt. The checker verifies the installed lane pins and that neither package is importable, and hashes the
+bytes it checked; all paths are made absolute before the subprocess. `bundle.member_blob_files` honours `spec.full_blobs`
+exactly (missing or undeclared extra refit -> error; legacy glob only without the key); `check_fold_fallback` validates
+the loaded fold names. `p_source` gains `"inherited"` (member subset whose positive set or relative weights differ from
+the selected blend; refused by `--require-frozen`); explicit `--p-b/--p-c` stay `"override"`. Non-finite / negative
+weights and constants are refused in `build_bundle` and `make_predict`; `validate_predictions` requires a numpy float
+column. Manifest gains `p_reason`, `blob_files`. `monitor` requires the pass to be bound to the manifest sha256.
+
+**L. Pipeline + report (handoff review)** [docs]. `scripts/run_pipeline.sh`: steps `train` (`--resume
+--skip-external`) -> `mlp` (`--device cuda` by default; exit 1/4 = optional skip, >= 128 interrupted, other codes fail)
+-> `retrain` (`--require-external` after a finished MLP; `--skip-external` when the MLP did not finish in an attempt
+that skipped train) -> `blend` -> `audit` (when `cv.audit.enabled`) -> `bundle` -> `pkl_check` -> `diag` (file only) ->
+`report` (`--report NN`). `--no-mlp` from blend onwards refuses (exit 64) while `oof.parquet` still holds an external
+member. Every step runs in its own process group (INT/TERM stop that group only); stdout+stderr in
+`artifacts/<run>/pipeline_steps/<ts>-<pid>-<step>.log`; `artifacts/<run>/pipeline.json` (schema `stealth.pipeline/1`,
+atomic): `{run_id, config, pkl, status running|ok|failed|interrupted, exit_code, failed_step, last_step, mlp,
+report_step, attempts [{started_at, from_step, status, steps [{name, status, exit_code, seconds, log_file, ...}], ...}]}`;
+the compute result is recorded before the report step, whose own outcome is `report_step`. `stealth.report` derives the
+status from that evidence (pipeline.json, metrics/leak, manifest pkl_check bound to the bytes, the diag file's
+`.meta.json` coverage, `audit.json`): failed evidence -> `failed`, missing evidence -> `incomplete`; adds pipeline,
+evidence, packaging, diagnostics-file and audit sections; labels development figures "selection estimates";
+`scrub()` also redacts signed-URL queries (X-Amz-*, X-Goog-*, signature/token/expires), `scrub_params()` drops
+hyperparameter name=value pairs from log tails, home directories shorten to `~/`. The pre-commit hook blocks signed URLs.
