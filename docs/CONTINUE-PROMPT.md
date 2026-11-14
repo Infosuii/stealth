@@ -1,5 +1,13 @@
 # Development continuation prompt (after the M2–M6 fix pass)
 
+**Newest checkpoint:** the user requires diagnosis before rejecting promising ideas. Read the forensic and
+repair reports through consensus09. The best observed historical gain is now 14.13% from the balanced
+denoising repair, with a failed late-window guard; nothing was promoted and confirmation remains unread.
+Matched controls identified partial bottleneck/ensemble repairs and contradicted a simple more-trees fix.
+Trial-population replication exposed unreliable temporal ranking; consensus partially recovered performance.
+The remaining temporal failure is unresolved. Final suite: 461 passed, one expected skip. Do not replace
+causal investigation with another unexamined search or report the historical gain as independently proven.
+
 **Latest checkpoint:** stability05 raised the best historical average gain to 12.89%, but the latest window
 remains down 2.51%. It failed the corrected promotion gate; baseline01 remains selected and a reliable major
 improvement is not established. Final suite: 451 passed, one expected skip. Read `stability05-results.md` and

@@ -747,3 +747,8 @@ names; row permutation must preserve scores after reindexing.
 run ID. Discovery readers exclude confirmation and old-audit labels. Reports retain rejected candidates and
 label all historical scores as selection estimates. These workflows perform no platform write; a research
 score does not imply a promoted artifact or a clean-check pass on a full-data pickle.
+
+Members may declare `blob_rule: raw_mean | gaussian_mean`. The default preserves legacy raw-score averaging.
+The latter Gaussianizes every blob within the live cross-section, averages those scores, then participates
+in the existing per-member Gaussianization and outer blend. Offline predictions must group eras and apply
+the identical two-stage rule. Manifests record `blob_rule`; an unsupported active rule fails at construction.

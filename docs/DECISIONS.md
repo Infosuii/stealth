@@ -72,6 +72,12 @@ Do not describe the largest historical average as a verified future gain or subs
 
 ## Standing rules (unchanged)
 
+- The user explicitly requires investigation of promising models that underperform. Before retiring an idea,
+  distinguish implementation/numerical errors, optimization failure, representation limits, ensemble or
+  objective mismatch, overfitting and temporal shift. Use matched controls where possible; retain contradicted
+  hypotheses and adverse windows, and mark unresolved causes honestly. A weak score alone is not an explanation.
+  Register ensuing repairs before scoring, preserve old artifacts, and do not relax a completed gate.
+
 - Nothing is submitted, uploaded, or staked without a handoff carrying a **USER MUST APPROVE** banner.
 - `.env`, `data/`, `artifacts/`, `models/*.pkl` are never committed. Pre-commit hook blocks secrets.
 - Never fit to, blend with, or select on `v1_sherpa` (the train-split benchmark is in-sample).

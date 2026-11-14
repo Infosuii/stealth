@@ -2,6 +2,26 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest: diagnose before discarding.** The user explicitly requires causal investigation of promising ideas
+that underperform. `forensics06-*` and `forensics08-*` report matched controls, adverse results and unresolved
+causes. More trees was a contradicted repair hypothesis. Preserving raw inputs recovered late latent-tree
+FIT from 0.020151 to 0.024301 with frozen parameters; scale-consistent ensembling helped some windows. A
+balanced denoising-head repair then reached 0.02489356 (+14.13% over the 0.02181070 baseline). Its baseline
+blend passed the within-round corrected aggregate check, but failed the late-window guard. Thus no model was
+promoted, confirmation remained unread, and baseline01 remains selected. This is not a reliable major gain.
+
+The 480-trial replication found inner rankings weak/negative in most cases, with all nine original ensembles
+replaying. Broad-consensus controls partially repaired that selection failure: the existing-search blend gained
+6.14% overall and the fixed-prior blend 6.10%; the latter was slightly positive late but weaker early. The
+remaining temporal generalization problem is unresolved. Do not retire these ideas solely on their scores,
+claim every cause is proved, select an oracle later winner, or relax a completed gate. Keep supported,
+contradicted and unresolved mechanisms separate and register new interventions before their scores.
+
+Latest reports: `forensics06-*`, `repairs07-*`, `forensics08-*`, `consensus09-*` in `handoffs/results`.
+Final suite: 461 passed, one expected CUDA no-device-path skip. Research code and private source-bound caches
+are preserved. Reproduce each campaign at its recorded implementation/report commit; current source is newer
+than older plan hashes. The following checkpoints are historical where they conflict with this update.
+
 **Latest, after stability05:** the observed best discovery FIT is now 0.02462116 versus baseline 0.02181070,
 or +12.89%, from a fixed stable-covariance/baseline blend. The latest window remains down 2.51%. It did not pass
 the four-comparison Holm gate or the predeclared 15% major-improvement criterion. No candidate was promoted,
