@@ -45,3 +45,17 @@ Preserve the old baseline and all original audit evidence. Publish code, metrics
 keep data, hyperparameter detail in private run artifacts, weights and pickle files out of git. Any promoted
 artifact must pass byte-bound clean-venv portability and offline prediction checks. This round performs no
 platform upload, live submission, model-slot change or staking.
+
+## Numerical restart and compute preference
+
+The user prioritises predictive quality and robust evidence over local compute cost, and authorises extensive
+CPU/GPU use. The inspected machine has a 20-core Core Ultra 7 255HX and an RTX 5070 Ti Laptop GPU with 12 GB
+VRAM. Use both concurrently where appropriate, within measured memory limits; additional compute should buy
+convergence, reproducibility and chronological evidence rather than unrestricted attempts on confirmation data.
+
+Before discovery scores were compared or a candidate selected, the first CPU launch stopped at the 300-step
+conjugate-gradient limit on the smooth categorical fit. Increase only the numerical iteration ceiling to 3000,
+retaining the same objective, recipes, tolerance, seeds and promotion gates. Preserve the initial run privately
+under `artifacts/research01-solver-limit`, then rerun every CPU and GPU fit with a fresh source-bound plan.
+The first neural fits' own inner validation scores were logged normally; no discovery comparisons or
+confirmation scores were consulted to make this numerical correction.

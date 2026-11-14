@@ -79,7 +79,9 @@ def fit_basis(spec: dict, X: np.ndarray, y: np.ndarray, era: np.ndarray, columns
         diagonal.reshape(-1, 11)[:, :10] += smooth * np.array([1, 5, 6, 6, 6, 6, 6, 6, 5, 1])
     operator = LinearOperator((n_features, n_features), matvec=matvec)
     preconditioner = LinearOperator((n_features, n_features), matvec=lambda v: v / diagonal)
-    coef, info = cg(operator, rhs, M=preconditioner, rtol=1e-7, atol=0.0, maxiter=300)
+    # The strongly smoothed categorical objective can need more than 300 steps.
+    # Keep the same objective and accuracy; spend additional compute on convergence.
+    coef, info = cg(operator, rhs, M=preconditioner, rtol=1e-7, atol=0.0, maxiter=3000)
     if info != 0 or not np.isfinite(coef).all():
         raise RuntimeError(f'basis solver did not converge (info={info})')
     model['coef'] = coef.reshape(-1, 11) if kind == 'gam' else coef

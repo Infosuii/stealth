@@ -1,5 +1,5 @@
 """No torch anywhere in the package (docs/INTERFACES.md section 18): the lane has no torch, and the sandbox's
-CPU torch would hide a stray import. Only ``scripts/mlp_train.py`` (outside the package) may import it."""
+CPU torch would hide a stray import. Only the explicitly listed external GPU training scripts may import it."""
 from __future__ import annotations
 
 import json
@@ -61,8 +61,8 @@ def test_no_torch_import_statement_in_the_package():
     assert offenders == [], offenders
 
 
-def test_only_mlp_train_script_imports_torch():
-    allowed = {REPO / "scripts" / "mlp_train.py"}
+def test_only_external_gpu_training_scripts_import_torch():
+    allowed = {REPO / "scripts" / name for name in ("mlp_train.py", "research_gpu.py")}
     offenders = [str(p.relative_to(REPO)) for p in sorted((REPO / "scripts").rglob("*.py"))
                  if p not in allowed and ("import torch" in p.read_text(encoding="utf-8") or _IMPORT_RE.search(p.read_text(encoding="utf-8")))]
     assert offenders == [], offenders
