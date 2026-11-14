@@ -21,6 +21,17 @@ the "Fix verification" sections of `docs/reviews/m2-m6-{statistics,contract,hand
   handoff. The `m1_lgbm` manifest from 03 holds a legacy pkl_check pass without a hash, so it no longer satisfies any
   upload gate: re-run `pkl_check` before any future upload of it.
 
+## Independent verification status (session wrapped up early at the user's request)
+
+- **Contract reviewer: finished.** No bypass and no P1. All seven findings were confirmed fixed.
+  - **Open P2:** `predict.check_upload_artifact` should also require `status == "passed"`, a checker Python of
+    3.11.x, both isolation flags false and libs equal to the lane pins. Also, `pkl_check.update_manifest(pkl, True)`
+    with no report should not create a pass. The real CLI always passes a report, so this is not live.
+  - **Open P3s:** the diag/predict re-read race after the gate; `full_blobs: []` treated as legacy; the
+    `--venv-python` bare-name regression; `ensure_check_venv` deletes any `--venv` dir without `.pins.txt`.
+- **Statistics and handoff verification reviewers: stopped before they reported.** Re-run them next session before
+  diagnostics upload #2.
+
 ## Verification actually performed on the sandbox (2 cores, Python 3.11.2, exact pins)
 
 - Full pytest in `.venv` (no torch importable): see the final count in the commit message of the merge to main.
