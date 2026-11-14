@@ -1,33 +1,32 @@
-# Development continuation prompt (paused M2–M6 review)
+# Development continuation prompt (after the M2–M6 fix pass)
 
-This prompt is for another **development agent**, not for the laptop GPT running handoff 04.
+This prompt is for the next **development agent**, not for the laptop GPT (that one gets `handoffs/GPT-KICKOFF.md`).
 
 ---
 
-Continue the Everesteer bot in `/home/climber/work/stealth` (GitHub `Infosuii/stealth`) on `worktree-m2-m6`.
-The previous agent paused at my request during the three independent reviews/fix pass. Its WIP checkpoint is
-not merge-ready and handoff 04 is still draft. If GitHub still points to `0d185c8`, the previous workspace lacked
-push credentials: import the supplied `stealth-review-checkpoint.bundle` (branch `worktree-m2-m6`) before proceeding,
-or use the existing local checkpoint. Do not discard its changes or assume they are already on GitHub.
+Continue the Everesteer bot in GitHub `Infosuii/stealth` (clone it, or use an existing clone; work on a branch, not
+on `main`). The M2–M6 fix pass is merged:
+- the three independent reviews are fixed and independently verified;
+- the reserved audit partition (`cv.audit`, `stealth.audit`) is in place;
+- handoff 04 is `ready` for the laptop.
 
-First read `docs/NEXT-SESSION.md`, `docs/PLAN.md`, `docs/DECISIONS.md`, `handoffs/INDEX.md`, and all three
-`docs/reviews/m2-m6-*.md` reports. `NEXT-SESSION.md` describes the exact partial implementation, environment,
-verified checks, missing interfaces, and the agreed separate development/audit protocol.
+First read `docs/NEXT-SESSION.md`, `handoffs/INDEX.md`, `docs/DECISIONS.md`, `docs/INTERFACES.md` section 22, and, if
+present, `handoffs/results/04-*`.
 
-Finish the statistical/leakage, pickle-contract, and handoff-executability fixes with regression tests. Independent
-review agents are explicitly authorized if helpful. Complete the reserved audit partition and frozen-model audit
-reporting before calling the forward results independent; keep audit labels out of every adaptive decision.
-The WIP pipeline currently calls an unimplemented `train --skip-external` and conditionally an unimplemented
-`stealth.audit`, so complete those interfaces before attempting the end-to-end driver.
+If handoff 04 has reported:
+- verify its technical evidence (report status, the pkl_check pass bound to the manifest sha, diag-file coverage,
+  audit status);
+- summarise the development selection estimates and the audit verdict separately for me; an audit "win" is
+  information, not a gate.
 
-Then finalise handoff 04 for my Linux laptop: 20 logical threads (16 workers), RTX 5070 Ti, Europe/London,
-~30.8 GB RAM. Handoff 02 took 12.5 minutes: training 497 s, regime simulation 208 s. Spend spare compute on
-measurement and stability, not extra search trials or added seed bagging. Run the complete test suite, real-data
-minifull including the external CPU-MLP test, and frozen-bundle portability checks in the isolated lane venv.
-Keep 04 draft until those pass. Handoff 03 is already accepted; do not repeat its upload.
+Then propose, but do not run without my approval:
+- diagnostics upload #2 of the `full01` bundle (its own USER MUST APPROVE handoff: re-run `pkl_check`, then
+  `diag --preflight`, then upload once);
+- the M7 decision on whether to refit on all eras before the lane upload.
 
-Once fixes, reviews, tests, and docs are complete, get the finished work onto `main`, verify the remote commit,
-and give me the laptop GPT prompt to run 04. I already approved that merge/push; do not ask again. If GitHub
-authentication is unavailable, report the specific blocker and preserve a portable checkpoint. Do not claim a
-push succeeded without checking it. Handoff 04 must not upload predictions/models, submit live predictions,
-change auto-submit, or stake. Never commit data, artifacts, virtual environments, pickles, or secrets.
+Rules:
+- Never fit, select or tune on audit labels, the diag lane or `v1_sherpa`.
+- Use a new run-id after any protocol change.
+- Never commit data, artifacts, venvs, pickles, secrets or credential-bearing logs.
+- No upload, submission, auto-submit change or stake without a USER MUST APPROVE handoff and my approval in chat.
+- If GitHub push credentials are missing, say so, leave a portable git bundle, and do not claim a push.

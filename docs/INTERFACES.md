@@ -685,8 +685,10 @@ longest_underwater_eras, final_cum}, baseline}, stability {segments [{eras, n_er
 n_segments, blend_positive_segments, diff_positive_segments}, bootstrap_sensitivity [{block 10|20|40, se_block, p_pos,
 p_value, ci90, n_blocks, inference_valid}], frozen_core_step {p_c, fit, inov_proxy, fit_unneutralised,
 inov_proxy_unneutralised, note}, scenario {note, p_b, p_c, bench_fit_mean, n_draws, mix, bneg, reference_00}, verdict
-{technical "complete", audit_win true|false|null, text}, notes, seconds}`. `audit_win` = `inference_valid` AND diff_mean > 0
-AND `p_pos >= gates.p_pos_adopt` -- reported as information; technical completion is not an audit win. On error:
+{technical "complete", audit_win true|false|null, strength "strong"|"weak"|null, text}, notes, seconds}`. `audit_win` =
+`inference_valid` AND diff_mean > 0 AND `p_pos >= gates.p_pos_adopt` (the pre-registered paired rule); `strength` is
+"strong" when the one-sided `p_value` < 0.05, else "weak" -- reported as information; technical completion is not an
+audit win. On error:
 `{schema, run_id, status "failed", error}`. Never writes `blend.json`; nothing reads `audit.json` to choose anything.
 
 **J. Suspect reference.** `train.baseline_fit(cfg, fits, base_cell_fits)`: `gates.baseline_fit` (only for the SAME scoring

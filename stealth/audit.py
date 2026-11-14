@@ -199,16 +199,20 @@ def audit_run(run_dir: Path) -> tuple[dict, int]:
                        "reference_00": _mix(ref["mix"])}
     pv = doc["paired_vs_baseline"]
     thr = float(gates["p_pos_adopt"])
+    strength = None
     if pv is None:
         win, text = None, "no baseline column: technical completion only, no audit comparison"
     elif pv["inference_valid"] and pv["diff_mean"] > 0 and pv["p_pos"] >= thr:
-        win, text = True, (f"audit win: the frozen blend beats the unsearched baseline on the reserved eras (diff "
-                           f"{pv['diff_mean']:+.4f}, p_pos {pv['p_pos']:.3f} >= {thr}, p_value {pv['p_value']:.3f})")
+        win = True
+        strength = "strong" if pv["p_value"] < 0.05 else "weak"
+        text = (f"audit win by the pre-registered paired rule: the frozen blend beats the unsearched baseline on the "
+                f"reserved eras (diff {pv['diff_mean']:+.4f}, p_pos {pv['p_pos']:.3f} >= {thr}); one-sided p_value "
+                f"{pv['p_value']:.3f}" + ("" if strength == "strong" else " -- not significant at 5%: weak evidence"))
     else:
         win, text = False, (f"no audit win: tie or loss against the unsearched baseline on the reserved eras (diff "
                             f"{pv['diff_mean']:+.4f}, p_pos {pv['p_pos']:.3f}, p_value {pv['p_value']:.3f}"
                             + ("" if pv["inference_valid"] else ", too few blocks for inference") + "): technical completion only")
-    doc["verdict"] = {"technical": "complete", "audit_win": win, "text": text}
+    doc["verdict"] = {"technical": "complete", "audit_win": win, "strength": strength, "text": text}
     doc["notes"] = notes
     doc["seconds"] = round(time.perf_counter() - t0, 1)
     write_json(run_dir / "audit.json", doc)
