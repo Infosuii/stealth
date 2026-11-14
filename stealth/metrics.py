@@ -149,6 +149,27 @@ def _era_series(values: list[float], eras: list[int], name: str) -> pd.Series:
     return pd.Series(np.asarray(values, dtype=np.float64), index=idx, name=name)
 
 
+def per_era_fit_fast(pred: pd.Series, target: pd.Series, era: pd.Series) -> pd.Series:
+    """Vectorised FIT20 with the same paired-NaN/constant semantics as the per-era SDK wrapper."""
+    import warnings
+
+    p = pred.reindex(era.index).to_numpy(dtype=np.float64)
+    t = target.reindex(era.index).to_numpy(dtype=np.float64)
+    bad = np.isnan(p) | np.isnan(t)
+    p, t = np.where(bad, np.nan, p), np.where(bad, np.nan, t)
+    P, eras = pad_by_era(p, era)
+    T, _ = pad_by_era(t, era)
+    n = np.sum(~np.isnan(P), axis=1)
+    with np.errstate(invalid='ignore', divide='ignore'), warnings.catch_warnings():
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        Z = rank_gauss_rows(P)
+        tc = T - np.nanmean(T, axis=1, keepdims=True)
+        f = fit_rows(Z, tc)
+        sd = np.nanstd(P, axis=1, ddof=1)
+    f = np.where((n < 3) | ~(sd > 0.0) | np.isnan(f), 0.0, f)
+    return pd.Series(f.astype(np.float64), index=pd.Index(eras.astype(np.int32), name='era'), name='fit')
+
+
 def per_era_fit(pred: pd.Series, target: pd.Series, era: pd.Series) -> pd.Series:
     """``scoring.fit20`` per era -> Series indexed by era (int32, sorted), name ``fit``."""
     pred = _aligned(pred, era.index, "pred")

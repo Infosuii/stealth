@@ -36,7 +36,7 @@ MISSING = -1.0
 DEFAULT_MIN_BENCH_COVERAGE = 0.5
 P_B_CAP = 0.75
 P_C_CAP = 0.5
-SUPPORTED_FAMILIES = ("lgbm", "xgb", "cat", "ridge", "mlp")
+SUPPORTED_FAMILIES = ("lgbm", "xgb", "cat", "ridge", "mlp", "basis")
 LINEAR_FAMILIES = ("ridge", "mlp")   # input: linear, npz blobs with a by-name ``columns`` list
 TREE_FAMILIES = ("lgbm", "xgb", "cat")  # input: nan, positions of ``feature_cols`` in the bundle list
 MLP_ACT = "gelu_tanh"
@@ -291,6 +291,93 @@ def mlp_forward(model: dict, X: Any) -> np.ndarray:
 # --------------------------------------------------------------------------------------------------
 # members
 # --------------------------------------------------------------------------------------------------
+def basis_design(X: np.ndarray, kind: str, projection: np.ndarray | None = None) -> np.ndarray:
+    """Fixed cross-sectional bin features, with a separate missing indicator per original column."""
+    from scipy.special import ndtri
+
+    raw = np.asarray(X, dtype=np.float64)
+    valid = np.isfinite(raw) & (raw >= 0) & (raw <= 9)
+    bins = np.rint(np.where(valid, raw, 0)).astype(np.int64)
+    lut = ndtri((np.arange(10) + 0.5) / 10)
+    z = np.where(valid, lut[bins], 0.0)
+    missing = (~valid).astype(np.float64)
+    parts = [z]
+    if kind == "polynomial":
+        parts.extend([np.where(valid, (z * z - 1) / np.sqrt(2), 0),
+                      np.where(valid, (z * z * z - 3 * z) / np.sqrt(6), 0)])
+    elif kind == "quadratic":
+        if projection is None or projection.ndim != 2 or projection.shape[0] != raw.shape[1]:
+            raise ValueError("quadratic basis: missing or incompatible projection")
+        p = z @ projection
+        i, j = np.triu_indices(p.shape[1])
+        parts.append(p[:, i] * p[:, j])
+    elif kind not in ("linear", "residual", "net"):
+        raise ValueError(f"unsupported dense basis {kind!r}")
+    parts.append(missing)
+    return np.concatenate(parts, axis=1)
+
+
+def load_basis(blob: bytes) -> dict:
+    """Load a bounded fixed-basis model from numeric arrays; no pickled objects."""
+    with np.load(io.BytesIO(blob), allow_pickle=False) as archive:
+        model = {k: archive[k] for k in archive.files}
+    model["kind"] = str(np.asarray(model["kind"]).item())
+    model["columns"] = [str(c) for c in model["columns"].tolist()]
+    if model["kind"] not in ("linear", "polynomial", "quadratic", "gam", "residual", "net"):
+        raise ValueError("unsupported basis model kind")
+    for name, value in model.items():
+        if isinstance(value, np.ndarray) and np.issubdtype(value.dtype, np.number) and not np.isfinite(value).all():
+            raise ValueError(f"non-finite basis array {name}")
+    coef = np.asarray(model["coef"], dtype=np.float64)
+    n = len(model["columns"])
+    if model["kind"] == "gam":
+        if coef.shape != (n, 11):
+            raise ValueError("categorical basis table shape mismatch")
+    else:
+        expected = basis_design(np.zeros((1, n)), model["kind"], model.get("projection")).shape[1]
+        if coef.shape != (expected,):
+            raise ValueError("dense basis coefficient shape mismatch")
+        if model["kind"] == "net":
+            if model["x_mean"].shape != (expected,) or model["x_std"].shape != (expected,) or (model["x_std"] <= 0).any():
+                raise ValueError("neural basis normalisation shape/value mismatch")
+            width = expected
+            for i in range(3):
+                weight, bias = model[f"W{i}"], model[f"b{i}"]
+                if weight.ndim != 2 or weight.shape[0] != width or bias.shape != (weight.shape[1],):
+                    raise ValueError("neural basis layer shape mismatch")
+                width = weight.shape[1]
+            if width != 1:
+                raise ValueError("neural basis requires one output")
+    return model
+
+
+def basis_forward(model: dict, X: np.ndarray) -> np.ndarray:
+    """Stateless additive / interaction / residual inference, shared with research evaluation."""
+    raw = np.asarray(X, dtype=np.float64)
+    if raw.ndim != 2 or raw.shape[1] != len(model["columns"]):
+        raise ValueError("basis feature shape mismatch")
+    if model["kind"] == "gam":
+        valid = np.isfinite(raw) & (raw >= 0) & (raw <= 9)
+        bins = np.where(valid, np.rint(np.where(valid, raw, 0)), 10).astype(np.int64)
+        return model["coef"][np.arange(raw.shape[1])[None, :], bins].sum(axis=1)
+    design = basis_design(raw, model["kind"], model.get("projection"))
+    out = design @ model["coef"]
+    if model["kind"] == "residual":
+        if "_residual" not in model:
+            import lightgbm as lgb
+
+            model["_residual"] = lgb.Booster(model_str=model["residual_blob"].tobytes().decode())
+        out = out + model["_residual"].predict(raw, num_threads=1)
+    elif model["kind"] == "net":
+        h = (design - model["x_mean"]) / model["x_std"]
+        for i in range(3):
+            h = h @ model[f"W{i}"] + model[f"b{i}"]
+            if i < 2:
+                h = gelu_tanh(h)
+        out = out + h[:, 0]
+    return np.asarray(out, dtype=np.float64)
+
+
 def load_member(family: str, blob: bytes) -> Any:
     """Deserialise one member from its bytes (the family module's ``to_bytes`` format).
 
@@ -298,6 +385,8 @@ def load_member(family: str, blob: bytes) -> Any:
     ``CatBoostRegressor().load_model(blob=...)``; ridge: dict ``{coef, intercept, columns}`` from npz;
     mlp: dict ``{W, b, x_mean, x_std, columns, act, n_layers}`` from npz (``allow_pickle=False``).
     """
+    if family == "basis":
+        return load_basis(blob)
     if family == "lgbm":
         import lightgbm as lgb
 
@@ -333,6 +422,8 @@ def predict_member(family: str, model: Any, X: np.ndarray) -> np.ndarray:
         raise ValueError("predict_member expects a 2-D matrix")
     if X.shape[0] == 0:
         return np.empty(0, dtype=np.float64)
+    if family == "basis":
+        return basis_forward(model, X)
     if family == "lgbm":
         return np.asarray(model.predict(X), dtype=np.float64).ravel()
     if family == "xgb":
@@ -489,6 +580,10 @@ def make_predict(bundle: dict) -> Callable[..., pd.DataFrame]:
         unknown = [c for c in m["feature_cols"] if c not in col_pos]
         if unknown:
             raise ValueError(f"member {m['name']}: feature(s) not in bundle feature_cols: {unknown[:5]}")
+        if fam == "basis":
+            for blob in m["blobs"]:
+                if load_basis(blob)["columns"] != list(m["feature_cols"]):
+                    raise ValueError("basis blob columns differ from the declared feature order")
         if inp == "linear":
             if fam not in LINEAR_FAMILIES:
                 raise ValueError(f"member {m['name']}: input 'linear' is only supported for {LINEAR_FAMILIES}")
