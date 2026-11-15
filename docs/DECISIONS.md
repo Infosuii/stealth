@@ -72,6 +72,13 @@ Do not describe the largest historical average as a verified future gain or subs
 
 ## Standing rules (unchanged)
 
+The continued 2026-11-15 work completed count12, GPU ranking13, online14 and the isolated online14r technical
+repair. Online learning cleared discovery but failed its frozen historical confirmation. Missing-core handling
+was repaired under a new source-bound ID before any confirmation performance verdict, with exact discovery
+replay and unchanged native models/gates. No candidate was promoted. Preserve complementary period evidence,
+reversed family performance, lagging weights and adverse controls rather than interpreting compute volume
+or the earlier discovery pass as achievement of the major-improvement objective. Confirmation is now viewed.
+
 The 2026-11-15 continuation adds score accounting and executable temporal controls. New reports distinguish
 FIT from bounded FIT+UNQ+INOV score, average scores after each era's nonlinear transform, and label every
 unknown-benchmark/core calculation as a proxy. Historical train-split benchmark predictions remain excluded.

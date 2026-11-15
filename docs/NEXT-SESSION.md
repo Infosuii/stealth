@@ -2,6 +2,27 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, online14r:** technical repair completed and confirmation evaluated; **no qualification**. The one
+all-feature-missing row at 5582 is handled by valid-core residuals with N/M scaling. Source `4fe11ce`, protocol
+`docs/ONLINE-14-REPAIR.md`, results `handoffs/results/online14r-*`. Original discovery scores replayed with
+zero error, frozen winner and all native model bytes were unchanged. Confirmation FIT 0.01287388 vs baseline
+0.01498275; composite proxy 0.01463712 vs 0.01753069; FIT/score p_pos 0.0070/0.0366 and all six aggregate
+score sensitivities negative. The policy's positive discovery did not transfer. Baseline01 remains selected.
+
+Post-decision controls show fixed prior also lost (FIT 0.01388173), stable group 0.01041563, GPU RMSE
+0.00491660, QueryRMSE 0.00415384 and YetiRank 0.00913890. Family edges reversed in this period, and learned
+weights added another 0.00100785 FIT loss vs fixed prior. Initial GPU weight 21.8% reflected earlier matured
+strength; baseline weight eventually rose to 82.4%. It reacted too late to protect the first half. Specific
+economic causes remain unresolved. Do not discard complementary families solely on averages, but do not
+equate earlier late strength with robust future signal. No runner-up was promoted after confirmation.
+
+Old and repaired actual predictions through 5639 were identical, proving the main early loss preceded any
+effect of the missing-reference repair. The original input failure and GPU-launch/premature-report errors
+are preserved in online14. Full suite 485 passed without skips. No uploads, submissions, staking, deployment
+refit or old-audit reads occurred. Eras 5340–5924 have now been scored for this candidate and are consumed;
+any future adaptation on them is research on viewed data, not fresh confirmation. Keep all failed gates and
+source-bound caches. A reliable major predictive gain remains unproven.
+
 **Newest, online14:** first policy to clear the new discovery gates. Adaptive_score FIT 0.02602050 vs
 baseline 0.02429122 (+7.12%); proxy score 0.03933109 vs 0.03376212 (+16.49%); FIT/score gains positive in
 all three windows. Fixed anchored prior also cleared gates, so do not attribute the whole gain to learning
