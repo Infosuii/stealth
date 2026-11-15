@@ -31,3 +31,34 @@ def test_native_objective_and_serialized_cpu_inference(loss):
     assert sorted(stages)==checkpoint_counts(4,2)
     for count,pred in stages.items():np.testing.assert_allclose(pred,cpu_predict(model,X,count=count),atol=1e-12)
     assert np.isfinite(prediction).all()
+
+
+def test_copied_dependencies_are_bound_to_source_and_destination_bytes(tmp_path,monkeypatch):
+    import importlib.util,json
+    from pathlib import Path
+    path=Path(__file__).resolve().parents[1]/'scripts/ranking.py'
+    monkeypatch.syspath_prepend(str(path.parent))
+    spec=importlib.util.spec_from_file_location('ranking_runner_test',path)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    monkeypatch.setattr(module,'REPO',tmp_path)
+    cfg=dict(baseline={'cap':1},seed=17,threads=6,inner_width=200,gap=40,cadence=100,
+             inner_benchmark_trees=200,train_min_era=2800,ensembles={})
+    monkeypatch.setattr(module.c,'CFG',cfg)
+    monkeypatch.setattr(module.c,'PLAN','new-plan')
+    destination=tmp_path/'artifacts/new';destination.mkdir(parents=True)
+    monkeypatch.setattr(module.c,'RUN',destination)
+    root=tmp_path/'artifacts/temporal11';checkpoint=root/'early_4000/baseline';checkpoint.mkdir(parents=True)
+    (root/'plan.json').write_text(json.dumps(dict(data_sha256='same-data',config=cfg,code_sha256={},plan_sha256='old-plan')))
+    (destination/'plan.json').write_text(json.dumps(dict(data_sha256='same-data')))
+    blob=checkpoint/'model0.bin';blob.write_bytes(b'original native model')
+    (checkpoint/'done.json').write_text(json.dumps(dict(plan_sha256='old-plan',files={'model0.bin':module.c.r.sha(blob)},seconds=3.)))
+    module.copy_controls()
+    target=destination/'early_4000/baseline/done.json'
+    copied=module.c.checked_json(target)
+    assert copied['copied_from']=='temporal11' and copied['source_plan_sha256']=='old-plan' and copied['seconds']==0
+    module.copy_controls()  # immutable same-plan reuse
+    (target.parent/'model0.bin').write_bytes(b'corrupted destination')
+    with pytest.raises(RuntimeError,match='corrupt checkpoint'):module.copy_controls()
+    (target.parent/'model0.bin').write_bytes(blob.read_bytes())
+    blob.write_bytes(b'changed source')
+    with pytest.raises(RuntimeError,match='dependency bytes'):module.copy_controls()

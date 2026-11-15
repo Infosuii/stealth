@@ -2,6 +2,20 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, ranking13:** GPU campaign completed; source `6ec06f9`, protocol `docs/RANKING-13.md`, reports
+`handoffs/results/ranking13-*`. All 78 new native seed fits used GPU and replayed their serialized CPU
+predictions exactly; 94 older checkpoint groups were byte-verified dependencies, not newly trained models.
+The full 2,048-iteration inner schedules totalled 159,744 boosting iterations plus refits. No inner optimum
+hit the cap, and endpoint validation proxies generally deteriorated. Do not promise longer fitting fixes this.
+
+Raw GPU CatBoost was weak early (FIT 0.00143613 vs baseline 0.00997155), but strong late (0.02947111 vs
+0.02442690, +20.65%). Both seeds independently showed late strength. QueryRMSE and YetiRank underperformed
+raw regression overall. Fixed cross-family averaging diluted aggregate FIT but improved late; all eight
+comparisons failed, so confirmation stayed unread. Baseline01 remains unchanged. This motivates a new,
+preregistered prequential weight-learning test using ONLY earlier OOS predictions with labels matured by
+the 40-era delay; never switch using the known period's future outcome. Full suite 478 passed with no skips;
+the added dependency-corruption test also passed. CUDA is visible only outside the default sandbox.
+
 **Newest, count12:** matched stopping-count controls are complete. Source `d9f3f52`; protocol
 `docs/COUNT-12.md`; reports `handoffs/results/count12-*`. At the same 384 source eras, recent contiguous
 history FIT 0.02479900 beat spread history 0.02140618, while expanding all inner sources to 784 eras gave
