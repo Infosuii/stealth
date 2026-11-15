@@ -2,6 +2,20 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, context15:** daily updates and current prediction/feature state conditioning are complete. Source
+58c309a; protocol `docs/CONTEXT-15.md`; results `handoffs/results/context15-*`. Discovery remained positive,
+but viewed-transfer FIT was 0.01286781 daily, 0.01279259 prediction state and 0.01284852 feature state vs
+baseline 0.01498275. Faster updates alone did not repair transfer. Prediction-state seed agreement's
+association with relative value changed sign across periods and was near zero in transfer. This does not
+rule out richer predictive state information. Original boundary weights replayed within 6.7e-16.
+
+Similarity weighting sometimes concentrated on very few eras: minimum nominal weight ESS 4.68 prediction,
+27.58 feature, versus 195.25 unconditional. This is a supported variance/support concern, not proof of the
+failure's sole cause. A predeclared ESS-constrained repair can isolate that mechanism; preserve this round's
+adverse evidence. A separate supervised-target intervention with an honest OOS benchmark and earlier-period
+replication is being prepared. No existing gate changed, no candidate was promoted and no native models
+were retrained in context15. Full suite 489 passed without skips. All evaluated intervals are viewed data.
+
 **Newest, online14r:** technical repair completed and confirmation evaluated; **no qualification**. The one
 all-feature-missing row at 5582 is handled by valid-core residuals with N/M scaling. Source `4fe11ce`, protocol
 `docs/ONLINE-14-REPAIR.md`, results `handoffs/results/online14r-*`. Original discovery scores replayed with
