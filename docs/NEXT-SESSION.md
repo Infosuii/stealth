@@ -2,6 +2,25 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, objective16/17:** native supervised utility and matched CPU target/count controls complete.
+Protocols `docs/OBJECTIVE-16.md`, `docs/OBJECTIVE-17-COUNTS.md`; reports `handoffs/results/objective16-*`
+and `objective17-*`; sources 7535903 / 9e03a5b. All six objective16 comparisons failed historical gates;
+no promotion. Earlier replication 2000–3999 is now scored too. Full GPU utility lost to raw GPU in all
+three intervals. The isolated development CPU-full blend FIT 0.02815804 did not transfer (0.01180987 vs
+baseline 0.01526832); do not present that maximum as achievement of a major improvement.
+
+Count controls: six own-count replays exact, 54 changed-count refits, 24 equal-count reuses. Full labels at
+core counts hurt earlier/development FIT but helped transfer (0.00717651 vs core 0.00340346), while full
+labels at their own counts lost much of that recovery (0.00420219). This is a target/count interaction;
+all diagnostic cells still lost to baseline, and none is eligible for substitution.
+
+A raw-history lead is unresolved: expanding baseline floor400 vs old floor2800 improved observed development
+FIT 0.02429122→0.02702630 and transfer 0.01498275→0.01526832, but paired p_pos 0.9132/0.5482 is insufficient.
+Direct history/backbone controls are being prepared. Do not claim a reliable gain from those means.
+All 324 objective16 saved native models (51 teacher, 117 CPU, 156 GPU seeds) replayed exactly; 246 checkpoint
+groups account for grouped seeds. Full suite 494 passed without skips. OOS teacher provenance and changed-
+teacher cache refusal are enforced. Every reader still excludes >=5925; baseline01 and platform state unchanged.
+
 **Newest, context15r:** effective-support repair complete; source 614dd3d, protocol
 `docs/CONTEXT-15-REPAIR.md`, results `handoffs/results/context15r-*`. Nominal state-weight ESS is now bounded
 as specified (minimum actual ~146.7; floor respected throughout), but viewed transfer still loses:
