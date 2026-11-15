@@ -2,6 +2,30 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, temporal11 (2026-11-15):** fixed history/core/group consensus and multi-window stopping are complete.
+Protocol `docs/TEMPORAL-11.md`; results `handoffs/results/temporal11-*`; implementation `62212fb`. Strongest
+registered FIT: stable group consensus 0.02624674 vs equally refreshed baseline 0.02429122 (+8.05% observed),
+with bounded composite proxy 0.04299203 vs 0.03376212 (+27.34%). These are adaptive historical estimates;
+actual platform benchmark and core membership remain unknown. All six aggregate proxy-score sensitivities
+improved and all three primary score windows improved, but the candidate missed Holm (0.006999 > 0.00625),
+FIT p_pos (0.8574 < 0.95) and late FIT guard (-0.00144052 < -0.001). No discovery winner, confirmation read,
+deployment refit, upload, submission or staking. Baseline01 stays selected; a reliable major gain is unproven.
+
+The weaker individual history/core variants helped their fixed mixtures, so do not discard them solely on
+individual averages. Core consensus beat each constituent overall but still lost late. The multi-window
+count rule harmed FIT; unchanged-count blocks reproduced predictions exactly. Older inner sources had both
+less fitting data and different periods, leaving sample-size transfer versus temporal shift unresolved.
+Do not present median historical counts as a solved stability mechanism. Keep round-10 and round-11 gates
+frozen. All 214 saved model checkpoints across both rounds replayed exactly; original baseline/rolling
+control predictions matched between rounds. Full CPU suite 469 passed, 3 optional-interpreter skips; targeted
+MLP suite with STEALTH_GPU_PY set to the absolute GPU venv passed 7/7, covering the skipped paths.
+
+Latest runs use CPU LightGBM intentionally, with no gratuitous longer neural schedule; earlier supervised
+training already overfit. Source-bound caches are under `artifacts/temporal10` and `artifacts/temporal11`.
+Read these updates before the historical notes below; do not mix FIT-only and composite score units or
+claim a leaderboard rank from proxy scores. Original live leader names are opaque generated/chosen labels,
+not evidence of their architecture. The 2026-11-14 leaderboard leaders had only 1, 6 and 3 scored rounds.
+
 **2026-11-15, temporal10:** sequential retraining and bounded composite-score proxies are implemented.
 Protocol `docs/TEMPORAL-10.md`; results `handoffs/results/temporal10-*`; source `97c82c3`. Refreshed baseline
 FIT 0.02429122 vs matched static 0.02225898 (refresh lost late). Rolling score-aware FIT 0.02510301 with

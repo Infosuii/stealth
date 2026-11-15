@@ -72,6 +72,15 @@ Do not describe the largest historical average as a verified future gain or subs
 
 ## Standing rules (unchanged)
 
+The 2026-11-15 continuation adds score accounting and executable temporal controls. New reports distinguish
+FIT from bounded FIT+UNQ+INOV score, average scores after each era's nonlinear transform, and label every
+unknown-benchmark/core calculation as a proxy. Historical train-split benchmark predictions remain excluded.
+Refreshed challengers are compared with an equally refreshed baseline; fixed-window controls isolate
+refreshing. All score/horizon/consensus follow-ups were registered before their new scores. Stronger observed
+historical candidates still failed their statistical and temporal gates, so baseline01 remains unchanged.
+Neither the user's compute preference nor a promising average authorises calling proxy evidence a live
+performance result, silently relaxing an existing gate, or making a platform write.
+
 - The user explicitly requires investigation of promising models that underperform. Before retiring an idea,
   distinguish implementation/numerical errors, optimization failure, representation limits, ensemble or
   objective mismatch, overfitting and temporal shift. Use matched controls where possible; retain contradicted
