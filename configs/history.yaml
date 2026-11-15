@@ -1,0 +1,102 @@
+name: history18
+seed: 17
+threads: 6
+workers: 2
+train_min_era: 3
+reader_ceiling: 5925
+gap: 40
+cadence: 100
+inner_width: 200
+teacher_start: 880
+teacher_end: 5924
+score_bound: 0.6366197723675814
+baseline:
+  num_leaves: 8
+  learning_rate: 0.03
+  min_data_in_leaf: 2000
+  feature_fraction: 0.3
+  lambda_l2: 10
+  bagging_fraction: 0.7
+  bagging_freq: 1
+  max_bin: 16
+  cap: 1500
+  early_stopping_rounds: 100
+bootstrap:
+  block: 20
+  n_boot: 10000
+  seed: 17
+promotion:
+  alpha: 0.05
+  p_pos: 0.95
+  min_fit_gain: 0.001
+  min_score_gain: 0.002
+  worst_window_gain: -0.001
+  min_positive_windows: 2
+intervals:
+- name: earlier_replication
+  test_start: 2000
+  test_end: 3999
+- name: viewed_development
+  test_start: 4000
+  test_end: 5299
+- name: viewed_transfer
+  test_start: 5340
+  test_end: 5924
+cpu_recipes:
+- name: cpu_rolling
+  target: raw
+  history: 1024
+  floor: 400
+- name: cpu_expanding400
+  target: raw
+  history: null
+  floor: 400
+- name: cpu_expanding3
+  target: raw
+  history: null
+  floor: 3
+gpu_recipes:
+- name: gpu_rolling
+  target: raw
+  history: 1024
+  cap: 2048
+  checkpoint_step: 32
+  learning_rate: 0.02
+  depth: 5
+  l2_leaf_reg: 20
+  threads: 4
+  seeds: &id001
+  - 17
+  - 29
+  floor: 400
+- name: gpu_expanding400
+  target: raw
+  history: null
+  cap: 2048
+  checkpoint_step: 32
+  learning_rate: 0.02
+  depth: 5
+  l2_leaf_reg: 20
+  threads: 4
+  seeds: *id001
+  floor: 400
+- name: gpu_expanding3
+  target: raw
+  history: null
+  cap: 2048
+  checkpoint_step: 32
+  learning_rate: 0.02
+  depth: 5
+  l2_leaf_reg: 20
+  threads: 4
+  seeds: *id001
+  floor: 3
+comparisons:
+- cpu_expanding3
+- cpu_expanding3_blend
+- gpu_expanding400
+- gpu_expanding400_blend
+- gpu_expanding3
+- gpu_expanding3_blend
+- balanced_history
+- balanced_history_blend
