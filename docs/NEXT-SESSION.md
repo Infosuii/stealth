@@ -2,6 +2,17 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**2026-11-15, temporal10:** sequential retraining and bounded composite-score proxies are implemented.
+Protocol `docs/TEMPORAL-10.md`; results `handoffs/results/temporal10-*`; source `97c82c3`. Refreshed baseline
+FIT 0.02429122 vs matched static 0.02225898 (refresh lost late). Rolling score-aware FIT 0.02510301 with
+0.25 core-proxy neutralization and composite proxy 0.04442926 vs baseline 0.03376212. None of eleven
+comparisons passed the corrected/effect/temporal gates; confirmation stayed unread. All 120 byte-bound
+fit checkpoints replayed exactly. Target/count controls support an interaction on rolling history, not an
+isolated stopping explanation. Counterfactual counts alone are insufficient to explain the gains. These are
+historical estimates with OOS local benchmark references and unknown-core proxies, never platform scores.
+Baseline01 remains unchanged. A follow-up tests fixed history/core consensus and multi-window stopping;
+do not relax round 10's completed gates. Latest suite: 466 passed, 3 skipped in CPU venv.
+
 **Newest: diagnose before discarding.** The user explicitly requires causal investigation of promising ideas
 that underperform. `forensics06-*` and `forensics08-*` report matched controls, adverse results and unresolved
 causes. More trees was a contradicted repair hypothesis. Preserving raw inputs recovered late latent-tree
