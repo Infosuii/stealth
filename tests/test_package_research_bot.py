@@ -28,3 +28,16 @@ def test_export_preserves_equal_gaussian_member_and_seed_rules(monkeypatch):
     assert p['weights']=={'gpu_core3':.5,'cpu_raw400':.5}
     assert p['p_b']==p['p_c']==0
     assert p['source_run_fingerprint']=='fixed-plan'
+
+
+def test_missing_value_conversion_owns_writable_memory_and_preserves_frame(monkeypatch):
+    import numpy as np
+    import pandas as pd
+    m=load(monkeypatch)
+    frame=pd.DataFrame({'feature_a':np.array([-1,2],dtype=np.float32),
+                        'feature_b':np.array([3,4],dtype=np.float32)})
+    original=frame.copy(deep=True)
+    X=m.tree_matrix(frame,['feature_a','feature_b'])
+    assert X.flags.writeable and np.isnan(X[0,0])
+    X[1,0]=99
+    pd.testing.assert_frame_equal(frame,original)

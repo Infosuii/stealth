@@ -34,6 +34,12 @@ def source_recipe(name):
     return dict(floor=floor, target='core' if '_core' in name else 'raw', gpu=name.startswith('gpu'))
 
 
+def tree_matrix(frame, columns):
+    X = frame[columns].to_numpy(np.float32, copy=True)
+    X[X < 0] = np.nan
+    return X
+
+
 def payload(members, columns, plan):
     names = [m['name'] for m in members]
     return dict(version=bundle.VERSION, git_sha=bundle.git_sha(), built_at=datetime.now(timezone.utc).isoformat(),
@@ -98,7 +104,7 @@ def main():
     era = frame.exped.str.rsplit('_', n=1).str[-1].astype(np.int32).to_numpy()
     if columns != [c for c in frame if c.startswith('feature_')] or len(columns) != 178 or not frame.index.is_unique:
         raise RuntimeError('full-refit feature/index contract changed')
-    X = frame[columns].to_numpy(np.float32); X[X < 0] = np.nan
+    X = tree_matrix(frame, columns)
     y = frame.target_everest.to_numpy()
     if not np.isfinite(y).all():
         raise RuntimeError('missing final train labels')
