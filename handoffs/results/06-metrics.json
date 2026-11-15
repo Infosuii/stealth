@@ -1,0 +1,186 @@
+{
+  "status": "ready_for_authorized_upload",
+  "model_name": "mandelbrot-bayesian-payoff",
+  "model_id": "f06a70bf-ef8b-483d-b2a9-d4b9ef3e7043",
+  "artifact": {
+    "pkl": "research06.pkl",
+    "sha256": "50c1301f73605c48067cbed6ee5789b341afe0c1e3cd3ea2cd5164901ae05a48",
+    "size_bytes": 142069,
+    "version": "0.1.0",
+    "git_sha": "fd4e68a148e5d58c0641419a485fe482d26dd5a9",
+    "run_id": "upload06",
+    "built_at": "2026-11-15T19:12:24.842324+00:00",
+    "python": "3.11.18",
+    "libs": {
+      "lightgbm": "4.7.0",
+      "xgboost": "3.2.0",
+      "catboost": "1.2.10",
+      "scikit-learn": "1.9.1",
+      "numpy": "2.4.6",
+      "pandas": "3.0.6",
+      "scipy": "1.17.1",
+      "cloudpickle": "3.1.2"
+    },
+    "members": [
+      {
+        "name": "cpu_expanding3",
+        "family": "lgbm",
+        "target": "target_everest",
+        "group": "everest",
+        "arm": "lgbm",
+        "input": "nan",
+        "n_features": 178,
+        "n_blobs": 1,
+        "blob_rule": "raw_mean"
+      }
+    ],
+    "weights": {
+      "cpu_expanding3": 1.0
+    },
+    "p_b": 0.0,
+    "p_c": 0.0,
+    "p_source": "frozen research policy",
+    "p_reason": "no post-research neutralisation or validation tuning",
+    "blend_rule": "fixed_equal",
+    "admitted_arms": [
+      "lgbm"
+    ],
+    "member_subset": [
+      "cpu_expanding3"
+    ],
+    "weights_source": "registered historical policy",
+    "artifact_source": "frozen research policy; final full-data refit",
+    "source_run_fingerprint": "ba8a96754505189d86422f9fa33825d496518546a545d6b797c05065381f0a96",
+    "source_universe": null,
+    "blob_files": null,
+    "core_proxy_cols": [],
+    "n_features": 178,
+    "pkl_check": {
+      "passed": true,
+      "status": "passed",
+      "at": "2026-11-15T19:12:35+00:00",
+      "sha256": "50c1301f73605c48067cbed6ee5789b341afe0c1e3cd3ea2cd5164901ae05a48",
+      "python": "3.11.18",
+      "libs": {
+        "catboost": "1.2.10",
+        "cloudpickle": "3.1.2",
+        "lightgbm": "4.7.0",
+        "numpy": "2.4.6",
+        "pandas": "3.0.6",
+        "pyarrow": "24.0.0",
+        "scikit-learn": "1.9.1",
+        "scipy": "1.17.1",
+        "xgboost": "3.2.0"
+      },
+      "checker": "/home/om/Projects/eversteer/stealth/artifacts/pklcheck_venv/bin/python",
+      "eras": 51,
+      "seconds_per_era_max": 0.4134307060012361,
+      "isolation": {
+        "stealth_importable": false,
+        "torch_importable": false
+      },
+      "problems": []
+    },
+    "sandbox_sha256": null,
+    "upload_id": null
+  },
+  "decision": {
+    "source_run": "history18",
+    "policy": "cpu_expanding3",
+    "source_plan_sha256": "ba8a96754505189d86422f9fa33825d496518546a545d6b797c05065381f0a96",
+    "classification": "experimental research artifact; not broadly qualified",
+    "rule": "handoffs/06-research-bot-upload.md",
+    "rule_sha256": "41eff7fb824b145c0fb2185bc1056d7bd2b06c07b351c2d81f3ded76dcefc82b",
+    "reason": "No utility19 comparison passes all three intervals; apply the precommitted experimental fallback.",
+    "known_transfer_fit": 0.018193285653494547,
+    "known_transfer_baseline_fit": 0.01526832264280302,
+    "known_earlier_fit": 0.0140204906911794,
+    "known_earlier_baseline_fit": 0.016904437259313464,
+    "incumbent_preserved": "baseline01",
+    "auto_submit": false,
+    "decided_at": "2026-11-15T19:11:25.472724+00:00",
+    "utility19_results_sha256": "b9be87e2f9972225c52ede738c7bbdbd7ca0099c7cd6dc9ba526120486dc71ec"
+  },
+  "refit": {
+    "decision": {
+      "source_run": "history18",
+      "policy": "cpu_expanding3",
+      "source_plan_sha256": "ba8a96754505189d86422f9fa33825d496518546a545d6b797c05065381f0a96",
+      "classification": "experimental research artifact; not broadly qualified",
+      "rule": "handoffs/06-research-bot-upload.md",
+      "rule_sha256": "41eff7fb824b145c0fb2185bc1056d7bd2b06c07b351c2d81f3ded76dcefc82b",
+      "reason": "No utility19 comparison passes all three intervals; apply the precommitted experimental fallback.",
+      "known_transfer_fit": 0.018193285653494547,
+      "known_transfer_baseline_fit": 0.01526832264280302,
+      "known_earlier_fit": 0.0140204906911794,
+      "known_earlier_baseline_fit": 0.016904437259313464,
+      "incumbent_preserved": "baseline01",
+      "auto_submit": false,
+      "decided_at": "2026-11-15T19:11:25.472724+00:00",
+      "utility19_results_sha256": "b9be87e2f9972225c52ede738c7bbdbd7ca0099c7cd6dc9ba526120486dc71ec"
+    },
+    "decision_sha256": "c5bc8fb168774aabbaf7db31f07f6d1939068b97e10a35824daf68c82dbede2e",
+    "training_data_sha256": "54a8e0194d94164f4c731b16773674916d9b6272d72d7efe4555a7e3e5942df2",
+    "final_refit_uses_later_train_labels": true,
+    "later_labels_used_for_selection": false,
+    "source_runtime_equivalence": {
+      "era_replays": 300,
+      "max_error": 0.0
+    },
+    "native_fits": [
+      {
+        "name": "cpu_expanding3",
+        "seed": 17,
+        "target": "raw",
+        "floor": 3,
+        "source_counts": [
+          86,
+          231,
+          39
+        ],
+        "count": 86,
+        "source_markers": {
+          "viewed_transfer_5640/cpu_expanding3/done.json": "043dece1d61a96681149d6e6400ebfc21ff53f7913741945bd90e791010fe4cb",
+          "viewed_transfer_5740/cpu_expanding3/done.json": "0fad16a48f7798bc2c057b6bcb3992cdd7ba17e2f8dbcaaf2550a02822bd1881",
+          "viewed_transfer_5840/cpu_expanding3/done.json": "5d214e33ae79178de0ef316e5b2a811deb3f63b53c0b04e5c7b942f0d94ee442"
+        },
+        "train_min": 3,
+        "train_max": 6524,
+        "rows": 468236,
+        "file": "cpu_expanding3-seed17.bin",
+        "sha256": "a66e07373154ea0c2fe3190b483ed9cde38ad0ec20c9dbbce9e067b46d9b304a",
+        "serialization_max_error": 0.0
+      }
+    ],
+    "pkl_sha256": "50c1301f73605c48067cbed6ee5789b341afe0c1e3cd3ea2cd5164901ae05a48",
+    "pkl": "models/research06.pkl",
+    "source_plan_sha256": "ba8a96754505189d86422f9fa33825d496518546a545d6b797c05065381f0a96"
+  },
+  "offline": {
+    "exit_code": 0,
+    "rows": 90,
+    "exped": "exped_8055",
+    "unique_predictions": 90
+  },
+  "validation": {
+    "full_suite_before_packaging": "500 passed, no skips",
+    "post_pandas_fix_targeted": "5 passed",
+    "final_full_suite": "501 passed, no skips, 110.03 seconds"
+  },
+  "upload": {
+    "attempted": false,
+    "auto_submit": false
+  },
+  "source_commits": {
+    "history_source": "158512a",
+    "history_results": "0bc8a89",
+    "utility_source": "53ad07a",
+    "utility_results": "fc56cca",
+    "upload_tooling": "1d7e2b4",
+    "pandas_copy_fix": "fd4e68a"
+  },
+  "operator_issues": [
+    "Initial final packaging stopped before fitting/writing the bot because pandas returned a read-only array. Added copy=True plus regression test, committed fd4e68a, then successfully rebuilt with the unchanged frozen decision/count.",
+    "All earlier experiment launch, environment, support, target/count and history failures remain in their own reports."
+  ]
+}

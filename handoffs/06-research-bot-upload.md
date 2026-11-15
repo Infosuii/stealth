@@ -77,3 +77,17 @@ source/preparation commits, final fit boundaries/counts, exact artifact hash, ch
 ID, remote hash/size/interpreter evidence, sandbox/execution status, auto-submit state and every operational
 issue. Preserve all prior failure reports. Commit only reports, source, manifests/SHA files and active upload
 metadata; never the pickle, `.env`, data, private receipt or artifacts. Push and verify via git ls-remote.
+
+## Concrete checked preparation (2026-11-15)
+
+Utility19 report fc56cca has no all-interval qualifier. The frozen fallback is history18 CPU expanding3;
+baseline01 remains the conservative local incumbent. Prepared file `models/research06.pkl`, 142,069 bytes,
+SHA256 `50c1301f73605c48067cbed6ee5789b341afe0c1e3cd3ea2cd5164901ae05a48`.
+Full-data refit:468,236 train rows, eras3–6524, raw target, CPU seed17,86 trees (frozen median[86,231,39]).
+Source runtime replay:300 eras, error0. Native serialization replay:error0. `pkl_check: PASSED`,51 eras,
+exact Python3.11.18 pins, isolation verified, slowest0.4134s. Offline prediction passed90/90 rows.
+The pandas mutable-array correction is fd4e68a; it changed no model decision or count.
+
+The selection rule was registered in1d7e2b4 before utility19 scores; this appended preparation record only
+identifies its concrete output. See `handoffs/results/06-results.md` and `06-metrics.json` for final tests
+and the single-upload outcome. The explicit user authorization at the top covers this prepared artifact.

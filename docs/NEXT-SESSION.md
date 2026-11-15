@@ -8,7 +8,7 @@ verified; fixed raw-count donors and six CPU own-count replays exact, serializat
 stages exit0. Full suite500 passed without skips. Research readers remain <5925.
 
 GPU core400 reaches transfer FIT0.01999896 vs baseline0.01526832 (+30.98%), proxy0.03250764 vs0.01868202
-(+74.00%); it, its baseline blend and GPU-core3 blend pass viewed-transfer gates. ALL comparisons fail earlier
+(+74.01%); it, its baseline blend and GPU-core3 blend pass viewed-transfer gates. ALL comparisons fail earlier
 and development; no all-interval qualifier. CPU core3 at fixed raw counts helps earlier FIT but hurts transfer;
 GPU core400 transfer benefits from both labels and own counts, with individually uncertain attribution.
 Preserve these target/count/history interactions rather than dismissing the family or claiming broad success.
@@ -20,7 +20,7 @@ auto-submit OFF. Package through `scripts/package_research_bot.py`, run full pkl
 upload once via `scripts/upload_checked.py` with its durable receipt. Final full-data refit is separately
 specified there; no later training label may choose a count or policy. A pending stored file is not an executed
 bot. No direct submissions, diagnostics uploads or staking. Commit/push this completed report before final
-refit, and commit/push the concrete checked manifest before uploading. No platform write has occurred yet.
+refit, and commit/push the concrete checked manifest before uploading. Final artifact research06.pkl is built and checked (SHA50c1301f7360…,142069 bytes);300 source-era and native serialization replays exact, pkl_check51 eras passed, offline90 rows passed, final full suite501 passed. Packaging pandas copy correction fd4e68a is committed/pushed. No platform write has occurred yet.
 
 **Newest, history18:** raw training-history controls complete; source 158512a, protocol
 `docs/HISTORY-18.md`, reports `handoffs/results/history18-*`. This isolates short history as a material

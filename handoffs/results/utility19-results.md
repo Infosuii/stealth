@@ -3,7 +3,7 @@
 viewed historical long-history core utility and count controls
 
 GPU core utility with expanding-from-400 history reaches viewed-transfer FIT **0.01999896** versus
-baseline **0.01526832 (+30.98%)**, primary composite proxy **0.03250764** versus **0.01868202 (+74.00%)**.
+baseline **0.01526832 (+30.98%)**, primary composite proxy **0.03250764** versus **0.01868202 (+74.01%)**.
 It and its baseline blend pass that interval's unchanged historical gates; GPU-core3's baseline blend does
 also. ALL comparisons fail earlier replication and development. No candidate qualifies in all three intervals;
 no broadly reliable major gain or automatic promotion is established. All periods are viewed historical data.
