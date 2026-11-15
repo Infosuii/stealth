@@ -72,6 +72,16 @@ Do not describe the largest historical average as a verified future gain or subs
 
 ## Standing rules (unchanged)
 
+The subsequent context15/15r and objective16/17 controls did not recover generalization through support
+repair or utility-target shaping; target and stopping-count effects interacted. History18 isolates a material
+contribution from short training windows: expanding history improves raw CPU/GPU FIT across the three
+observed intervals. CPU training from the earliest era improves viewed-transfer FIT 19.16% and passes that
+interval's fixed gates, but loses earlier and fails development gates. This is a promising historical result,
+not a broadly reliable major gain or promotion. Preserve the period-dependent failures, matched controls,
+and the distinction between full/proxy score. All intervals are now viewed. Full suite 495 passed; baseline01
+and platform state unchanged. Extending every training schedule is not justified by the inner curves:
+154/156 new history GPU cap endpoints were worse than their selected earlier checkpoints. No gate relaxed.
+
 The continued 2026-11-15 work completed count12, GPU ranking13, online14 and the isolated online14r technical
 repair. Online learning cleared discovery but failed its frozen historical confirmation. Missing-core handling
 was repaired under a new source-bound ID before any confirmation performance verdict, with exact discovery

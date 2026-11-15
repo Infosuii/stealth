@@ -2,6 +2,31 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, history18:** raw training-history controls complete; source 158512a, protocol
+`docs/HISTORY-18.md`, reports `handoffs/results/history18-*`. This isolates short history as a material
+contributor to prior failures. CPU expanding-from-400 beats rolling-1024 FIT in all three intervals
+(descriptive p_pos 0.9926/0.9986/0.9835). GPU expanding-from-400 improves transfer FIT 0.00491660→0.01584654
+(p_pos 0.9930), with positive point gains in the other two periods too. Preserve these family controls.
+
+CPU expanding-from-3 reaches transfer FIT 0.01819329 vs 0.01526832 (+19.16%), proxy 0.02531301 vs
+0.01868202 (+35.49%). It and its equal baseline blend pass the unchanged viewed-transfer historical gates.
+However, its FIT loses earlier (-0.00288395) and is near-flat/slightly down in development (-0.00023071).
+All comparisons fail earlier/development; no candidate passes all three intervals. This is useful historical
+progress, not a reliable major future gain. No promotion; baseline01/platform state remain unchanged.
+
+234 checkpoint groups, 351 native models including copied controls; 234 new selected models (78 CPU,
+156 GPU seeds). All strict boundaries and saved bytes verified, serialization replay error zero. Full suite
+495 passed, no skips. All new GPU trajectories completed 2,048 inner iterations; 154/156 cap endpoints were
+worse than selected inner optima. Only two hit the cap, so blindly longer training is not the supported repair.
+First GPU command exited 143 after all checkpoints completed; exact resume reused all 117 GPU groups and
+exited 0 without retraining. Exit cause unresolved and recorded. Every reader excludes >=5925.
+
+Next research must preserve these fixed comparisons and investigate why the earliest rows help transfer but
+hurt earlier periods (representation relevance versus sample-size/regularization effects is unresolved).
+Do not retrospectively choose each period's best history, call any viewed interval independent, weaken
+completed gates, or assume diagnostics establish a platform leaderboard score. Utility tests below used a
+shorter history than the now-improved raw controls; future matched tests must account for this limitation.
+
 **Newest, objective16/17:** native supervised utility and matched CPU target/count controls complete.
 Protocols `docs/OBJECTIVE-16.md`, `docs/OBJECTIVE-17-COUNTS.md`; reports `handoffs/results/objective16-*`
 and `objective17-*`; sources 7535903 / 9e03a5b. All six objective16 comparisons failed historical gates;
@@ -16,7 +41,7 @@ all diagnostic cells still lost to baseline, and none is eligible for substituti
 
 A raw-history lead is unresolved: expanding baseline floor400 vs old floor2800 improved observed development
 FIT 0.02429122→0.02702630 and transfer 0.01498275→0.01526832, but paired p_pos 0.9132/0.5482 is insufficient.
-Direct history/backbone controls are being prepared. Do not claim a reliable gain from those means.
+History18 above completes the direct history/backbone controls. Do not claim a reliable gain from those means.
 All 324 objective16 saved native models (51 teacher, 117 CPU, 156 GPU seeds) replayed exactly; 246 checkpoint
 groups account for grouped seeds. Full suite 494 passed without skips. OOS teacher provenance and changed-
 teacher cache refusal are enforced. Every reader still excludes >=5925; baseline01 and platform state unchanged.
@@ -28,7 +53,7 @@ prediction-state FIT 0.01278598, feature-state 0.01288537 vs baseline 0.01498275
 dates needed tempering. This contradicts support collapse as a sufficient explanation; state associations
 were unstable too. Preserve the repair and adverse controls; no candidate promoted or gate changed.
 
-Native supervised-target experiment objective16 is prepared separately. It creates an honest rolling OOS
+Native supervised-target experiment objective16, now completed above, creates an honest rolling OOS
 benchmark teacher (never the provided train benchmark), tests full-utility labels with matched raw/core
 controls on CPU/GPU, and adds earlier-period 2000–3999 replication. Training context >=400 is explicitly
 declared; every reader still excludes >=5925. All intervals are historical and later intervals viewed;
