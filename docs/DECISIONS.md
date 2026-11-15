@@ -72,6 +72,14 @@ Do not describe the largest historical average as a verified future gain or subs
 
 ## Standing rules (unchanged)
 
+The latest user instruction on 2026-11-15 explicitly authorizes continuing research and, once satisfied with
+the completed work and checks, uploading a bot to the platform. This authorizes the eventual model-pickle
+upload; another approval question is unnecessary. First write a concrete upload handoff with the USER MUST
+APPROVE banner, record this authorization, select the artifact, and pass its full hash-bound portability
+checks. Keep the research experiments free of platform writes, upload once, persist any returned upload ID,
+and verify the platform result without repeating the upload on a wait failure. No staking or direct prediction
+submission is requested. Record exactly whether the selected model is a qualified improvement or an incumbent.
+
 The subsequent context15/15r and objective16/17 controls did not recover generalization through support
 repair or utility-target shaping; target and stopping-count effects interacted. History18 isolates a material
 contribution from short training windows: expanding history improves raw CPU/GPU FIT across the three

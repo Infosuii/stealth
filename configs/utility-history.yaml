@@ -1,0 +1,89 @@
+name: utility19
+seed: 17
+threads: 6
+workers: 2
+train_min_era: 3
+reader_ceiling: 5925
+gap: 40
+cadence: 100
+inner_width: 200
+teacher_start: 880
+teacher_end: 5924
+score_bound: 0.6366197723675814
+baseline:
+  num_leaves: 8
+  learning_rate: 0.03
+  min_data_in_leaf: 2000
+  feature_fraction: 0.3
+  lambda_l2: 10
+  bagging_fraction: 0.7
+  bagging_freq: 1
+  max_bin: 16
+  cap: 1500
+  early_stopping_rounds: 100
+bootstrap:
+  block: 20
+  n_boot: 10000
+  seed: 17
+promotion:
+  alpha: 0.05
+  p_pos: 0.95
+  min_fit_gain: 0.001
+  min_score_gain: 0.002
+  worst_window_gain: -0.001
+  min_positive_windows: 2
+intervals:
+- name: earlier_replication
+  test_start: 2000
+  test_end: 3999
+- name: viewed_development
+  test_start: 4000
+  test_end: 5299
+- name: viewed_transfer
+  test_start: 5340
+  test_end: 5924
+cpu_recipes:
+- name: cpu_core400
+  target: core
+  history: null
+  floor: 400
+- name: cpu_core3
+  target: core
+  history: null
+  floor: 3
+gpu_recipes:
+- name: gpu_core400
+  target: core
+  history: null
+  floor: 400
+  cap: 2048
+  checkpoint_step: 32
+  learning_rate: 0.02
+  depth: 5
+  l2_leaf_reg: 20
+  threads: 4
+  seeds:
+  - 17
+  - 29
+- name: gpu_core3
+  target: core
+  history: null
+  floor: 3
+  cap: 2048
+  checkpoint_step: 32
+  learning_rate: 0.02
+  depth: 5
+  l2_leaf_reg: 20
+  threads: 4
+  seeds:
+  - 17
+  - 29
+comparisons:
+- cpu_core400
+- cpu_core400_blend
+- cpu_core3
+- cpu_core3_blend
+- gpu_core400
+- gpu_core400_blend
+- gpu_core3
+- gpu_core3_blend
