@@ -2,6 +2,19 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, context15r:** effective-support repair complete; source 614dd3d, protocol
+`docs/CONTEXT-15-REPAIR.md`, results `handoffs/results/context15r-*`. Nominal state-weight ESS is now bounded
+as specified (minimum actual ~146.7; floor respected throughout), but viewed transfer still loses:
+prediction-state FIT 0.01278598, feature-state 0.01288537 vs baseline 0.01498275. Only 48/1645 calibrated
+dates needed tempering. This contradicts support collapse as a sufficient explanation; state associations
+were unstable too. Preserve the repair and adverse controls; no candidate promoted or gate changed.
+
+Native supervised-target experiment objective16 is prepared separately. It creates an honest rolling OOS
+benchmark teacher (never the provided train benchmark), tests full-utility labels with matched raw/core
+controls on CPU/GPU, and adds earlier-period 2000–3999 replication. Training context >=400 is explicitly
+declared; every reader still excludes >=5925. All intervals are historical and later intervals viewed;
+no prospective or deployment claim is allowed solely from these scores.
+
 **Newest, context15:** daily updates and current prediction/feature state conditioning are complete. Source
 58c309a; protocol `docs/CONTEXT-15.md`; results `handoffs/results/context15-*`. Discovery remained positive,
 but viewed-transfer FIT was 0.01286781 daily, 0.01279259 prediction state and 0.01284852 feature state vs
