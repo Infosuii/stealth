@@ -2,6 +2,19 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, online14:** first policy to clear the new discovery gates. Adaptive_score FIT 0.02602050 vs
+baseline 0.02429122 (+7.12%); proxy score 0.03933109 vs 0.03376212 (+16.49%); FIT/score gains positive in
+all three windows. Fixed anchored prior also cleared gates, so do not attribute the whole gain to learning
+weights. Adaptive incremental FIT vs fixed is not statistically established (descriptive p=0.1300).
+Source 1d3512b; `docs/ONLINE-14.md`; `handoffs/results/online14-*`.
+
+Frozen confirmation refits completed but scoring stopped on exactly one all-feature-missing row at exped_5582.
+There is no original confirmation performance verdict. Preserve failed_input_contract and old caches.
+A separately registered technical repair uses valid-core reference residuals with N/M covariance scaling,
+retains all FIT/benchmark contributions, and must replay discovery exactly before resuming the frozen policy
+on the unchanged native model bytes. No gate or model parameter may be relaxed. Full suite pre-repair 482
+passed. Initial GPU-hidden launch and premature-report errors are documented in the report. No platform writes.
+
 **Newest, ranking13:** GPU campaign completed; source `6ec06f9`, protocol `docs/RANKING-13.md`, reports
 `handoffs/results/ranking13-*`. All 78 new native seed fits used GPU and replayed their serialized CPU
 predictions exactly; 94 older checkpoint groups were byte-verified dependencies, not newly trained models.
