@@ -2,6 +2,26 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, utility19 complete; upload06 authorized and pending:** source 53ad07a, report
+`handoffs/results/utility19-*`, protocol `docs/UTILITY-HISTORY-19.md`. All 702 native models in 468 groups
+verified; fixed raw-count donors and six CPU own-count replays exact, serialization error0. Both training
+stages exit0. Full suite500 passed without skips. Research readers remain <5925.
+
+GPU core400 reaches transfer FIT0.01999896 vs baseline0.01526832 (+30.98%), proxy0.03250764 vs0.01868202
+(+74.00%); it, its baseline blend and GPU-core3 blend pass viewed-transfer gates. ALL comparisons fail earlier
+and development; no all-interval qualifier. CPU core3 at fixed raw counts helps earlier FIT but hurts transfer;
+GPU core400 transfer benefits from both labels and own counts, with individually uncertain attribution.
+Preserve these target/count/history interactions rather than dismissing the family or claiming broad success.
+
+The latest user explicitly authorized uploading a bot after checks, without another approval question. Follow
+`handoffs/06-research-bot-upload.md` (1d7e2b4). With no all-interval qualifier its frozen fallback is history18
+pure CPU expanding3, an EXPERIMENTAL artifact; baseline01 remains the conservative local incumbent. Preserve
+auto-submit OFF. Package through `scripts/package_research_bot.py`, run full pkl_check/offline checks, and
+upload once via `scripts/upload_checked.py` with its durable receipt. Final full-data refit is separately
+specified there; no later training label may choose a count or policy. A pending stored file is not an executed
+bot. No direct submissions, diagnostics uploads or staking. Commit/push this completed report before final
+refit, and commit/push the concrete checked manifest before uploading. No platform write has occurred yet.
+
 **Newest, history18:** raw training-history controls complete; source 158512a, protocol
 `docs/HISTORY-18.md`, reports `handoffs/results/history18-*`. This isolates short history as a material
 contributor to prior failures. CPU expanding-from-400 beats rolling-1024 FIT in all three intervals

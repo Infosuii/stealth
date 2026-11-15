@@ -80,6 +80,12 @@ checks. Keep the research experiments free of platform writes, upload once, pers
 and verify the platform result without repeating the upload on a wait failure. No staking or direct prediction
 submission is requested. Record exactly whether the selected model is a qualified improvement or an incumbent.
 
+Utility19 completes that investigation with matched long histories and raw-count donors. Its GPU core400
+has a strong viewed-transfer result (FIT0.01999896 vs0.01526832), but every candidate fails earlier and
+development gates. CPU/GPU label and count effects change by period; neither alone explains all failures.
+No broad promotion follows. Handoff06's predeclared no-all-interval-winner fallback remains history18 CPU3,
+for an experimental auto-submit-OFF upload. Do not switch it after seeing utility19's higher recent maximum.
+
 The subsequent context15/15r and objective16/17 controls did not recover generalization through support
 repair or utility-target shaping; target and stopping-count effects interacted. History18 isolates a material
 contribution from short training windows: expanding history improves raw CPU/GPU FIT across the three
