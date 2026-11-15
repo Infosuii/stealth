@@ -2,25 +2,31 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
-**Newest, utility19 complete; upload06 authorized and pending:** source 53ad07a, report
-`handoffs/results/utility19-*`, protocol `docs/UTILITY-HISTORY-19.md`. All 702 native models in 468 groups
-verified; fixed raw-count donors and six CPU own-count replays exact, serialization error0. Both training
-stages exit0. Full suite500 passed without skips. Research readers remain <5925.
+**Newest, upload06 complete:** experimental history18 CPU expanding3 was uploaded ONCE to
+mandelbrot-bayesian-payoff, existing model UUID f06a70bf-ef8b-483d-b2a9-d4b9ef3e7043. Upload ID
+7d2159cf-c061-4148-8118-327f1c644011; checked pickle SHA
+50c1301f73605c48067cbed6ee5789b341afe0c1e3cd3ea2cd5164901ae05a48,142069 bytes.
+Remote hash/size/Python3.11 verified, sandbox_ready1 and no server error. **Auto-submit remains OFF**, so
+execution status is pending; never claim it is live or submit/enable it without the user's instruction.
+Do not re-upload this artifact. Receipt artifacts/upload06/receipt.json supports read-only verification.
+Reports handoffs/results/06-*; preparation260c7b1 was pushed before the write.
 
-GPU core400 reaches transfer FIT0.01999896 vs baseline0.01526832 (+30.98%), proxy0.03250764 vs0.01868202
-(+74.01%); it, its baseline blend and GPU-core3 blend pass viewed-transfer gates. ALL comparisons fail earlier
-and development; no all-interval qualifier. CPU core3 at fixed raw counts helps earlier FIT but hurts transfer;
-GPU core400 transfer benefits from both labels and own counts, with individually uncertain attribution.
-Preserve these target/count/history interactions rather than dismissing the family or claiming broad success.
+Final refit:468236 training rows, eras3–6524, raw target, seed17,86 trees from frozen prior counts[86,231,39].
+Later labels were used ONLY for this final training, not selection/stopping. No post-refit audit or platform
+score is claimed. Source prediction-path replay300 eras and native serialization exact; pkl_check51 eras
+passed,0.4134s slowest, exact pins/isolation; offline90 rows passed; final suite501 passed without skips.
+Packaging's pandas read-only array error was corrected by owned copying and a regression test (fd4e68a),
+before any bot fitting/upload; no model choice/count changed. Baseline01 remains the conservative local
+incumbent. The uploaded artifact is experimental, not a broadly qualified upgrade.
 
-The latest user explicitly authorized uploading a bot after checks, without another approval question. Follow
-`handoffs/06-research-bot-upload.md` (1d7e2b4). With no all-interval qualifier its frozen fallback is history18
-pure CPU expanding3, an EXPERIMENTAL artifact; baseline01 remains the conservative local incumbent. Preserve
-auto-submit OFF. Package through `scripts/package_research_bot.py`, run full pkl_check/offline checks, and
-upload once via `scripts/upload_checked.py` with its durable receipt. Final full-data refit is separately
-specified there; no later training label may choose a count or policy. A pending stored file is not an executed
-bot. No direct submissions, diagnostics uploads or staking. Commit/push this completed report before final
-refit, and commit/push the concrete checked manifest before uploading. Final artifact research06.pkl is built and checked (SHA50c1301f7360…,142069 bytes);300 source-era and native serialization replays exact, pkl_check51 eras passed, offline90 rows passed, final full suite501 passed. Packaging pandas copy correction fd4e68a is committed/pushed. No platform write has occurred yet.
+**Utility19 complete:** source53ad07a, resultsfc56cca, docs/UTILITY-HISTORY-19.md. All702 native models
+in468 groups verified, fixed raw-count donors and six CPU own-count replays exact; serialization error0.
+Both stages exit0; research readers remain<5925. GPU core400 transfer FIT0.01999896 vs0.01526832 (+30.98%),
+proxy0.03250764 vs0.01868202 (+74.01%). Three comparisons pass only viewed-transfer gates; ALL fail earlier
+and development. No all-interval qualifier, so handoff06's predeclared CPU3 experimental fallback was used.
+CPU/GPU label/count effects vary by period; do not retire the idea merely for its old rolling-window failures,
+or retrospectively swap to the biggest recent maximum. Full benchmark utility with long history remains
+unresolved because earliest rows have no honest benchmark teacher. All historical intervals are viewed.
 
 **Newest, history18:** raw training-history controls complete; source 158512a, protocol
 `docs/HISTORY-18.md`, reports `handoffs/results/history18-*`. This isolates short history as a material

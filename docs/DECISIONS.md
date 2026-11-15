@@ -80,6 +80,12 @@ checks. Keep the research experiments free of platform writes, upload once, pers
 and verify the platform result without repeating the upload on a wait failure. No staking or direct prediction
 submission is requested. Record exactly whether the selected model is a qualified improvement or an incumbent.
 
+Handoff06 completed the explicitly authorized one-model upload. History18 CPU3 is an experimental artifact,
+not a broad promotion; baseline01 remains preserved locally. The frozen count was used for a separate final
+full-training-data refit with no later-label selection or post-refit audit. Upload7d2159cf-c061-4148-8118-327f1c644011
+has matching remote hash/size/Python and sandbox_ready1 with no error. Auto-submit remains OFF; execution
+status pending. No live/direct submissions, diagnostics uploads or staking. Do not repeat the upload.
+
 Utility19 completes that investigation with matched long histories and raw-count donors. Its GPU core400
 has a strong viewed-transfer result (FIT0.01999896 vs0.01526832), but every candidate fails earlier and
 development gates. CPU/GPU label and count effects change by period; neither alone explains all failures.

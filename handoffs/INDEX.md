@@ -21,7 +21,7 @@ Status values: `draft` → `ready` → `running` → `reported` → `accepted` |
 | 03 | diag-upload-1 | **USER MUST APPROVE** — validation-diagnostics upload #1 of 5: the M1 single-LightGBM baseline (`bundle --run-id test01 --members lgbm_everest --p-b 0 --p-c 0` → `models/m1_lgbm.pkl`) | accepted | – | 56819a6 | upload 35bfe266: fit20 0.0189, unq 0.0039, inov 0.0141, sharpe 0.32, round score ~0.0368 → rank 89/150 (board median 0.0388); OOF→validation FIT ratio 0.79; offline simulation predicted 0.0383 (calibrated) |
 | 04 | full-run | M2–M6 model, reserved audit, local packaging and diagnostics file | accepted (technical) | – | c66d0cd, da2ff1c, a329cb3 | status ok; lgbm + ridge NNLS; audit FIT 0.0266 vs baseline 0.0308, p_pos 0.0412: no audit win; retain baseline; 47m21s pipeline |
 | 05 | diag-upload-2 | **USER MUST APPROVE** — optional calibration of the unchanged full01 challenger; no automatic promotion | ready (optional) | user decision | – | baseline remains the conservative candidate; audit result preserved; no upload performed |
-| 06 | refit-and-arm | **USER MUST APPROVE** — separately specified M7 full-data refit, lane upload and monitoring | draft (not written) | development protocol and user decision | – | not implied by handoff 04 or diagnostics #2 |
+| 06 | research-bot-upload | **USER MUST APPROVE — explicitly authorized** final frozen research artifact, full refit, portability and one model upload | reported | – | 260c7b1 (checked preparation); see 06-results | upload7d2159cf; remote SHA verified, sandbox_ready1; auto-submit OFF, execution pending; experimental, no broadly qualified gain |
 
 Fill in `result sha` with the commit(s) that added `handoffs/results/NN-*`. Fill in `verdict` with one line from
 the success criterion.

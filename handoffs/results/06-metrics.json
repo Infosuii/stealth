@@ -1,5 +1,5 @@
 {
-  "status": "ready_for_authorized_upload",
+  "status": "uploaded_hash_verified_server_smoke_passed_auto_submit_off",
   "model_name": "mandelbrot-bayesian-payoff",
   "model_id": "f06a70bf-ef8b-483d-b2a9-d4b9ef3e7043",
   "artifact": {
@@ -82,7 +82,8 @@
       "problems": []
     },
     "sandbox_sha256": null,
-    "upload_id": null
+    "upload_id": "7d2159cf-c061-4148-8118-327f1c644011",
+    "uploaded_at": "2026-11-15T19:15:57.469912+00:00"
   },
   "decision": {
     "source_run": "history18",
@@ -168,8 +169,41 @@
     "final_full_suite": "501 passed, no skips, 110.03 seconds"
   },
   "upload": {
-    "attempted": false,
-    "auto_submit": false
+    "attempted": true,
+    "write_attempts": 1,
+    "upload_id": "7d2159cf-c061-4148-8118-327f1c644011",
+    "sha256": "50c1301f73605c48067cbed6ee5789b341afe0c1e3cd3ea2cd5164901ae05a48",
+    "remote_status": {
+      "id": "7d2159cf-c061-4148-8118-327f1c644011",
+      "model_id": "f06a70bf-ef8b-483d-b2a9-d4b9ef3e7043",
+      "status": "pending",
+      "python_version": "3.11",
+      "sandbox_ready": 1,
+      "content_hash": "50c1301f73605c48067cbed6ee5789b341afe0c1e3cd3ea2cd5164901ae05a48",
+      "file_size_bytes": 142069,
+      "created_at": "2026-11-15T19:15:58.901037+00:00",
+      "last_run_at": null,
+      "last_run_status": null,
+      "error_message": "",
+      "lane_active": true,
+      "note": "This environment auto-runs uploaded models, but auto-run is switched OFF for this model, so this upload will stay 'pending'. Call set_auto_submit(enabled=true) to enrol it (REST: PATCH /api/v1/models/{model_id}/settings with {\"auto_submit\": 1}), or submit directly with submit_futures_predictions."
+    },
+    "stored_hash_verified": true,
+    "server_sandbox_ready": 1,
+    "execution_status": "pending",
+    "auto_submit": false,
+    "model_after": {
+      "id": "f06a70bf-ef8b-483d-b2a9-d4b9ef3e7043",
+      "name": "mandelbrot-bayesian-payoff",
+      "auto_submit": false,
+      "lane_active": true,
+      "lane_note": "This environment auto-runs uploaded models, but auto-run is switched OFF for this model, so this upload will stay 'pending'. Call set_auto_submit(enabled=true) to enrol it (REST: PATCH /api/v1/models/{model_id}/settings with {\"auto_submit\": 1}), or submit directly with submit_futures_predictions.",
+      "sandbox_ready": 1
+    },
+    "verified_at": "2026-11-15T19:18:15.888192+00:00",
+    "direct_predictions_submitted": false,
+    "diagnostics_uploaded": false,
+    "staking_changed": false
   },
   "source_commits": {
     "history_source": "158512a",
@@ -182,5 +216,6 @@
   "operator_issues": [
     "Initial final packaging stopped before fitting/writing the bot because pandas returned a read-only array. Added copy=True plus regression test, committed fd4e68a, then successfully rebuilt with the unchanged frozen decision/count.",
     "All earlier experiment launch, environment, support, target/count and history failures remain in their own reports."
-  ]
+  ],
+  "preparation_commit": "260c7b1"
 }
