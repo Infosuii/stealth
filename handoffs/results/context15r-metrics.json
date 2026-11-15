@@ -1266,5 +1266,19 @@
     ]
   },
   "promoted": false,
-  "reason": "viewed-data investigation; no prospective qualification"
+  "reason": "viewed-data investigation; no prospective qualification",
+  "support_audit": {
+    "prediction_state": {
+      "min_effective_eras": 146.73911948141864,
+      "min_required_support_ratio": 0.9999999999999994,
+      "tempered_dates": 48,
+      "calibrated_dates": 1645
+    },
+    "feature_state": {
+      "min_effective_eras": 146.66236758029385,
+      "min_required_support_ratio": 0.9999999999999996,
+      "tempered_dates": 48,
+      "calibrated_dates": 1645
+    }
+  }
 }

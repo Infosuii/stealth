@@ -3436,5 +3436,50 @@
   ],
   "promoted": false,
   "checkpoint_groups": 246,
-  "serialized_replay_max_error": 0.0
+  "serialized_replay_max_error": 0.0,
+  "baseline_history_diagnostics": {
+    "viewed_development": {
+      "new_fit": 0.027026297369744025,
+      "old_fit": 0.024291223716645244,
+      "paired": {
+        "diff_mean": 0.002735073653098784,
+        "diff_se": 0.002097322614968516,
+        "p_pos": 0.9132,
+        "ci90": [
+          -0.0005898233467328308,
+          0.0062745059236667
+        ],
+        "n_eras": 1300,
+        "p_value": 0.09959004099590041,
+        "n_blocks": 65,
+        "inference_valid": true
+      }
+    },
+    "viewed_transfer": {
+      "new_fit": 0.01526832264280302,
+      "old_fit": 0.014982747388714504,
+      "paired": {
+        "diff_mean": 0.000285575254088511,
+        "diff_se": 0.002473127073436302,
+        "p_pos": 0.5482,
+        "ci90": [
+          -0.0038591881932029605,
+          0.004303121531805548
+        ],
+        "n_eras": 585,
+        "p_value": 0.45615438456154384,
+        "n_blocks": 29,
+        "inference_valid": true
+      }
+    }
+  },
+  "data_status": {
+    "all_intervals_historical": true,
+    "earlier_interval_now_scored": true,
+    "later_intervals_previously_viewed": true,
+    "protected_eras_excluded": [
+      5925,
+      6524
+    ]
+  }
 }
