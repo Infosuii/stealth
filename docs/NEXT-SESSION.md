@@ -2,6 +2,21 @@
 
 ## Current follow-up (read before the historical checkpoint below)
 
+**Newest, count12:** matched stopping-count controls are complete. Source `d9f3f52`; protocol
+`docs/COUNT-12.md`; reports `handoffs/results/count12-*`. At the same 384 source eras, recent contiguous
+history FIT 0.02479900 beat spread history 0.02140618, while expanding all inner sources to 784 eras gave
+only 0.02177650 (ragged control 0.02267523). Time coverage matters at fixed era count; increasing older
+history alone did not repair the failure. Different observations/instrument counts and regime composition
+remain caveats. All source controls and 81 actual serialized boosters replayed exactly. No challenger
+qualified and no confirmation labels were loaded. Original rolling FIT 0.02506814 is still stronger than
+these isolated count repairs; do not silently promote a failed control or lower any previous gate.
+
+GPU ranking campaign 13 is being prepared independently of count12's scores: RMSE/QueryRMSE/YetiRank with
+the same explicit composite-proxy checkpoint selection, two fixed seeds and actual GPU fitting. CUDA is
+hidden in the default sandbox but visible with authorised execution outside it on the RTX 5070 Ti. The
+absolute CPU venv contains pinned CatBoost with GPU support; the torch GPU venv does not contain CatBoost.
+Do not claim a CPU fallback is GPU training. Native CPU inference/serialized replay is intentional.
+
 **Newest, temporal11 (2026-11-15):** fixed history/core/group consensus and multi-window stopping are complete.
 Protocol `docs/TEMPORAL-11.md`; results `handoffs/results/temporal11-*`; implementation `62212fb`. Strongest
 registered FIT: stable group consensus 0.02624674 vs equally refreshed baseline 0.02429122 (+8.05% observed),
